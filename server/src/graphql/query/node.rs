@@ -19,7 +19,7 @@ impl NodeQuery {
         Ok(match id {
             Id::Workspace(name) => ctx
                 .service::<KubimoWorkspace>()?
-                .get(&name)
+                .get_opt(&name)
                 .await?
                 .map(|workspace| Node::Workspace(workspace.into())),
         })

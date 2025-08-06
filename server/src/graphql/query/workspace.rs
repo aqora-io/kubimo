@@ -9,28 +9,45 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct Workspace(KubimoWorkspace);
 
+impl Workspace {
+    #[inline]
+    pub fn inner(&self) -> &KubimoWorkspace {
+        &self.0
+    }
+
+    pub fn name(&self) -> Result<&str> {
+        Ok(self
+            .inner()
+            .metadata
+            .name
+            .as_ref()
+            .ok_or_else(|| "Workspace ID not found".to_string())?)
+    }
+}
+
 impl From<KubimoWorkspace> for Workspace {
     fn from(workspace: KubimoWorkspace) -> Self {
         Workspace(workspace)
     }
 }
 
-impl From<Workspace> for KubimoWorkspace {
-    fn from(workspace: Workspace) -> Self {
-        workspace.0
-    }
-}
-
 #[Object]
 impl Workspace {
     pub async fn id(&self) -> Result<Id> {
-        Ok(Id::Workspace(
-            self.0
-                .metadata
-                .name
-                .clone()
-                .ok_or_else(|| "Workspace ID not found".to_string())?,
-        ))
+        Ok(Id::Workspace(self.name()?.into()))
+    }
+
+    pub async fn storage(&self) -> &str {
+        &self.inner().spec.storage.0
+    }
+
+    pub async fn reconciliation_error(&self, ctx: &Context<'_>) -> Result<Option<String>> {
+        Ok(ctx
+            .service::<KubimoWorkspace>()?
+            .get_status(self.name()?)
+            .await?
+            .and_then(|status| status.reconciliation_error)
+            .map(|err| err.message))
     }
 }
 

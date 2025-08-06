@@ -1,16 +1,12 @@
 use std::fmt;
 use std::marker::PhantomData;
 
-use kube::core::{NamespaceResourceScope, Resource, object::HasSpec};
+use kube::core::{NamespaceResourceScope, Resource, object::HasStatus};
 use serde::{de, ser};
 
-use crate::{config::Config, id::gen_name};
+use crate::config::Config;
 
 pub use kube::api::ListParams;
-
-pub trait ResourceFactory: HasSpec {
-    fn new(name: &str, spec: Self::Spec) -> Self;
-}
 
 pub struct Service<'a, T> {
     client: &'a kube::Client,
@@ -18,10 +14,19 @@ pub struct Service<'a, T> {
     resource: PhantomData<T>,
 }
 
+impl<'a, T> Service<'a, T> {
+    pub fn new(client: &'a kube::Client, config: &'a Config) -> Self {
+        Self {
+            client,
+            config,
+            resource: PhantomData,
+        }
+    }
+}
+
 impl<'a, T> Service<'a, T>
 where
     T: Resource<Scope = NamespaceResourceScope>
-        + ResourceFactory
         + ser::Serialize
         + de::DeserializeOwned
         + fmt::Debug
@@ -32,28 +37,48 @@ where
         kube::Api::<T>::default_namespaced(self.client.clone())
     }
 
-    pub async fn get(&self, name: &str) -> kube::Result<Option<T>> {
-        match self.api().get(name).await {
-            Ok(item) => Ok(Some(item)),
-            Err(kube::Error::Api(e)) => {
-                if matches!(e.code, 404) {
-                    Ok(None)
-                } else {
-                    Err(kube::Error::Api(e))
-                }
-            }
-            Err(e) => Err(e),
-        }
+    pub async fn get(&self, name: &str) -> kube::Result<T> {
+        self.api().get(name).await
     }
 
-    pub async fn create(&self, spec: <T as HasSpec>::Spec) -> kube::Result<T> {
+    pub async fn get_opt(&self, name: &str) -> kube::Result<Option<T>> {
+        self.api().get_opt(name).await
+    }
+
+    pub async fn create(&self, item: &T) -> kube::Result<T> {
         self.api()
             .create(
                 &kube::api::PostParams {
                     field_manager: Some(self.config.name.clone()),
                     ..Default::default()
                 },
-                &T::new(&gen_name(self.config.resource_name_len), spec),
+                item,
+            )
+            .await
+    }
+
+    pub async fn update(&self, name: &str, item: &T) -> kube::Result<T> {
+        self.api()
+            .patch(
+                name,
+                &kube::api::PatchParams {
+                    field_manager: Some(self.config.name.clone()),
+                    ..Default::default()
+                },
+                &kube::api::Patch::Merge(item),
+            )
+            .await
+    }
+
+    pub async fn patch(&self, name: &str, item: &T) -> kube::Result<T> {
+        self.api()
+            .patch(
+                name,
+                &kube::api::PatchParams {
+                    field_manager: Some(self.config.name.clone()),
+                    ..Default::default()
+                },
+                &kube::api::Patch::Apply(item),
             )
             .await
     }
@@ -68,6 +93,37 @@ where
             .delete(name, &kube::api::DeleteParams::default())
             .await?
             .left())
+    }
+}
+
+impl<'a, T> Service<'a, T>
+where
+    T: Resource<Scope = NamespaceResourceScope>
+        + HasStatus
+        + ser::Serialize
+        + de::DeserializeOwned
+        + fmt::Debug
+        + Clone,
+    <T as Resource>::DynamicType: Default,
+    <T as HasStatus>::Status: ser::Serialize + de::DeserializeOwned + fmt::Debug + Clone,
+{
+    pub async fn get_status(&self, name: &str) -> kube::Result<Option<T::Status>> {
+        Ok(self.api().get_status(name).await?.status().cloned())
+    }
+    pub async fn patch_status(&self, name: &str, item: &T::Status) -> kube::Result<T> {
+        let status = serde_json::json!({
+            "status": item
+        });
+        self.api()
+            .patch_status(
+                name,
+                &kube::api::PatchParams {
+                    field_manager: Some(self.config.name.clone()),
+                    ..Default::default()
+                },
+                &kube::api::Patch::Merge(&status),
+            )
+            .await
     }
 }
 
@@ -111,13 +167,15 @@ where
 }
 
 pub trait ContextServiceExt<'a> {
-    fn service<T>(&self) -> async_graphql::Result<Service<'a, T>>;
+    type Error;
+    fn service<T>(&self) -> Result<Service<'a, T>, Self::Error>;
 }
 
 impl<'a, T> ContextServiceExt<'a> for T
 where
     T: async_graphql::context::DataContext<'a>,
 {
+    type Error = async_graphql::Error;
     fn service<U>(&self) -> async_graphql::Result<Service<'a, U>> {
         let client = self.data::<kube::Client>()?;
         let config = self.data::<Config>()?;

@@ -1,4 +1,5 @@
 mod config;
+pub mod controller;
 pub mod crd;
 mod graphql;
 mod id;

@@ -1,13 +1,51 @@
+use std::time::Duration;
+
 use async_graphql::{extensions::Tracing, http::GraphiQLSource};
 use async_graphql_axum::GraphQL;
 use axum::{Router, response::Html, routing::get};
-use tower_http::trace::TraceLayer;
+use futures::prelude::*;
+use tower_http::{BoxError, trace::TraceLayer};
 use tracing_subscriber::prelude::*;
 
-use kubimo_server::{Config, Schema, crd, kube_http};
+use kubimo_server::{Config, Schema, controller, crd, kube_http};
 
 lazy_static::lazy_static! {
     static ref GraphiQLHtml: Html<String> = Html(GraphiQLSource::build().endpoint("/").finish());
+}
+
+async fn trace_controller<T, E>(result: controller::context::ControllerResult<T, E>)
+where
+    T: kube::Resource + 'static,
+    E: std::error::Error + 'static,
+{
+    match result {
+        Ok((object_ref, action)) => {
+            tracing::info!(
+                "Controller action: {:?}, object: {}",
+                action,
+                object_ref.name,
+            );
+        }
+        Err(e) => {
+            tracing::error!("Controller error: {}", e);
+        }
+    }
+}
+
+async fn shutdown_signal(service: &'static str) {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to listen for shutdown signal");
+    tracing::info!("Received shutdown signal, shutting down {service}...");
+}
+
+async fn shutdown_timeout(timeout: Duration) -> Result<(), BoxError> {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to listen for shutdown signal");
+    tokio::time::sleep(timeout).await;
+    tracing::warn!("Shutdown timeout reached, shutting down...");
+    Err(BoxError::from("Shutdown timeout reached, shutting down"))
 }
 
 #[tokio::main]
@@ -40,12 +78,34 @@ async fn main() {
         )
         .layer(TraceLayer::new_for_http());
 
-    tracing::info!("Applying CRDs");
-    crd::apply_all(&kube_client).await.unwrap();
+    let controller_context =
+        controller::context::ControllerContext::new(kube_client.clone(), server_config.clone());
+    let workspace_controller = controller::workspace::run(
+        controller_context.clone(),
+        controller::workspace::controller(&controller_context)
+            .graceful_shutdown_on(shutdown_signal("workspace_controller")),
+    )
+    .for_each_concurrent(None, trace_controller);
 
     tracing::info!("Starting at {}:{}", server_config.host, server_config.port);
     let listener = tokio::net::TcpListener::bind((server_config.host, server_config.port))
         .await
         .unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal("server"))
+        .into_future();
+
+    tracing::info!("Applying CRDs");
+    crd::apply_all(&kube_client).await.unwrap();
+
+    futures::future::try_select(
+        shutdown_timeout(Duration::from_secs(60)).boxed(),
+        futures::future::try_join_all([
+            server.map_err(BoxError::from).boxed(),
+            workspace_controller.map(|_| Ok(())).boxed(),
+        ]),
+    )
+    .await
+    .map_err(|err| err.factor_first().0)
+    .unwrap();
 }
