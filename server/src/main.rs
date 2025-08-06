@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_graphql::{extensions::Tracing, http::GraphiQLSource};
-use async_graphql_axum::GraphQL;
+use async_graphql_axum::{GraphQL, GraphQLSubscription};
 use axum::{Router, response::Html, routing::get};
 use futures::prelude::*;
 use tower_http::{BoxError, trace::TraceLayer};
@@ -10,26 +10,15 @@ use tracing_subscriber::prelude::*;
 use kubimo_server::{Config, Schema, controller, crd, kube_http};
 
 lazy_static::lazy_static! {
-    static ref GraphiQLHtml: Html<String> = Html(GraphiQLSource::build().endpoint("/").finish());
+    static ref GraphiQLHtml: Html<String> = Html(GraphiQLSource::build().endpoint("/")
+        .subscription_endpoint("/ws")
+        .finish());
 }
 
-async fn trace_controller<T, E>(result: controller::context::ControllerResult<T, E>)
-where
-    T: kube::Resource + 'static,
-    E: std::error::Error + 'static,
-{
-    match result {
-        Ok((object_ref, action)) => {
-            tracing::info!(
-                "Controller action: {:?}, object: {}",
-                action,
-                object_ref.name,
-            );
-        }
-        Err(e) => {
-            tracing::error!("Controller error: {}", e);
-        }
-    }
+async fn wait_stream<'a>(stream: impl Stream + Send + 'a) {
+    stream
+        .for_each_concurrent(None, |_| futures::future::ready(()))
+        .await
 }
 
 async fn shutdown_signal(service: &'static str) {
@@ -74,8 +63,9 @@ async fn main() {
     let app = Router::new()
         .route(
             "/",
-            get(|| async { GraphiQLHtml.clone() }).post_service(GraphQL::new(schema)),
+            get(|| async { GraphiQLHtml.clone() }).post_service(GraphQL::new(schema.clone())),
         )
+        .route_service("/ws", GraphQLSubscription::new(schema))
         .layer(TraceLayer::new_for_http());
 
     let controller_context =
@@ -84,8 +74,7 @@ async fn main() {
         controller_context.clone(),
         controller::workspace::controller(&controller_context)
             .graceful_shutdown_on(shutdown_signal("workspace_controller")),
-    )
-    .for_each_concurrent(None, trace_controller);
+    );
 
     tracing::info!("Starting at {}:{}", server_config.host, server_config.port);
     let listener = tokio::net::TcpListener::bind((server_config.host, server_config.port))
@@ -102,7 +91,7 @@ async fn main() {
         shutdown_timeout(Duration::from_secs(60)).boxed(),
         futures::future::try_join_all([
             server.map_err(BoxError::from).boxed(),
-            workspace_controller.map(|_| Ok(())).boxed(),
+            wait_stream(workspace_controller).map(|_| Ok(())).boxed(),
         ]),
     )
     .await

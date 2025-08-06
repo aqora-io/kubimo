@@ -1,6 +1,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 
+use futures::Stream;
 use kube::core::{NamespaceResourceScope, Resource, object::HasStatus};
 use serde::{de, ser};
 
@@ -30,7 +31,9 @@ where
         + ser::Serialize
         + de::DeserializeOwned
         + fmt::Debug
-        + Clone,
+        + Send
+        + Clone
+        + 'static,
     <T as Resource>::DynamicType: Default,
 {
     fn api(&self) -> kube::Api<T> {
@@ -83,34 +86,11 @@ where
             .await
     }
 
-    pub async fn list(&self, options: &ListParams) -> kube::Result<kube::api::ObjectList<T>> {
-        self.api().list(options).await
-    }
-
-    pub async fn delete(&self, name: &str) -> kube::Result<Option<T>> {
-        Ok(self
-            .api()
-            .delete(name, &kube::api::DeleteParams::default())
-            .await?
-            .left())
-    }
-}
-
-impl<'a, T> Service<'a, T>
-where
-    T: Resource<Scope = NamespaceResourceScope>
-        + HasStatus
-        + ser::Serialize
-        + de::DeserializeOwned
-        + fmt::Debug
-        + Clone,
-    <T as Resource>::DynamicType: Default,
-    <T as HasStatus>::Status: ser::Serialize + de::DeserializeOwned + fmt::Debug + Clone,
-{
-    pub async fn get_status(&self, name: &str) -> kube::Result<Option<T::Status>> {
-        Ok(self.api().get_status(name).await?.status().cloned())
-    }
-    pub async fn patch_status(&self, name: &str, item: &T::Status) -> kube::Result<T> {
+    pub async fn patch_status(&self, name: &str, item: &T::Status) -> kube::Result<T>
+    where
+        T: HasStatus,
+        <T as HasStatus>::Status: ser::Serialize + de::DeserializeOwned + fmt::Debug + Clone,
+    {
         let status = serde_json::json!({
             "status": item
         });
@@ -124,6 +104,30 @@ where
                 &kube::api::Patch::Merge(&status),
             )
             .await
+    }
+
+    pub async fn list(&self, options: &ListParams) -> kube::Result<kube::api::ObjectList<T>> {
+        self.api().list(options).await
+    }
+
+    pub fn watch_one(
+        &self,
+        name: &str,
+    ) -> impl Stream<Item = kube::runtime::watcher::Result<kube::runtime::watcher::Event<T>>>
+    + 'static
+    + use<T> {
+        kube::runtime::watcher(
+            self.api(),
+            kube::runtime::watcher::Config::default().fields(&format!("metadata.name={name}")),
+        )
+    }
+
+    pub async fn delete(&self, name: &str) -> kube::Result<Option<T>> {
+        Ok(self
+            .api()
+            .delete(name, &kube::api::DeleteParams::default())
+            .await?
+            .left())
     }
 }
 

@@ -10,6 +10,12 @@ pub enum Node {
     Workspace(Workspace),
 }
 
+impl From<KubimoWorkspace> for Node {
+    fn from(workspace: KubimoWorkspace) -> Self {
+        Node::Workspace(workspace.into())
+    }
+}
+
 #[derive(Default)]
 pub struct NodeQuery;
 

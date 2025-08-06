@@ -41,13 +41,12 @@ impl Workspace {
         &self.inner().spec.storage.0
     }
 
-    pub async fn reconciliation_error(&self, ctx: &Context<'_>) -> Result<Option<String>> {
-        Ok(ctx
-            .service::<KubimoWorkspace>()?
-            .get_status(self.name()?)
-            .await?
-            .and_then(|status| status.reconciliation_error)
-            .map(|err| err.message))
+    pub async fn reconciliation_error(&self) -> Option<&str> {
+        self.inner()
+            .status
+            .as_ref()
+            .and_then(|status| status.reconciliation_error.as_ref())
+            .map(|err| err.message.as_str())
     }
 }
 
