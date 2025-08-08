@@ -1,0 +1,1 @@
+self.spec.workspace == oldSelf.spec.workspace

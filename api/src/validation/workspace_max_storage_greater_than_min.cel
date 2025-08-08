@@ -1,0 +1,3 @@
+!has(self.spec.maxStorage) ||
+!has(self.spec.minStorage) ||
+quantity(self.spec.maxStorage).isGreaterThan(quantity(self.spec.minStorage))

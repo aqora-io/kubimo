@@ -1,5 +1,5 @@
 [workspace]
 
 resolver = "3"
-members = ["server", "packer"]
-default-members = ["server"]
+members = ["controller", "api", "packer"]
+default-members = ["controller"]

@@ -1,0 +1,3 @@
+!has(self.spec.maxCpu) ||
+!has(self.spec.minCpu) ||
+quantity(self.spec.maxCpu).isGreaterThan(quantity(self.spec.minCpu))

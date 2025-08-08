@@ -1,0 +1,3 @@
+!has(self.spec.maxMemory) ||
+!has(self.spec.minMemory) ||
+quantity(self.spec.maxMemory).isGreaterThan(quantity(self.spec.minMemory))
