@@ -1,8 +1,9 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures::Stream;
-use kubimo::k8s_openapi::api::core::v1::{Container, Pod, PodSpec, ResourceRequirements};
+use kubimo::k8s_openapi::api::core::v1::{
+    Container, PersistentVolumeClaimVolumeSource, Pod, PodSpec, Volume, VolumeMount,
+};
 use kubimo::kube::api::ObjectMeta;
 use kubimo::kube::runtime::{
     Controller,
@@ -11,8 +12,10 @@ use kubimo::kube::runtime::{
 };
 use kubimo::{KubimoLabel, KubimoRunner, KubimoWorkspace, prelude::*};
 
+use crate::command::Command;
 use crate::context::Context;
 use crate::error::ControllerResult;
+use crate::resources::{ResourceRequirement, Resources};
 use crate::status::wrap_reconcile;
 
 type ReconcileError = FinalizerError<kubimo::Error>;
@@ -34,65 +37,48 @@ async fn reconcile(runner: Arc<KubimoRunner>, ctx: Arc<Context>) -> Result<Actio
 
 #[tracing::instrument(skip(ctx), ret, err)]
 async fn reconcile_apply(runner: Arc<KubimoRunner>, ctx: Arc<Context>) -> kubimo::Result<Action> {
-    let workspace = ctx
-        .api::<KubimoWorkspace>()
-        .get(runner.spec.workspace.as_ref())
-        .await?;
-
-    let bmors = ctx.api::<KubimoRunner>();
-    let mut runner = bmors.get(runner.name()?).await?;
-    let oref = workspace.static_controller_owner_ref()?;
     if !runner
-        .meta()
+        .metadata
         .owner_references
         .as_ref()
-        .map(|orefs| orefs.contains(&oref))
-        .unwrap_or(false)
+        .is_some_and(|orefs| {
+            orefs.iter().any(|oref| {
+                oref.controller.is_some_and(|yes| yes)
+                    && oref.kind == KubimoWorkspace::kind(&())
+                    && oref.name == runner.spec.workspace
+            })
+        })
     {
+        let workspace = ctx
+            .api::<KubimoWorkspace>()
+            .get(runner.spec.workspace.as_ref())
+            .await?;
+        let bmors = ctx.api::<KubimoRunner>();
+        let mut runner = bmors.get(runner.name()?).await?;
         runner
             .meta_mut()
             .owner_references
             .get_or_insert_default()
-            .push(oref);
-        runner = bmors.patch(&runner).await?;
+            .push(workspace.static_controller_owner_ref()?);
+        bmors.patch(&runner).await?;
     }
-
-    let name = runner.name()?;
-
-    let requests = if runner.spec.min_memory.is_some() || runner.spec.min_cpu.is_some() {
-        let mut requests = BTreeMap::default();
-        if let Some(min_memory) = runner.spec.min_memory.clone() {
-            requests.insert("memory".to_string(), min_memory.into());
-        }
-        if let Some(min_cpu) = runner.spec.min_cpu.clone() {
-            requests.insert("cpu".to_string(), min_cpu.into());
-        }
-        Some(requests)
-    } else {
-        None
+    let volume_mount = VolumeMount {
+        mount_path: "/workspace".to_string(),
+        name: runner.spec.workspace.clone(),
+        ..Default::default()
     };
-    let limits = if runner.spec.max_memory.is_some() || runner.spec.max_cpu.is_some() {
-        let mut limits = BTreeMap::default();
-        if let Some(max_memory) = runner.spec.max_memory.clone() {
-            limits.insert("memory".to_string(), max_memory.into());
-        }
-        if let Some(max_cpu) = runner.spec.max_cpu.clone() {
-            limits.insert("cpu".to_string(), max_cpu.into());
-        }
-        Some(limits)
-    } else {
-        None
-    };
-    let resources = if requests.is_some() || limits.is_some() {
-        Some(ResourceRequirements {
-            requests,
-            limits,
+    let resources = Resources {
+        requests: ResourceRequirement {
+            cpu: runner.spec.min_cpu.clone(),
+            memory: runner.spec.min_memory.clone(),
             ..Default::default()
-        })
-    } else {
-        None
+        },
+        limits: ResourceRequirement {
+            cpu: runner.spec.max_cpu.clone(),
+            memory: runner.spec.max_memory.clone(),
+            ..Default::default()
+        },
     };
-
     let pod = Pod {
         metadata: ObjectMeta {
             name: runner.metadata.name.clone(),
@@ -102,17 +88,29 @@ async fn reconcile_apply(runner: Arc<KubimoRunner>, ctx: Arc<Context>) -> kubimo
         },
         spec: Some(PodSpec {
             containers: vec![Container {
-                name: format!("{name}-runner"),
+                name: format!("{}-runner", runner.name()?),
                 image: Some(ctx.config.marimo_base_image_name.clone()),
-                resources,
-                command: Some(
-                    ["tail", "-f", "/dev/null"]
-                        .into_iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                ),
+                resources: resources.clone().into(),
+                volume_mounts: Some(vec![volume_mount.clone()]),
+                command: Some(Command::fmt(["tail", "-f", "/dev/null"])),
                 ..Default::default()
             }],
+            init_containers: Some(vec![Container {
+                name: format!("{}-init", runner.name()?),
+                image: Some(ctx.config.marimo_init_image_name.clone()),
+                resources: Some(resources.clone().into()),
+                volume_mounts: Some(vec![volume_mount.clone()]),
+                command: Some(Command::fmt(["sh", "/setup/init.sh"])),
+                ..Default::default()
+            }]),
+            volumes: Some(vec![Volume {
+                name: runner.spec.workspace.clone(),
+                persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                    claim_name: runner.spec.workspace.clone(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
             ..Default::default()
         }),
         ..Default::default()

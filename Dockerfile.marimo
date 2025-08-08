@@ -1,5 +1,6 @@
 FROM python:3.10-slim-bookworm AS base
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+WORKDIR /workspace
 
 FROM base AS init
 COPY setup /setup

@@ -71,7 +71,7 @@ pub struct KubimoRunnerSpec {
     pub workspace: String,
     pub min_memory: Option<Quantity<StorageUnit>>,
     pub max_memory: Option<Quantity<StorageUnit>>,
-    pub min_cpu: Option<Quantity<StorageUnit>>,
+    pub min_cpu: Option<Quantity<CpuUnit>>,
     pub max_cpu: Option<Quantity<CpuUnit>>,
 }
 

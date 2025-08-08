@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use futures::Stream;
-use kubimo::k8s_openapi::api::core::v1::{
-    PersistentVolumeClaim, PersistentVolumeClaimSpec, VolumeResourceRequirements,
-};
+use kubimo::k8s_openapi::api::core::v1::{PersistentVolumeClaim, PersistentVolumeClaimSpec};
 use kubimo::kube::{
     api::ObjectMeta,
     runtime::{
@@ -16,6 +14,7 @@ use kubimo::{KubimoLabel, KubimoWorkspace, prelude::*};
 
 use crate::context::Context;
 use crate::error::ControllerResult;
+use crate::resources::{ResourceRequirement, Resources};
 use crate::status::wrap_reconcile;
 
 type ReconcileError = FinalizerError<kubimo::Error>;
@@ -52,14 +51,17 @@ async fn reconcile_apply(
         },
         spec: Some(PersistentVolumeClaimSpec {
             access_modes: Some(vec!["ReadWriteMany".to_string()]),
-            resources: Some(VolumeResourceRequirements {
-                requests: workspace.spec.min_storage.clone().map(|storage| {
-                    (std::iter::once(("storage".to_string(), storage.into()))).collect()
-                }),
-                limits: workspace.spec.max_storage.clone().map(|storage| {
-                    (std::iter::once(("storage".to_string(), storage.into()))).collect()
-                }),
-            }),
+            resources: Resources {
+                requests: ResourceRequirement {
+                    storage: workspace.spec.min_storage.clone(),
+                    ..Default::default()
+                },
+                limits: ResourceRequirement {
+                    storage: workspace.spec.max_storage.clone(),
+                    ..Default::default()
+                },
+            }
+            .into(),
             ..Default::default()
         }),
         ..Default::default()

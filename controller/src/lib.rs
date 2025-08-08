@@ -1,7 +1,9 @@
+mod command;
 mod config;
 mod context;
 pub mod controllers;
 mod error;
+mod resources;
 mod status;
 mod utils;
 
