@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use futures::Stream;
 use kubimo::k8s_openapi::api::core::v1::{
-    Container, PersistentVolumeClaimVolumeSource, Pod, PodSpec, Volume, VolumeMount,
+    Container, ContainerPort, PersistentVolumeClaimVolumeSource, Pod, PodSpec, Probe,
+    TCPSocketAction, Volume, VolumeMount,
 };
+use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
 use kubimo::kube::runtime::{
     Controller,
@@ -12,7 +14,7 @@ use kubimo::kube::runtime::{
 };
 use kubimo::{KubimoLabel, KubimoRunner, KubimoWorkspace, prelude::*};
 
-use crate::command::Command;
+use crate::command::cmd;
 use crate::context::Context;
 use crate::error::ControllerResult;
 use crate::resources::{ResourceRequirement, Resources};
@@ -79,6 +81,8 @@ async fn reconcile_apply(runner: Arc<KubimoRunner>, ctx: Arc<Context>) -> kubimo
             ..Default::default()
         },
     };
+    const PORT: i32 = 3000;
+    const PORT_NAME: &str = "marimo";
     let pod = Pod {
         metadata: ObjectMeta {
             name: runner.metadata.name.clone(),
@@ -92,7 +96,30 @@ async fn reconcile_apply(runner: Arc<KubimoRunner>, ctx: Arc<Context>) -> kubimo
                 image: Some(ctx.config.marimo_base_image_name.clone()),
                 resources: resources.clone().into(),
                 volume_mounts: Some(vec![volume_mount.clone()]),
-                command: Some(Command::fmt(["tail", "-f", "/dev/null"])),
+                ports: Some(vec![ContainerPort {
+                    container_port: PORT,
+                    name: Some(PORT_NAME.to_string()),
+                    ..Default::default()
+                }]),
+                liveness_probe: Some(Probe {
+                    tcp_socket: Some(TCPSocketAction {
+                        port: IntOrString::Int(PORT),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                command: Some(cmd![
+                    "uv",
+                    "run",
+                    "marimo",
+                    "edit",
+                    "--headless",
+                    "--host=0.0.0.0",
+                    "--port={PORT}",
+                    "--allow-origins='*'",
+                    "--no-token",
+                    "--skip-update-check",
+                ]),
                 ..Default::default()
             }],
             init_containers: Some(vec![Container {
@@ -100,7 +127,7 @@ async fn reconcile_apply(runner: Arc<KubimoRunner>, ctx: Arc<Context>) -> kubimo
                 image: Some(ctx.config.marimo_init_image_name.clone()),
                 resources: Some(resources.clone().into()),
                 volume_mounts: Some(vec![volume_mount.clone()]),
-                command: Some(Command::fmt(["sh", "/setup/init.sh"])),
+                command: Some(cmd!["sh", "/setup/init.sh"]),
                 ..Default::default()
             }]),
             volumes: Some(vec![Volume {
