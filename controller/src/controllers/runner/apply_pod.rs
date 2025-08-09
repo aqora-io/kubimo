@@ -35,7 +35,7 @@ impl RunnerReconciler {
                 ..Default::default()
             },
         };
-        let port = Self::PORT;
+        let ingress_path = self.ingress_path(runner)?;
         let pod = Pod {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
@@ -51,13 +51,13 @@ impl RunnerReconciler {
                     resources: resources.clone().into(),
                     volume_mounts: Some(vec![volume_mount.clone()]),
                     ports: Some(vec![ContainerPort {
-                        container_port: port,
+                        container_port: 80,
                         name: Some("marimo".to_string()),
                         ..Default::default()
                     }]),
                     liveness_probe: Some(Probe {
                         tcp_socket: Some(TCPSocketAction {
-                            port: IntOrString::Int(port),
+                            port: IntOrString::Int(80),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -66,10 +66,14 @@ impl RunnerReconciler {
                         "uv",
                         "run",
                         "marimo",
+                        "--log-level=info",
+                        "--yes",
                         "edit",
                         "--headless",
+                        "--watch",
                         "--host=0.0.0.0",
-                        "--port={port}",
+                        "--port=80",
+                        "--base-url={ingress_path}",
                         "--allow-origins='*'",
                         "--no-token",
                         "--skip-update-check",

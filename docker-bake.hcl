@@ -19,7 +19,7 @@ group "default" {
 }
 
 target "marimo" {
-  dockerfile = "Dockerfile.marimo"
+  dockerfile = "docker/Dockerfile.marimo"
   context = "."
 }
 

@@ -23,7 +23,7 @@ impl RunnerReconciler {
                 selector: Some(self.pod_labels(runner)?),
                 ports: Some(vec![ServicePort {
                     name: Some("marimo".to_string()),
-                    port: Self::PORT,
+                    port: 80,
                     ..Default::default()
                 }]),
                 ..Default::default()

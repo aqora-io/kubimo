@@ -1364,6 +1364,7 @@ dependencies = [
  "futures",
  "json-patch",
  "kubimo",
+ "percent-encoding",
  "serde",
  "serde_json",
  "thiserror 2.0.12",
