@@ -67,8 +67,8 @@ where
                 resource,
                 |event| async move {
                     match event {
-                        Event::Apply(r) => reconciler.apply(r, ctx.clone()).await,
-                        Event::Cleanup(r) => reconciler.cleanup(r, ctx).await,
+                        Event::Apply(r) => reconciler.apply(&ctx, &r).await,
+                        Event::Cleanup(r) => reconciler.cleanup(&ctx, &r).await,
                     }
                 },
             )

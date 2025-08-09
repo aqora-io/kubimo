@@ -11,20 +11,17 @@ use crate::backoff::{BackoffError, DefaultBackoffLayer};
 use crate::context::Context;
 use crate::service::{Finalizer, FinalizerError, reconcile};
 
+#[async_trait::async_trait]
 pub trait Reconciler {
     type Resource;
     type Error;
-    fn apply(
+    async fn apply(&self, ctx: &Context, resource: &Self::Resource) -> Result<Action, Self::Error>;
+    async fn cleanup(
         &self,
-        resource: Arc<Self::Resource>,
-        ctx: Arc<Context>,
-    ) -> BoxFuture<'static, Result<Action, Self::Error>>;
-    fn cleanup(
-        &self,
-        _resource: Arc<Self::Resource>,
-        _ctx: Arc<Context>,
-    ) -> BoxFuture<'static, Result<Action, Self::Error>> {
-        async move { Ok(Action::await_change()) }.boxed()
+        _ctx: &Context,
+        _resource: &Self::Resource,
+    ) -> Result<Action, Self::Error> {
+        Ok(Action::await_change())
     }
 }
 
