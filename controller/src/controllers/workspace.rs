@@ -22,7 +22,6 @@ impl Reconciler for WorkspaceReconciler {
     type Resource = KubimoWorkspace;
     type Error = kubimo::Error;
 
-    #[tracing::instrument(skip(ctx), ret, err)]
     async fn apply(
         &self,
         ctx: &Context,

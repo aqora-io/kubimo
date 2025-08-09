@@ -33,7 +33,6 @@ impl ObjectMetaExt for kube::api::ObjectMeta {
             generate_name: self.generate_name.clone(),
             annotations: self.annotations.clone(),
             labels: self.labels.clone(),
-            finalizers: self.finalizers.clone(),
             owner_references: self.owner_references.clone(),
             ..Default::default()
         }

@@ -10,6 +10,7 @@ use tower::{Service, ServiceBuilder};
 use crate::backoff::{BackoffError, DefaultBackoffLayer};
 use crate::context::Context;
 use crate::service::{Finalizer, FinalizerError, reconcile};
+use crate::tracing::TraceLayer;
 
 #[async_trait::async_trait]
 pub trait Reconciler {
@@ -56,6 +57,7 @@ pub trait ReconcilerExt: Reconciler {
         Self::Error: std::error::Error + Send + 'static,
     {
         ServiceBuilder::new()
+            .layer(TraceLayer)
             .layer(DefaultBackoffLayer::default())
             .service(Finalizer::new(name, self))
     }

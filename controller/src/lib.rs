@@ -7,6 +7,7 @@ mod error;
 mod reconciler;
 mod resources;
 mod service;
+mod tracing;
 mod utils;
 
 pub use config::Config;

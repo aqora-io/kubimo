@@ -13,7 +13,6 @@ use crate::resources::{ResourceRequirement, Resources};
 use super::RunnerReconciler;
 
 impl RunnerReconciler {
-    #[tracing::instrument(skip(ctx), ret, err)]
     pub(crate) async fn apply_pod(
         &self,
         ctx: &Context,
@@ -36,13 +35,13 @@ impl RunnerReconciler {
                 ..Default::default()
             },
         };
-        const PORT: i32 = 3000;
-        const PORT_NAME: &str = "marimo";
+        let port = Self::PORT;
         let pod = Pod {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
                 namespace: runner.metadata.namespace.clone(),
                 owner_references: Some(vec![runner.static_controller_owner_ref()?]),
+                labels: Some(self.pod_labels(runner)?),
                 ..Default::default()
             },
             spec: Some(PodSpec {
@@ -52,13 +51,13 @@ impl RunnerReconciler {
                     resources: resources.clone().into(),
                     volume_mounts: Some(vec![volume_mount.clone()]),
                     ports: Some(vec![ContainerPort {
-                        container_port: PORT,
-                        name: Some(PORT_NAME.to_string()),
+                        container_port: port,
+                        name: Some("marimo".to_string()),
                         ..Default::default()
                     }]),
                     liveness_probe: Some(Probe {
                         tcp_socket: Some(TCPSocketAction {
-                            port: IntOrString::Int(PORT),
+                            port: IntOrString::Int(port),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -70,7 +69,7 @@ impl RunnerReconciler {
                         "edit",
                         "--headless",
                         "--host=0.0.0.0",
-                        "--port={PORT}",
+                        "--port={port}",
                         "--allow-origins='*'",
                         "--no-token",
                         "--skip-update-check",
