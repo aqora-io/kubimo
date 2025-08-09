@@ -8,6 +8,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
+pub type StorageQuantity = Quantity<StorageUnit>;
+pub type CpuQuantity = Quantity<CpuUnit>;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Display, EnumString, JsonSchema)]
 pub enum StorageUnit {
     #[strum(serialize = "")]

@@ -26,8 +26,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     runner.spec.workspace = "new-workspace".to_string();
     assert!(bmor.patch(&runner).await.is_err());
 
-    // bmor.delete(runner.name()?).await?;
-    // bmows.delete(workspace.name()?).await?;
-
     Ok(())
 }

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::prelude::*;
@@ -15,7 +16,7 @@ async fn ctrl_c() {
 
 async fn shutdown_signal(service: &'static str) {
     ctrl_c().await;
-    tracing::info!("Received shutdown signal, shutting down {service}...");
+    tracing::info!("Received shutdown signal, shutting down {service} controller...");
 }
 
 async fn shutdown_timeout(timeout: Duration) -> Result<(), BoxError> {
@@ -40,7 +41,7 @@ async fn main() {
     }
     let client = builder.build().await.unwrap();
 
-    let ctx = Context::new(client.clone(), config);
+    let ctx = Arc::new(Context::new(client.clone(), config));
 
     tracing::info!("Patching CRDs...");
     client.patch_all_crds().await.unwrap();
@@ -48,9 +49,14 @@ async fn main() {
     tracing::info!("Starting controllers...");
     futures::future::try_select(
         futures::future::join_all([
-            controllers::workspace::run(ctx.clone(), shutdown_signal("workspace_controller"))
+            controllers::workspace::run(ctx.clone(), shutdown_signal("workspace"))
+                .await
+                .unwrap()
                 .wait(),
-            controllers::runner::run(ctx.clone(), shutdown_signal("workspace_runner")).wait(),
+            controllers::runner::run(ctx.clone(), shutdown_signal("runner"))
+                .await
+                .unwrap()
+                .wait(),
         ])
         .map(|_| Ok(())),
         shutdown_timeout(Duration::from_secs(60)).boxed(),

@@ -8,32 +8,23 @@ use crate::validation::{
     runner_workspace_immutable, workspace_max_storage_greater_than_min,
 };
 use crate::{
-    CpuUnit, Quantity, ResourceFactory, ResourceFactoryExt, ResourceNameExt, ResourceOwnerRefExt,
-    Result, StatusError, StorageUnit,
+    CpuQuantity, ResourceFactory, ResourceFactoryExt, ResourceNameExt, ResourceOwnerRefExt, Result,
+    StorageQuantity,
 };
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ReconciliationStatus {
-    pub reconciled: bool,
-    pub reconciliation_error: Option<StatusError>,
-}
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
     group = "aqora.io",
     version = "v1",
     kind = "KubimoWorkspace",
-    status = "ReconciliationStatus",
     shortname = "bmow",
-    selectable = ".status.reconciled",
     namespaced,
     validation = workspace_max_storage_greater_than_min(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KubimoWorkspaceSpec {
-    pub min_storage: Option<Quantity<StorageUnit>>,
-    pub max_storage: Option<Quantity<StorageUnit>>,
+    pub min_storage: Option<StorageQuantity>,
+    pub max_storage: Option<StorageQuantity>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]
@@ -42,8 +33,6 @@ pub enum KubimoWorkspaceField {
     Name,
     #[strum(serialize = "metadata.namespace")]
     Namespace,
-    #[strum(serialize = "status.reconciled")]
-    Reconciled,
 }
 
 impl ResourceFactory for KubimoWorkspace {
@@ -57,9 +46,7 @@ impl ResourceFactory for KubimoWorkspace {
     group = "aqora.io",
     version = "v1",
     kind = "KubimoRunner",
-    status = "ReconciliationStatus",
     shortname = "bmor",
-    selectable = ".status.reconciled",
     selectable = ".spec.workspace",
     namespaced,
     validation = runner_workspace_immutable(),
@@ -69,10 +56,10 @@ impl ResourceFactory for KubimoWorkspace {
 #[serde(rename_all = "camelCase")]
 pub struct KubimoRunnerSpec {
     pub workspace: String,
-    pub min_memory: Option<Quantity<StorageUnit>>,
-    pub max_memory: Option<Quantity<StorageUnit>>,
-    pub min_cpu: Option<Quantity<CpuUnit>>,
-    pub max_cpu: Option<Quantity<CpuUnit>>,
+    pub min_memory: Option<StorageQuantity>,
+    pub max_memory: Option<StorageQuantity>,
+    pub min_cpu: Option<CpuQuantity>,
+    pub max_cpu: Option<CpuQuantity>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]
@@ -81,8 +68,6 @@ pub enum KubimoRunnerField {
     Name,
     #[strum(serialize = "metadata.namespace")]
     Namespace,
-    #[strum(serialize = "status.reconciled")]
-    Reconciled,
     #[strum(serialize = "spec.workspace")]
     Workspace,
 }

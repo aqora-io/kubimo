@@ -1169,6 +1169,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-patch-macros"
+version = "0.1.0"
+
+[[package]]
 name = "json5"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1332,6 +1336,8 @@ dependencies = [
  "cel-interpreter",
  "futures",
  "hyper-util",
+ "json-patch",
+ "json-patch-macros",
  "k8s-openapi",
  "kube",
  "lazy_static",
@@ -1356,8 +1362,11 @@ dependencies = [
  "async-trait",
  "config",
  "futures",
+ "json-patch",
  "kubimo",
  "serde",
+ "serde_json",
+ "thiserror 2.0.12",
  "tokio",
  "tower",
  "tower-http",

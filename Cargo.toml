@@ -1,5 +1,5 @@
 [workspace]
 
 resolver = "3"
-members = ["controller", "api", "packer"]
+members = ["controller", "api", "packer", "json-patch-macros"]
 default-members = ["controller"]

@@ -1,41 +1,24 @@
 use std::sync::Arc;
 
-use futures::Stream;
+use futures::{
+    Stream,
+    future::{BoxFuture, FutureExt},
+};
 use kubimo::k8s_openapi::api::core::v1::{
     Container, ContainerPort, PersistentVolumeClaimVolumeSource, Pod, PodSpec, Probe,
     TCPSocketAction, Volume, VolumeMount,
 };
 use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
-use kubimo::kube::runtime::{
-    Controller,
-    controller::Action,
-    finalizer::{Error as FinalizerError, Event, finalizer},
-};
-use kubimo::{KubimoLabel, KubimoRunner, KubimoWorkspace, prelude::*};
+use kubimo::kube::runtime::{Controller, controller::Action};
+use kubimo::{KubimoRunner, KubimoWorkspace, json_patch_macros::*, prelude::*};
 
+use crate::backoff::default_error_policy;
 use crate::command::cmd;
 use crate::context::Context;
 use crate::error::ControllerResult;
+use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 use crate::resources::{ResourceRequirement, Resources};
-use crate::status::wrap_reconcile;
-
-type ReconcileError = FinalizerError<kubimo::Error>;
-
-async fn reconcile(runner: Arc<KubimoRunner>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
-    finalizer(
-        ctx.api::<KubimoRunner>().kube(),
-        &KubimoLabel::new("controller").to_string(),
-        runner,
-        |event| async move {
-            match event {
-                Event::Apply(runner) => wrap_reconcile(runner, ctx, reconcile_apply).await,
-                Event::Cleanup(_) => Ok(Action::await_change()),
-            }
-        },
-    )
-    .await
-}
 
 #[tracing::instrument(skip(ctx), ret, err)]
 async fn reconcile_apply(runner: Arc<KubimoRunner>, ctx: Arc<Context>) -> kubimo::Result<Action> {
@@ -55,14 +38,14 @@ async fn reconcile_apply(runner: Arc<KubimoRunner>, ctx: Arc<Context>) -> kubimo
             .api::<KubimoWorkspace>()
             .get(runner.spec.workspace.as_ref())
             .await?;
-        let bmors = ctx.api::<KubimoRunner>();
-        let mut runner = bmors.get(runner.name()?).await?;
-        runner
-            .meta_mut()
-            .owner_references
-            .get_or_insert_default()
-            .push(workspace.static_controller_owner_ref()?);
-        bmors.patch(&runner).await?;
+        let mut owner_refs = runner.metadata.owner_references.clone().unwrap_or_default();
+        owner_refs.push(workspace.static_controller_owner_ref()?);
+        ctx.api::<KubimoRunner>()
+            .patch_json(
+                runner.name()?,
+                patch![add!(["metadata", "ownerReferences"] => owner_refs)],
+            )
+            .await?;
     }
     let volume_mount = VolumeMount {
         mount_path: "/workspace".to_string(),
@@ -146,18 +129,35 @@ async fn reconcile_apply(runner: Arc<KubimoRunner>, ctx: Arc<Context>) -> kubimo
     Ok(Action::await_change())
 }
 
-fn error_policy(_object: Arc<KubimoRunner>, _error: &ReconcileError, _ctx: Arc<Context>) -> Action {
-    Action::await_change()
+struct RunnerReconciler;
+
+impl Reconciler for RunnerReconciler {
+    type Resource = KubimoRunner;
+    type Error = kubimo::Error;
+    fn apply(
+        &self,
+        runner: Arc<KubimoRunner>,
+        ctx: Arc<Context>,
+    ) -> BoxFuture<'static, Result<Action, Self::Error>> {
+        reconcile_apply(runner, ctx).boxed()
+    }
 }
 
-pub fn run(
+pub async fn run(
     ctx: Arc<Context>,
     shutdown_signal: impl Future<Output = ()> + Send + Sync + 'static,
-) -> impl Stream<Item = ControllerResult<KubimoRunner, ReconcileError>> {
+) -> Result<
+    impl Stream<Item = ControllerResult<KubimoRunner, ReconcileError<kubimo::Error>>>,
+    ReconcileError<kubimo::Error>,
+> {
     let bmors = ctx.api::<KubimoRunner>().kube().clone();
     let pods = ctx.api::<Pod>().kube().clone();
-    Controller::new(bmors, Default::default())
+    Ok(Controller::new(bmors, Default::default())
         .owns(pods, Default::default())
         .graceful_shutdown_on(shutdown_signal)
-        .run(reconcile, error_policy, ctx)
+        .run(
+            RunnerReconciler.reconcile("controller").await?,
+            default_error_policy,
+            ctx,
+        ))
 }

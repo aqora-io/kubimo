@@ -58,6 +58,14 @@ where
     }
 
     #[tracing::instrument(level = "debug", skip(self), ret, err)]
+    pub async fn patch_json(&self, name: &str, patch: json_patch::Patch) -> Result<T> {
+        Ok(self
+            .inner
+            .patch(name, &self.patch_params(), &Patch::<T>::Json(patch))
+            .await?)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), ret, err)]
     pub async fn get(&self, name: &str) -> Result<T> {
         Ok(self.inner.get(name).await?)
     }

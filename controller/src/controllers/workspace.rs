@@ -1,41 +1,21 @@
 use std::sync::Arc;
 
-use futures::Stream;
+use futures::{
+    Stream,
+    future::{BoxFuture, FutureExt},
+};
 use kubimo::k8s_openapi::api::core::v1::{PersistentVolumeClaim, PersistentVolumeClaimSpec};
 use kubimo::kube::{
     api::ObjectMeta,
-    runtime::{
-        Controller,
-        controller::Action,
-        finalizer::{Error as FinalizerError, Event, finalizer},
-    },
+    runtime::{Controller, controller::Action},
 };
-use kubimo::{KubimoLabel, KubimoWorkspace, prelude::*};
+use kubimo::{KubimoWorkspace, prelude::*};
 
+use crate::backoff::default_error_policy;
 use crate::context::Context;
 use crate::error::ControllerResult;
+use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 use crate::resources::{ResourceRequirement, Resources};
-use crate::status::wrap_reconcile;
-
-type ReconcileError = FinalizerError<kubimo::Error>;
-
-async fn reconcile(
-    workspace: Arc<KubimoWorkspace>,
-    ctx: Arc<Context>,
-) -> Result<Action, ReconcileError> {
-    finalizer(
-        ctx.api::<KubimoWorkspace>().kube(),
-        &KubimoLabel::new("controller").to_string(),
-        workspace,
-        |event| async move {
-            match event {
-                Event::Apply(workspace) => wrap_reconcile(workspace, ctx, reconcile_apply).await,
-                Event::Cleanup(_) => Ok(Action::await_change()),
-            }
-        },
-    )
-    .await
-}
 
 #[tracing::instrument(skip(ctx), ret, err)]
 async fn reconcile_apply(
@@ -73,22 +53,35 @@ async fn reconcile_apply(
     Ok(Action::await_change())
 }
 
-fn error_policy(
-    _object: Arc<KubimoWorkspace>,
-    _error: &ReconcileError,
-    _ctx: Arc<Context>,
-) -> Action {
-    Action::await_change()
+struct WorkspaceReconciler;
+
+impl Reconciler for WorkspaceReconciler {
+    type Resource = KubimoWorkspace;
+    type Error = kubimo::Error;
+    fn apply(
+        &self,
+        runner: Arc<KubimoWorkspace>,
+        ctx: Arc<Context>,
+    ) -> BoxFuture<'static, Result<Action, Self::Error>> {
+        reconcile_apply(runner, ctx).boxed()
+    }
 }
 
-pub fn run(
+pub async fn run(
     ctx: Arc<Context>,
     shutdown_signal: impl Future<Output = ()> + Send + Sync + 'static,
-) -> impl Stream<Item = ControllerResult<KubimoWorkspace, ReconcileError>> {
+) -> Result<
+    impl Stream<Item = ControllerResult<KubimoWorkspace, ReconcileError<kubimo::Error>>>,
+    ReconcileError<kubimo::Error>,
+> {
     let bmows = ctx.api::<KubimoWorkspace>().kube().clone();
     let pvc = ctx.api::<PersistentVolumeClaim>().kube().clone();
-    Controller::new(bmows, Default::default())
+    Ok(Controller::new(bmows, Default::default())
         .owns(pvc, Default::default())
         .graceful_shutdown_on(shutdown_signal)
-        .run(reconcile, error_policy, ctx)
+        .run(
+            WorkspaceReconciler.reconcile("controller").await?,
+            default_error_policy,
+            ctx,
+        ))
 }
