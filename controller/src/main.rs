@@ -46,7 +46,10 @@ async fn main() {
     tracing::info!("Patching CRDs...");
     client.patch_all_crds().await.unwrap();
 
-    tracing::info!("Starting controllers...");
+    tracing::info!(
+        "Processing events in {} namespace...",
+        client.kube().default_namespace()
+    );
     futures::future::try_select(
         futures::future::join_all([
             controllers::workspace::run(ctx.clone(), shutdown_signal("workspace"))

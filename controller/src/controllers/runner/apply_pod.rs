@@ -45,6 +45,9 @@ impl RunnerReconciler {
                 ..Default::default()
             },
             spec: Some(PodSpec {
+                runtime_class_name: Some("gvisor".to_string()),
+                automount_service_account_token: Some(false),
+                enable_service_links: Some(false),
                 containers: vec![Container {
                     name: format!("{}-runner", runner.name()?),
                     image: Some(ctx.config.marimo_base_image_name.clone()),

@@ -3,11 +3,7 @@ use kubimo::{prelude::*, *};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::builder()
-        .name("kubimo")
-        .namespace("kubimo")
-        .build()
-        .await?;
+    let client = Client::infer().await?;
 
     let bmows = client.api::<KubimoWorkspace>();
     let bmor = client.api::<KubimoRunner>();

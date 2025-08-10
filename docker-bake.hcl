@@ -1,9 +1,9 @@
 variable "VERSION" {
-  default = "test"
+  default = "dev"
 }
 
 variable "REGISTRY" {
-  default = "local"
+  default = ""
 }
 
 variable "MARIMO_BASE_NAME" {
@@ -30,7 +30,7 @@ target "marimo-base" {
   matrix = {
     version = split(",", VERSION)
   }
-  tags = [ "${REGISTRY}/${MARIMO_BASE_NAME}:${version}" ]
+  tags = [ trimprefix("${REGISTRY}/${MARIMO_BASE_NAME}:${version}", "/") ]
 }
 
 target "marimo-init" {
@@ -40,5 +40,5 @@ target "marimo-init" {
   matrix = {
     version = split(",", VERSION)
   }
-  tags = [ "${REGISTRY}/${MARIMO_INIT_NAME}:${version}" ]
+  tags = [ trimprefix("${REGISTRY}/${MARIMO_INIT_NAME}:${version}", "/") ]
 }
