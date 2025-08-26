@@ -3,7 +3,7 @@ variable "VERSION" {
 }
 
 variable "REGISTRY" {
-  default = ""
+  default = "local"
 }
 
 variable "MARIMO_BASE_NAME" {

@@ -1,9 +1,15 @@
 use kube::core::Rule;
 
-pub fn runner_workspace_immutable() -> Rule {
-    Rule::new(include_str!("./runner_workspace_immutable.cel"))
+pub fn runner_immutable_fields() -> Rule {
+    Rule::new(include_str!("./runner_immutable_fields.cel"))
         .message("workspace is immutable")
         .field_path(".spec.workspace")
+}
+
+pub fn runner_run_has_notebook() -> Rule {
+    Rule::new(include_str!("./runner_run_has_notebook.cel"))
+        .message("runner with run command must have notebook")
+        .field_path(".spec.notebook")
 }
 
 pub fn workspace_max_storage_greater_than_min() -> Rule {
@@ -37,6 +43,10 @@ mod tests {
 
     #[test]
     fn test_runner_cel_compiles() {
-        test_compiles(runner_workspace_immutable());
+        test_compiles(runner_immutable_fields());
+        test_compiles(runner_run_has_notebook());
+        test_compiles(workspace_max_storage_greater_than_min());
+        test_compiles(runner_max_memory_greater_than_min());
+        test_compiles(runner_max_cpu_greater_than_min());
     }
 }

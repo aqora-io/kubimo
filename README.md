@@ -5,21 +5,20 @@
 
 ## Example
 
-Make sure to have [minikube installed and running](https://minikube.sigs.k8s.io/docs/start). You also need to add the minikube registry to the list of insecure registries. You can find the minikube IP with `minikube ip` and add it to `/etc/docker/daemon.json` like so:
+Make sure to have [minikube installed and running](https://minikube.sigs.k8s.io/docs/start)
 
-```json
-{
-  "insecure-registries": ["<minikube ip>:5000"]
-}
-```
-
-To run the example run the following
+To run the controller run the following
 
 ```bash
 sh setup-minikube.sh # setup minikube
 export RUST_LOG=info # set log level
-cargo run --example runner # provision with a workspace and runner
 cargo run # run controller
+```
+
+To create an example runner run the example
+
+```bash
+cargo run --example runner
 ```
 
 You should be able to access it soon with `$(minikube ip)/<runner-name>`

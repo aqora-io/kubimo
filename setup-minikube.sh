@@ -1,3 +1,4 @@
+set -x
 # stop minikube if running
 minikube stop
 # start minikube with containerd
@@ -7,10 +8,11 @@ minikube start --container-runtime=containerd \
 minikube addons enable ingress
 # enable gvisor addon
 minikube addons enable gvisor
-# enable registry addon
-minikube addons enable registry
-# push images to minikube registry
-REGISTRY="$(minikube ip):5000" docker buildx bake --push
+# build images
+docker buildx bake
+# load images
+minikube image load local/kubimo-marimo-init:dev
+minikube image load local/kubimo-marimo-base:dev
 # use minikube context
 kubectl config use-context minikube
 # create kubimo namespace

@@ -22,8 +22,8 @@ async fn shutdown_signal(service: &'static str) {
 async fn shutdown_timeout(timeout: Duration) -> Result<(), BoxError> {
     ctrl_c().await;
     tokio::time::sleep(timeout).await;
-    tracing::warn!("Shutdown timeout reached, shutting down...");
-    Err(BoxError::from("Shutdown timeout reached, shutting down"))
+    tracing::warn!("Shutdown timeout reached, shutting down forcefully");
+    Err(BoxError::from("Shutdown timeout reached"))
 }
 
 #[tokio::main]

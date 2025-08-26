@@ -1,0 +1,3 @@
+self.spec.workspace == oldSelf.spec.workspace &&
+self.spec.command == oldSelf.spec.command &&
+(!has(self.spec.notebook) || self.spec.notebook == oldSelf.spec.notebook)

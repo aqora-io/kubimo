@@ -18,8 +18,8 @@ pub use kube;
 pub use api::Api;
 pub use client::{Client, ClientBuilder};
 pub use crd::{
-    KubimoRunner, KubimoRunnerField, KubimoRunnerSpec, KubimoWorkspace, KubimoWorkspaceField,
-    KubimoWorkspaceSpec,
+    KubimoRunner, KubimoRunnerCommand, KubimoRunnerField, KubimoRunnerSpec, KubimoWorkspace,
+    KubimoWorkspaceField, KubimoWorkspaceSpec,
 };
 pub use error::{ClientBuildError, Error, Result};
 pub use factory::{ResourceFactory, ResourceFactoryExt};

@@ -14,6 +14,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         }))
         .await?;
+
+    println!("Created workspace: {}", workspace.name()?);
+
     let runner = bmor
         .patch(&workspace.create_runner(Default::default())?)
         .await?;

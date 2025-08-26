@@ -5,11 +5,11 @@ fn default_manager_name() -> String {
 }
 
 fn default_marimo_base_image_name() -> String {
-    "localhost:5000/kubimo-marimo-base:dev".to_string()
+    "local/kubimo-marimo-base:dev".to_string()
 }
 
 fn default_marimo_init_image_name() -> String {
-    "localhost:5000/kubimo-marimo-init:dev".to_string()
+    "local/kubimo-marimo-init:dev".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

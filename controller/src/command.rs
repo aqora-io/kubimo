@@ -1,6 +1,6 @@
 macro_rules! cmd {
-    ($($part:literal),*$(,)?) => {
-        vec![$(format!($part)),*]
+    ($($part:expr),*$(,)?) => {
+        vec![$($part.to_string()),*]
     }
 }
 

@@ -4,7 +4,7 @@ use kubimo::k8s_openapi::api::core::v1::{
 };
 use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{KubimoRunner, prelude::*};
+use kubimo::{KubimoRunner, KubimoRunnerCommand, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
@@ -35,7 +35,32 @@ impl RunnerReconciler {
                 ..Default::default()
             },
         };
-        let ingress_path = self.ingress_path(runner)?;
+        let mut command = cmd![
+            "uv",
+            "run",
+            "marimo",
+            "--log-level=info",
+            "--yes",
+            runner.spec.command,
+            "--headless",
+            "--watch",
+            "--host=0.0.0.0",
+            "--port=80",
+            format!("--base-url={}", self.ingress_path(runner)?),
+            "--allow-origins='*'",
+            "--no-token",
+        ];
+        match runner.spec.command {
+            KubimoRunnerCommand::Edit => {
+                command.push("--skip-update-check".into());
+            }
+            KubimoRunnerCommand::Run => {
+                command.push("--include-code".into());
+            }
+        };
+        if let Some(notebook) = &runner.spec.notebook {
+            command.push(notebook.into());
+        }
         let pod = Pod {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
@@ -65,22 +90,7 @@ impl RunnerReconciler {
                         }),
                         ..Default::default()
                     }),
-                    command: Some(cmd![
-                        "uv",
-                        "run",
-                        "marimo",
-                        "--log-level=info",
-                        "--yes",
-                        "edit",
-                        "--headless",
-                        "--watch",
-                        "--host=0.0.0.0",
-                        "--port=80",
-                        "--base-url={ingress_path}",
-                        "--allow-origins='*'",
-                        "--no-token",
-                        "--skip-update-check",
-                    ]),
+                    command: Some(command),
                     ..Default::default()
                 }],
                 init_containers: Some(vec![Container {
