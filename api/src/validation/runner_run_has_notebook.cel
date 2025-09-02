@@ -1,1 +1,0 @@
-self.spec.command == "Edit" || has(self.spec.notebook)

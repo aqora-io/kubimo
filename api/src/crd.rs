@@ -1,5 +1,3 @@
-use std::fmt;
-
 use kube::{CustomResource, Resource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -7,7 +5,7 @@ use strum::Display;
 
 use crate::validation::{
     runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
-    runner_run_has_notebook, workspace_max_storage_greater_than_min,
+    workspace_max_storage_greater_than_min,
 };
 use crate::{
     CpuQuantity, ResourceFactory, ResourceFactoryExt, ResourceNameExt, ResourceOwnerRefExt, Result,
@@ -50,15 +48,6 @@ pub enum KubimoRunnerCommand {
     Run,
 }
 
-impl fmt::Display for KubimoRunnerCommand {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        match self {
-            Self::Edit => f.write_str("edit"),
-            Self::Run => f.write_str("run"),
-        }
-    }
-}
-
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
     group = "aqora.io",
@@ -68,7 +57,6 @@ impl fmt::Display for KubimoRunnerCommand {
     selectable = ".spec.workspace",
     namespaced,
     validation = runner_immutable_fields(),
-    validation = runner_run_has_notebook(),
     validation = runner_max_memory_greater_than_min(),
     validation = runner_max_cpu_greater_than_min(),
 )]
@@ -76,7 +64,6 @@ impl fmt::Display for KubimoRunnerCommand {
 pub struct KubimoRunnerSpec {
     pub workspace: String,
     pub command: KubimoRunnerCommand,
-    pub notebook: Option<String>,
     pub min_memory: Option<StorageQuantity>,
     pub max_memory: Option<StorageQuantity>,
     pub min_cpu: Option<CpuQuantity>,

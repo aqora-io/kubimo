@@ -1,8 +1,9 @@
 FROM python:3.10-slim-bookworm AS base
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates \
+  && apt-get install -y --no-install-recommends git \
   && rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY docker/app /app
 WORKDIR /workspace
 
 FROM base AS init
