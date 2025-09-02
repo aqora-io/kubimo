@@ -6,7 +6,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::infer().await?;
 
     let bmows = client.api::<KubimoWorkspace>();
-    let bmor = client.api::<KubimoRunner>();
 
     let workspace = bmows
         .patch(&KubimoWorkspace::create(KubimoWorkspaceSpec {
@@ -16,12 +15,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     println!("Created workspace: {}", workspace.name()?);
-
-    let runner = bmor
-        .patch(&workspace.create_runner(Default::default())?)
-        .await?;
-
-    println!("Created runner: {}", runner.name()?);
 
     Ok(())
 }

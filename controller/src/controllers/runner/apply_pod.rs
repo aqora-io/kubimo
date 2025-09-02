@@ -35,32 +35,37 @@ impl RunnerReconciler {
                 ..Default::default()
             },
         };
-        let mut command = cmd![
-            "uv",
-            "run",
-            "marimo",
-            "--log-level=info",
-            "--yes",
-            runner.spec.command,
-            "--headless",
-            "--watch",
-            "--host=0.0.0.0",
-            "--port=80",
-            format!("--base-url={}", self.ingress_path(runner)?),
-            "--allow-origins='*'",
-            "--no-token",
-        ];
-        match runner.spec.command {
+        let ingress_path = self.ingress_path(runner)?;
+        let command = match runner.spec.command {
             KubimoRunnerCommand::Edit => {
-                command.push("--skip-update-check".into());
+                cmd![
+                    "uv",
+                    "run",
+                    "marimo",
+                    "--log-level=info",
+                    "--yes",
+                    "edit",
+                    "--headless",
+                    "--watch",
+                    "--host=0.0.0.0",
+                    "--port=80",
+                    format!("--base-url={ingress_path}"),
+                    "--allow-origins='*'",
+                    "--no-token",
+                ]
             }
             KubimoRunnerCommand::Run => {
-                command.push("--include-code".into());
+                cmd![
+                    "uv",
+                    "run",
+                    "/app/server.py",
+                    "--include-code",
+                    format!("--path={ingress_path}"),
+                    "--host=0.0.0.0",
+                    "--port=80",
+                ]
             }
         };
-        if let Some(notebook) = &runner.spec.notebook {
-            command.push(notebook.into());
-        }
         let pod = Pod {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
