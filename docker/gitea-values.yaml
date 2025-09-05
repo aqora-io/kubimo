@@ -1,0 +1,15 @@
+service:
+  http:
+    type: NodePort
+    port: 3000
+    nodePort: 30000
+    clusterIP:
+  ssh:
+    type: NodePort
+    port: 2222
+    nodePort: 32222
+    clusterIP:
+gitea:
+  admin:
+    username: admin
+    password: admin
