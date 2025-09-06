@@ -1,6 +1,6 @@
 use kubimo::k8s_openapi::api::core::v1::{
-    Container, ContainerPort, PersistentVolumeClaimVolumeSource, Pod, PodSpec, Probe,
-    TCPSocketAction, Volume, VolumeMount,
+    Container, ContainerPort, PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec,
+    Probe, TCPSocketAction, Volume, VolumeMount,
 };
 use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
@@ -19,7 +19,7 @@ impl RunnerReconciler {
         runner: &KubimoRunner,
     ) -> Result<Pod, kubimo::Error> {
         let volume_mount = VolumeMount {
-            mount_path: "/workspace".to_string(),
+            mount_path: "/home/me".to_string(),
             name: runner.spec.workspace.clone(),
             ..Default::default()
         };
@@ -78,9 +78,13 @@ impl RunnerReconciler {
                 runtime_class_name: Some("gvisor".to_string()),
                 automount_service_account_token: Some(false),
                 enable_service_links: Some(false),
+                security_context: Some(PodSecurityContext {
+                    fs_group: Some(1000),
+                    ..Default::default()
+                }),
                 containers: vec![Container {
                     name: format!("{}-runner", runner.name()?),
-                    image: Some(ctx.config.marimo_base_image_name.clone()),
+                    image: Some(ctx.config.marimo_image_name.clone()),
                     resources: resources.clone().into(),
                     volume_mounts: Some(vec![volume_mount.clone()]),
                     ports: Some(vec![ContainerPort {
@@ -100,7 +104,7 @@ impl RunnerReconciler {
                 }],
                 init_containers: Some(vec![Container {
                     name: format!("{}-init", runner.name()?),
-                    image: Some(ctx.config.marimo_init_image_name.clone()),
+                    image: Some(ctx.config.marimo_image_name.clone()),
                     resources: Some(resources.clone().into()),
                     volume_mounts: Some(vec![volume_mount.clone()]),
                     command: Some(cmd!["sh", "/setup/init.sh"]),

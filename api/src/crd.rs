@@ -25,6 +25,8 @@ use crate::{
 pub struct KubimoWorkspaceSpec {
     pub min_storage: Option<StorageQuantity>,
     pub max_storage: Option<StorageQuantity>,
+    pub repo: Option<String>,
+    pub ssh_key: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]

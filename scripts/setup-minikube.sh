@@ -12,8 +12,7 @@ minikube addons enable gvisor
 # build images
 docker buildx bake -f "$script_dir/../docker-bake.hcl"
 # load images
-minikube image load local/kubimo-marimo-init:dev
-minikube image load local/kubimo-marimo-base:dev
+minikube image load local/kubimo-marimo:dev
 # use minikube context
 kubectl config use-context minikube
 # create kubimo namespace
