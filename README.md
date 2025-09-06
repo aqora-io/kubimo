@@ -10,7 +10,7 @@ Make sure to have [minikube installed and running](https://minikube.sigs.k8s.io/
 To run the controller run the following
 
 ```bash
-sh setup-minikube.sh # setup minikube
+sh scripts/setup-minikube.sh # setup minikube
 export RUST_LOG=info # set log level
 cargo run # run controller
 ```

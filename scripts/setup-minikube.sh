@@ -1,4 +1,5 @@
 set -x
+script_dir=$(dirname "$0")
 # stop minikube if running
 minikube stop
 # start minikube with containerd
@@ -9,7 +10,7 @@ minikube addons enable ingress
 # enable gvisor addon
 minikube addons enable gvisor
 # build images
-docker buildx bake
+docker buildx bake -f "$script_dir/../docker-bake.hcl"
 # load images
 minikube image load local/kubimo-marimo-init:dev
 minikube image load local/kubimo-marimo-base:dev
@@ -22,11 +23,5 @@ kubectl config set-context --current --namespace=kubimo
 # create gitea
 helm repo add gitea-charts https://dl.gitea.io/charts/
 helm upgrade -n gitea --create-namespace --install gitea gitea-charts/gitea \
-  -f docker/gitea-values.yaml
-# create an ssh key for gitea
-temp_dir=$(mktemp -d)
-ssh-keygen -t ed25519 -q -N "" -f $temp_dir/id_ed25519
-kubectl create secret generic gitea-ssh-key \
-  --from-file=id_ed25519=$temp_dir/id_ed25519 \
-  --from-file=id_ed25519.pub=$temp_dir/id_ed25519.pub
-rm -r $temp_dir
+  --set gitea.admin.username=admin \
+  --set gitea.admin.password=password
