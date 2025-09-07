@@ -19,7 +19,7 @@ pub use api::Api;
 pub use client::{Client, ClientBuilder};
 pub use crd::{
     KubimoRunner, KubimoRunnerCommand, KubimoRunnerField, KubimoRunnerSpec, KubimoWorkspace,
-    KubimoWorkspaceField, KubimoWorkspaceSpec,
+    KubimoWorkspaceField, KubimoWorkspaceSpec, WorkspaceGit, WorkspaceRepo,
 };
 pub use error::{ClientBuildError, Error, Result};
 pub use factory::{ResourceFactory, ResourceFactoryExt};
@@ -29,7 +29,7 @@ pub use list_stream::ApiListStreamExt;
 pub use list_stream::ListStream;
 pub use meta::{ObjectMetaExt, ResourceNameExt, ResourceOwnerRefExt};
 pub use quantity::{CpuQuantity, CpuUnit, Quantity, StorageQuantity, StorageUnit};
-pub use selector::{Expression, Selector};
+pub use selector::{Expression, Selector, WellKnownField};
 
 pub mod prelude {
     pub use super::{

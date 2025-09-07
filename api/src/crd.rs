@@ -12,6 +12,21 @@ use crate::{
     StorageQuantity,
 };
 
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct WorkspaceRepo {
+    pub url: String,
+    pub branch: Option<String>,
+    pub revision: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGit {
+    pub ssh_key: Option<String>,
+    pub config_name: Option<String>,
+    pub config_email: Option<String>,
+}
+
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
     group = "aqora.io",
@@ -25,8 +40,8 @@ use crate::{
 pub struct KubimoWorkspaceSpec {
     pub min_storage: Option<StorageQuantity>,
     pub max_storage: Option<StorageQuantity>,
-    pub repo: Option<String>,
-    pub ssh_key: Option<String>,
+    pub repo: Option<WorkspaceRepo>,
+    pub git: Option<WorkspaceGit>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]

@@ -5,14 +5,14 @@ use kubimo::{KubimoWorkspace, prelude::*};
 use crate::context::Context;
 use crate::resources::{ResourceRequirement, Resources};
 
-use super::WorkspaceReconciler;
+use super::{Error, WorkspaceReconciler};
 
 impl WorkspaceReconciler {
     pub(crate) async fn apply_pvc(
         &self,
         ctx: &Context,
         workspace: &KubimoWorkspace,
-    ) -> Result<PersistentVolumeClaim, kubimo::Error> {
+    ) -> Result<PersistentVolumeClaim, Error> {
         let pvc = PersistentVolumeClaim {
             metadata: ObjectMeta {
                 name: workspace.metadata.name.clone(),
@@ -37,6 +37,10 @@ impl WorkspaceReconciler {
             }),
             ..Default::default()
         };
-        ctx.client.api::<PersistentVolumeClaim>().patch(&pvc).await
+        Ok(ctx
+            .client
+            .api::<PersistentVolumeClaim>()
+            .patch(&pvc)
+            .await?)
     }
 }

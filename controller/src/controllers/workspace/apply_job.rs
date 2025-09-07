@@ -10,41 +10,75 @@ use kubimo::{KubimoWorkspace, prelude::*};
 use crate::command::cmd;
 use crate::context::Context;
 
-use super::WorkspaceReconciler;
+use super::{Error, WorkspaceReconciler};
+
+fn construct_command(workspace: &KubimoWorkspace) -> Result<Vec<String>, shlex::QuoteError> {
+    let mut script: Vec<String> = cmd!["set -ex"];
+    if let Some(git) = workspace.spec.git.as_ref() {
+        if let Some(secret) = &git.ssh_key {
+            script.extend(cmd![
+                format!(
+                    "{} > /home/me/.ssh/id_kubimo",
+                    shlex::try_join(["echo", secret.as_str()])?
+                ),
+                "chmod 600 /home/me/.ssh/id_kubimo",
+                "echo 'IdentityFile /home/me/.ssh/id_kubimo' >> /home/me/.ssh/config",
+                "chmod 600 /home/me/.ssh/config",
+            ]);
+        }
+        if let Some(name) = git.config_name.as_deref() {
+            script.push(shlex::try_join([
+                "git",
+                "config",
+                "--global",
+                "user.name",
+                name,
+            ])?);
+        }
+        if let Some(name) = git.config_email.as_deref() {
+            script.push(shlex::try_join([
+                "git",
+                "config",
+                "--global",
+                "user.email",
+                name,
+            ])?);
+        }
+    }
+    if let Some(repo) = workspace.spec.repo.as_ref() {
+        if let Ok(url) = GitUrl::parse(&repo.url)
+            && url.host.is_some()
+            && matches!(url.scheme, Scheme::Ssh | Scheme::GitSsh)
+        {
+            let mut ssh_keyscan = cmd!["ssh-keyscan"];
+            if let Some(port) = url.port {
+                ssh_keyscan.extend(cmd!["-p", port]);
+            }
+            ssh_keyscan.push(url.host.unwrap());
+            script.push(format!(
+                "{} >> /home/me/.ssh/known_hosts",
+                shlex::try_join(ssh_keyscan.iter().map(|s| s.as_str()))?
+            ));
+        }
+        let mut clone = cmd!["git", "clone", "--depth", "1", "--recurse-submodules"];
+        if let Some(branch) = repo.branch.as_ref() {
+            clone.extend(cmd!["--branch", branch]);
+        }
+        if let Some(revision) = repo.revision.as_ref() {
+            clone.extend(cmd!["--revision", revision]);
+        }
+        clone.extend(cmd![repo.url, "/home/me/workspace"]);
+        script.push(shlex::try_join(clone.iter().map(|s| s.as_str()))?);
+    }
+    Ok(cmd!["sh", "-c", script.join("\n")])
+}
 
 impl WorkspaceReconciler {
     pub(crate) async fn apply_job(
         &self,
         ctx: &Context,
         workspace: &KubimoWorkspace,
-    ) -> Result<Option<Job>, kubimo::Error> {
-        let mut script: Vec<String> = cmd!["set -ex"];
-        if let Some(secret) = &workspace.spec.ssh_key {
-            script.extend(cmd![
-                format!("cat > /home/me/.ssh/id_kubimo << EOM\n{secret}\nEOM"),
-                "chmod 600 /home/me/.ssh/id_kubimo",
-                "echo 'IdentityFile /home/me/.ssh/id_kubimo' >> /home/me/.ssh/config",
-                "chmod 600 /home/me/.ssh/config",
-            ]);
-        }
-        // TODO: make this configurable
-        script.push("git config --global user.name 'Kubimo'".into());
-        script.push("git config --global user.email 'kubimo@local.domain'".into());
-        if let Some(repo) = workspace.spec.repo.as_ref() {
-            if let Ok(url) = GitUrl::parse(repo)
-                && url.host.is_some()
-                && matches!(url.scheme, Scheme::Ssh | Scheme::GitSsh)
-            {
-                let mut ssh_keyscan = cmd!["ssh-keyscan"];
-                if let Some(port) = url.port {
-                    ssh_keyscan.extend(cmd!["-p", port]);
-                }
-                ssh_keyscan.extend(cmd![url.host.unwrap(), ">>", "/home/me/.ssh/known_hosts"]);
-                script.push(ssh_keyscan.join(" "));
-            }
-            script.push(format!("git clone {repo} /home/me/workspace"));
-        }
-        let command = cmd!["sh", "-c", script.join("\n")];
+    ) -> Result<Option<Job>, Error> {
         let workspace_name = workspace.name()?;
         let job = Job {
             metadata: ObjectMeta {
@@ -65,8 +99,7 @@ impl WorkspaceReconciler {
                                 name: workspace_name.into(),
                                 ..Default::default()
                             }]),
-                            // command: Some(cmd!["git", "clone", repo, "/workspace"]),
-                            command: Some(command),
+                            command: Some(construct_command(workspace)?),
                             ..Default::default()
                         }],
                         init_containers: Some(vec![Container {

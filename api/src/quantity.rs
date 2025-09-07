@@ -93,6 +93,13 @@ impl<T> Quantity<T> {
     }
 }
 
+impl<T> FromStr for Quantity<T> {
+    type Err = core::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(KubeQuantity(s.to_string()).into())
+    }
+}
+
 impl<T> From<KubeQuantity> for Quantity<T> {
     fn from(quantity: KubeQuantity) -> Self {
         Self {

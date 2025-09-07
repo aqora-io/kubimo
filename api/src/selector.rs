@@ -1,5 +1,7 @@
 use std::fmt;
 
+use strum::Display;
+
 #[derive(Clone, Debug)]
 pub enum Expression {
     Eq(String, String),
@@ -112,4 +114,12 @@ impl fmt::Display for Selector {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Display)]
+pub enum WellKnownField {
+    #[strum(serialize = "metadata.name")]
+    Name,
+    #[strum(serialize = "metadata.namespace")]
+    Namespace,
 }
