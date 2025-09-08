@@ -7,10 +7,11 @@ use kubimo::{
     kube::runtime::watcher::Event,
     prelude::*,
 };
+use url::Url;
 
 use crate::Context;
 
-#[derive(ValueEnum, Clone)]
+#[derive(ValueEnum, Clone, Copy)]
 pub enum RunnerCommand {
     Edit,
     Run,
@@ -27,10 +28,11 @@ impl From<RunnerCommand> for KubimoRunnerCommand {
 
 #[derive(Args)]
 pub struct Create {
+    #[clap(long, default_value = "30")]
+    startup_timeout_secs: u64,
     command: RunnerCommand,
     workspace: String,
-    #[clap(long, default_value = "120")]
-    startup_timeout_secs: u64,
+    notebook: Option<String>,
 }
 
 fn pod_ready_cond(pod: &Pod) -> Option<&PodCondition> {
@@ -71,7 +73,7 @@ impl Create {
         let workspace = bmows.get(&self.workspace).await?;
         let runner = bmor
             .patch(&workspace.create_runner(KubimoRunnerSpec {
-                command: self.command.clone().into(),
+                command: self.command.into(),
                 ..Default::default()
             })?)
             .await?;
@@ -88,7 +90,23 @@ impl Create {
             }
         };
         if let Some(ip) = context.minikube_ip {
-            println!("http://{ip}/{name}");
+            let mut url = Url::parse(&format!("http://{ip}/{name}/"))?;
+            if let Some(notebook) = self.notebook {
+                match self.command {
+                    RunnerCommand::Edit => {
+                        url.query_pairs_mut().append_pair("file", &notebook);
+                    }
+                    RunnerCommand::Run => {
+                        let notebook = notebook
+                            .rsplit_once('.')
+                            .map(|(name, _)| name)
+                            .unwrap_or(&notebook);
+                        url = url.join(notebook)?;
+                        url.query_pairs_mut().append_pair("show-code", "true");
+                    }
+                }
+            }
+            println!("{url}");
         } else {
             println!("{name}");
         }

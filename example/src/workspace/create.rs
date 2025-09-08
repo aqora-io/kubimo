@@ -23,6 +23,8 @@ pub struct Create {
     revision: Option<String>,
     #[clap(short, long)]
     ssh_key: Option<PathBuf>,
+    #[clap(long, short)]
+    module: Option<String>,
     #[clap(long, default_value = "10Gi")]
     min_storage: Option<String>,
     #[clap(long)]
@@ -31,7 +33,7 @@ pub struct Create {
     git_name: Option<String>,
     #[clap(long)]
     git_email: Option<String>,
-    #[clap(long, default_value = "30")]
+    #[clap(long, default_value = "120")]
     job_timeout_secs: u64,
 }
 
@@ -109,12 +111,6 @@ impl Create {
                 min_storage: self.min_storage.as_deref().map(|s| s.parse()).transpose()?,
                 max_storage: self.max_storage.as_deref().map(|s| s.parse()).transpose()?,
                 git: Some(WorkspaceGit {
-                    ssh_key: self
-                        .ssh_key
-                        .as_ref()
-                        .map(std::fs::read_to_string)
-                        .transpose()
-                        .map_err(|e| format!("Failed to read ssh key: {}", e))?,
                     config_name: self.git_name,
                     config_email: self.git_email,
                 }),
@@ -132,6 +128,12 @@ impl Create {
                         branch: self.branch,
                         revision: self.revision,
                     }),
+                ssh_key: self
+                    .ssh_key
+                    .as_ref()
+                    .map(std::fs::read_to_string)
+                    .transpose()
+                    .map_err(|e| format!("Failed to read ssh key: {}", e))?,
             }))
             .await?;
         let name = workspace.name()?;

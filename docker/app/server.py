@@ -4,7 +4,7 @@ import marimo
 def build_app(
     directory: str,
     *,
-    path: str = "/",
+    base_url: str = "/",
     include_code: bool = False,
     token: str | None = None,
     skew_protection: bool = False,
@@ -16,7 +16,7 @@ def build_app(
             token=token,
             skew_protection=skew_protection,
         )
-        .with_dynamic_directory(path=path, directory=directory)
+        .with_dynamic_directory(path=base_url, directory=directory)
         .build()
     )
 
@@ -31,14 +31,14 @@ if __name__ == "__main__":
     parser.add_argument("--include-code", action="store_true")
     parser.add_argument("--token")
     parser.add_argument("--skew-protection", action="store_true")
-    parser.add_argument("--path", default="/")
+    parser.add_argument("--base-url", default="/")
     parser.add_argument("directory", nargs="?", default=".")
     args = parser.parse_args()
 
     uvicorn.run(
         build_app(
             args.directory,
-            path=args.path,
+            base_url=args.base_url,
             include_code=args.include_code,
             token=args.token,
             skew_protection=args.skew_protection,

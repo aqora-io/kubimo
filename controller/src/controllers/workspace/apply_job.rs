@@ -10,39 +10,16 @@ use kubimo::{KubimoWorkspace, prelude::*};
 use crate::command::cmd;
 use crate::context::Context;
 
-use super::{Error, WorkspaceReconciler};
+use super::WorkspaceReconciler;
 
-fn construct_command(workspace: &KubimoWorkspace) -> Result<Vec<String>, shlex::QuoteError> {
-    let mut script: Vec<String> = cmd!["set -ex"];
+fn construct_command(workspace: &KubimoWorkspace) -> Vec<String> {
+    let mut command = cmd!["bash", "/setup/init.sh"];
     if let Some(git) = workspace.spec.git.as_ref() {
-        if let Some(secret) = &git.ssh_key {
-            script.extend(cmd![
-                format!(
-                    "{} > /home/me/.ssh/id_kubimo",
-                    shlex::try_join(["echo", secret.as_str()])?
-                ),
-                "chmod 600 /home/me/.ssh/id_kubimo",
-                "echo 'IdentityFile /home/me/.ssh/id_kubimo' >> /home/me/.ssh/config",
-                "chmod 600 /home/me/.ssh/config",
-            ]);
-        }
         if let Some(name) = git.config_name.as_deref() {
-            script.push(shlex::try_join([
-                "git",
-                "config",
-                "--global",
-                "user.name",
-                name,
-            ])?);
+            command.extend(cmd!["--git-name", name,]);
         }
         if let Some(name) = git.config_email.as_deref() {
-            script.push(shlex::try_join([
-                "git",
-                "config",
-                "--global",
-                "user.email",
-                name,
-            ])?);
+            command.extend(cmd!["--git-email", name,]);
         }
     }
     if let Some(repo) = workspace.spec.repo.as_ref() {
@@ -50,27 +27,23 @@ fn construct_command(workspace: &KubimoWorkspace) -> Result<Vec<String>, shlex::
             && url.host.is_some()
             && matches!(url.scheme, Scheme::Ssh | Scheme::GitSsh)
         {
-            let mut ssh_keyscan = cmd!["ssh-keyscan"];
+            command.extend(cmd!["--ssh-host", url.host.unwrap()]);
             if let Some(port) = url.port {
-                ssh_keyscan.extend(cmd!["-p", port]);
+                command.extend(cmd!["--ssh-port", port]);
             }
-            ssh_keyscan.push(url.host.unwrap());
-            script.push(format!(
-                "{} >> /home/me/.ssh/known_hosts",
-                shlex::try_join(ssh_keyscan.iter().map(|s| s.as_str()))?
-            ));
         }
-        let mut clone = cmd!["git", "clone", "--depth", "1", "--recurse-submodules"];
+        command.extend(cmd!["--repo", repo.url]);
         if let Some(branch) = repo.branch.as_ref() {
-            clone.extend(cmd!["--branch", branch]);
+            command.extend(cmd!["--branch", branch]);
         }
         if let Some(revision) = repo.revision.as_ref() {
-            clone.extend(cmd!["--revision", revision]);
+            command.extend(cmd!["--revision", revision]);
         }
-        clone.extend(cmd![repo.url, "/home/me/workspace"]);
-        script.push(shlex::try_join(clone.iter().map(|s| s.as_str()))?);
     }
-    Ok(cmd!["sh", "-c", script.join("\n")])
+    if let Some(secret) = &workspace.spec.ssh_key {
+        command.extend(cmd!["--ssh-key", secret]);
+    }
+    command
 }
 
 impl WorkspaceReconciler {
@@ -78,7 +51,7 @@ impl WorkspaceReconciler {
         &self,
         ctx: &Context,
         workspace: &KubimoWorkspace,
-    ) -> Result<Option<Job>, Error> {
+    ) -> Result<Job, kubimo::Error> {
         let workspace_name = workspace.name()?;
         let job = Job {
             metadata: ObjectMeta {
@@ -99,7 +72,7 @@ impl WorkspaceReconciler {
                                 name: workspace_name.into(),
                                 ..Default::default()
                             }]),
-                            command: Some(construct_command(workspace)?),
+                            command: Some(construct_command(workspace)),
                             ..Default::default()
                         }],
                         init_containers: Some(vec![Container {
@@ -143,6 +116,6 @@ chown -R 1000:1000 /home/me
             }),
             ..Default::default()
         };
-        Ok(Some(ctx.client.api::<Job>().patch(&job).await?))
+        ctx.client.api::<Job>().patch(&job).await
     }
 }

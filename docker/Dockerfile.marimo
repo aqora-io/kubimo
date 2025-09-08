@@ -19,6 +19,8 @@ RUN wget https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.gz \
   && cd ../ \
   && rm -rf git-${GIT_VERSION}
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+ARG MARIMO="marimo[recommended,lsp]>=0.15.2"
+RUN su - me -c "cd /tmp && uv venv && uv pip install ${MARIMO} && rm -r .venv"
 COPY docker/app /app
 COPY docker/setup /setup
 USER 1000:1000

@@ -1412,7 +1412,6 @@ dependencies = [
  "percent-encoding",
  "serde",
  "serde_json",
- "shlex",
  "thiserror 2.0.12",
  "tokio",
  "tower",

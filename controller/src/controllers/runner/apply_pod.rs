@@ -18,54 +18,6 @@ impl RunnerReconciler {
         ctx: &Context,
         runner: &KubimoRunner,
     ) -> Result<Pod, kubimo::Error> {
-        let volume_mount = VolumeMount {
-            mount_path: "/home/me".to_string(),
-            name: runner.spec.workspace.clone(),
-            ..Default::default()
-        };
-        let resources = Resources {
-            requests: ResourceRequirement {
-                cpu: runner.spec.min_cpu.clone(),
-                memory: runner.spec.min_memory.clone(),
-                ..Default::default()
-            },
-            limits: ResourceRequirement {
-                cpu: runner.spec.max_cpu.clone(),
-                memory: runner.spec.max_memory.clone(),
-                ..Default::default()
-            },
-        };
-        let ingress_path = self.ingress_path(runner)?;
-        let command = match runner.spec.command {
-            KubimoRunnerCommand::Edit => {
-                cmd![
-                    "uv",
-                    "run",
-                    "marimo",
-                    "--log-level=info",
-                    "--yes",
-                    "edit",
-                    "--headless",
-                    "--watch",
-                    "--host=0.0.0.0",
-                    "--port=80",
-                    format!("--base-url={ingress_path}"),
-                    "--allow-origins='*'",
-                    "--no-token",
-                ]
-            }
-            KubimoRunnerCommand::Run => {
-                cmd![
-                    "uv",
-                    "run",
-                    "/app/server.py",
-                    "--include-code",
-                    format!("--path={ingress_path}"),
-                    "--host=0.0.0.0",
-                    "--port=80",
-                ]
-            }
-        };
         let pod = Pod {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
@@ -85,8 +37,24 @@ impl RunnerReconciler {
                 containers: vec![Container {
                     name: format!("{}-runner", runner.name()?),
                     image: Some(ctx.config.marimo_image_name.clone()),
-                    resources: resources.clone().into(),
-                    volume_mounts: Some(vec![volume_mount.clone()]),
+                    resources: Resources {
+                        requests: ResourceRequirement {
+                            cpu: runner.spec.min_cpu.clone(),
+                            memory: runner.spec.min_memory.clone(),
+                            ..Default::default()
+                        },
+                        limits: ResourceRequirement {
+                            cpu: runner.spec.max_cpu.clone(),
+                            memory: runner.spec.max_memory.clone(),
+                            ..Default::default()
+                        },
+                    }
+                    .into(),
+                    volume_mounts: Some(vec![VolumeMount {
+                        mount_path: "/home/me".to_string(),
+                        name: runner.spec.workspace.clone(),
+                        ..Default::default()
+                    }]),
                     ports: Some(vec![ContainerPort {
                         container_port: 80,
                         name: Some("marimo".to_string()),
@@ -99,17 +67,18 @@ impl RunnerReconciler {
                         }),
                         ..Default::default()
                     }),
-                    command: Some(command),
+                    command: Some(cmd![
+                        "bash",
+                        "/setup/start.sh",
+                        "--base-url",
+                        self.ingress_path(runner)?,
+                        match runner.spec.command {
+                            KubimoRunnerCommand::Edit => "edit",
+                            KubimoRunnerCommand::Run => "run",
+                        }
+                    ]),
                     ..Default::default()
                 }],
-                init_containers: Some(vec![Container {
-                    name: format!("{}-init", runner.name()?),
-                    image: Some(ctx.config.marimo_image_name.clone()),
-                    resources: Some(resources.clone().into()),
-                    volume_mounts: Some(vec![volume_mount.clone()]),
-                    command: Some(cmd!["sh", "/setup/init.sh"]),
-                    ..Default::default()
-                }]),
                 volumes: Some(vec![Volume {
                     name: runner.spec.workspace.clone(),
                     persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {

@@ -22,7 +22,6 @@ pub struct WorkspaceRepo {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceGit {
-    pub ssh_key: Option<String>,
     pub config_name: Option<String>,
     pub config_email: Option<String>,
 }
@@ -42,6 +41,7 @@ pub struct KubimoWorkspaceSpec {
     pub max_storage: Option<StorageQuantity>,
     pub repo: Option<WorkspaceRepo>,
     pub git: Option<WorkspaceGit>,
+    pub ssh_key: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]

@@ -13,21 +13,13 @@ use crate::context::Context;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error(transparent)]
-    Kubimo(#[from] kubimo::Error),
-    #[error(transparent)]
-    Shlex(#[from] shlex::QuoteError),
-}
-
 #[derive(Debug, Clone, Copy)]
 struct WorkspaceReconciler;
 
 #[async_trait::async_trait]
 impl Reconciler for WorkspaceReconciler {
     type Resource = KubimoWorkspace;
-    type Error = Error;
+    type Error = kubimo::Error;
 
     async fn apply(
         &self,
@@ -47,8 +39,8 @@ pub async fn run(
     ctx: Arc<Context>,
     shutdown_signal: impl Future<Output = ()> + Send + Sync + 'static,
 ) -> Result<
-    impl Stream<Item = ControllerResult<KubimoWorkspace, ReconcileError<Error>>>,
-    ReconcileError<Error>,
+    impl Stream<Item = ControllerResult<KubimoWorkspace, ReconcileError<kubimo::Error>>>,
+    ReconcileError<kubimo::Error>,
 > {
     let bmows = ctx.api::<KubimoWorkspace>().kube().clone();
     let pvc = ctx.api::<PersistentVolumeClaim>().kube().clone();
