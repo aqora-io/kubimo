@@ -10,18 +10,24 @@ pub struct Purge {}
 
 impl Purge {
     pub async fn run(self, context: &Context) -> Result<(), Box<dyn std::error::Error>> {
+        let spinner = crate::utils::spinner().with_message("Purging workspaces");
+        let timer = std::time::Instant::now();
         let bmows = context.client.api::<KubimoWorkspace>();
         bmows
             .list(&Default::default())
             .map_err(kubimo::Error::from)
             .try_for_each_concurrent(None, |item| {
                 let bmows = context.client.api::<KubimoWorkspace>();
+                let spinner = spinner.clone();
                 async move {
-                    bmows.delete(item.item.name()?).await?;
+                    let name = item.item.name()?;
+                    spinner.set_message(format!("Deleting {name}"));
+                    bmows.delete(name).await?;
                     Ok(())
                 }
             })
             .await?;
+        spinner.finish_with_message(format!("Deleted in {:?}", timer.elapsed()));
         Ok(())
     }
 }

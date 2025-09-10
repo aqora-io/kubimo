@@ -28,7 +28,10 @@ done
 set -x
 
 uv venv --allow-existing
-uv pip install marimo
+if [ -z "$(uv pip list | grep '^marimo')" ]; then
+  uv pip install "$DEFAULT_MARIMO_VERSION"
+fi
+uv sync &
 
 host="0.0.0.0"
 port="80"

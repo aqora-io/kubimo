@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use futures::{future::Either, prelude::*};
+use futures::prelude::*;
 use git_url_parse::{GitUrl, Scheme};
 use kubimo::{
     FilterParams, KubimoWorkspace, KubimoWorkspaceSpec, WellKnownField, WorkspaceGit,
@@ -33,7 +33,7 @@ pub struct Create {
     git_name: Option<String>,
     #[clap(long)]
     git_email: Option<String>,
-    #[clap(long, default_value = "120")]
+    #[clap(long, default_value = "60")]
     job_timeout_secs: u64,
 }
 
@@ -81,6 +81,8 @@ async fn wait_for_job(
 
 impl Create {
     pub async fn run(mut self, context: &Context) -> Result<(), Box<dyn std::error::Error>> {
+        let spinner = crate::utils::spinner().with_message("Creating workspace");
+        let timer = std::time::Instant::now();
         let bmows = context.client.api::<KubimoWorkspace>();
         if let Some(repo) = self.repo.as_deref() {
             let url = GitUrl::parse(repo)?;
@@ -137,17 +139,13 @@ impl Create {
             }))
             .await?;
         let name = workspace.name()?;
-        match futures::future::select(
-            wait_for_job(&context.client, name).boxed(),
-            tokio::time::sleep(std::time::Duration::from_secs(self.job_timeout_secs)).boxed(),
+        spinner.set_message(format!("Waiting for job {name}"));
+        crate::utils::try_timeout(
+            std::time::Duration::from_secs(self.job_timeout_secs),
+            wait_for_job(&context.client, name),
         )
-        .await
-        {
-            Either::Left((res, _)) => res?,
-            Either::Right((_, _)) => {
-                return Err(format!("Timeout waiting for job {name} to complete").into());
-            }
-        };
+        .await?;
+        spinner.finish_with_message(format!("Created in {:?}", timer.elapsed()));
         println!("{name}");
         Ok(())
     }

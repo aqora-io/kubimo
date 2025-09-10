@@ -1,5 +1,5 @@
 use clap::{Args, ValueEnum};
-use futures::{future::Either, prelude::*};
+use futures::prelude::*;
 use kubimo::{
     FilterParams, KubimoRunner, KubimoRunnerCommand, KubimoRunnerSpec, KubimoWorkspace,
     WellKnownField,
@@ -66,8 +66,30 @@ async fn wait_for_pod(
     Ok(())
 }
 
+async fn wait_for_endpoint(
+    endpoint: &Url,
+    polling_interval: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    loop {
+        let instant = std::time::Instant::now();
+        if let Ok(res) = client
+            .head(endpoint.to_string())
+            .timeout(polling_interval)
+            .send()
+            .await
+            && res.status().as_u16() < 500
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(polling_interval - instant.elapsed()).await;
+    }
+}
+
 impl Create {
     pub async fn run(self, context: &Context) -> Result<(), Box<dyn std::error::Error>> {
+        let spinner = crate::utils::spinner().with_message("Creating runner");
+        let timer = std::time::Instant::now();
         let bmows = context.client.api::<KubimoWorkspace>();
         let bmor = context.client.api::<KubimoRunner>();
         let workspace = bmows.get(&self.workspace).await?;
@@ -78,18 +100,12 @@ impl Create {
             })?)
             .await?;
         let name = runner.name()?;
-        match futures::future::select(
-            wait_for_pod(&context.client, name).boxed(),
-            tokio::time::sleep(std::time::Duration::from_secs(self.startup_timeout_secs)).boxed(),
-        )
-        .await
-        {
-            Either::Left((res, _)) => res?,
-            Either::Right((_, _)) => {
-                return Err(format!("Timeout waiting for pod {name} to start").into());
-            }
-        };
-        if let Some(ip) = context.minikube_ip {
+        spinner.set_message(format!("Waiting for pod {name}"));
+        let mut duration = std::time::Duration::from_secs(self.startup_timeout_secs);
+        let instant = std::time::Instant::now();
+        crate::utils::try_timeout(duration, wait_for_pod(&context.client, name)).await?;
+        duration -= instant.elapsed();
+        let res = if let Some(ip) = context.minikube_ip {
             let mut url = Url::parse(&format!("http://{ip}/{name}/"))?;
             if let Some(notebook) = self.notebook {
                 match self.command {
@@ -106,10 +122,18 @@ impl Create {
                     }
                 }
             }
-            println!("{url}");
+            spinner.set_message(format!("Waiting for endpoint {url}"));
+            crate::utils::try_timeout(
+                duration,
+                wait_for_endpoint(&url, std::time::Duration::from_millis(500)),
+            )
+            .await?;
+            url.to_string()
         } else {
-            println!("{name}");
-        }
+            name.to_string()
+        };
+        spinner.finish_with_message(format!("Created in {:?}", timer.elapsed()));
+        println!("{res}");
         Ok(())
     }
 }
