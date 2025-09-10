@@ -24,3 +24,13 @@ helm repo add gitea-charts https://dl.gitea.io/charts/
 helm upgrade -n gitea --create-namespace --install gitea gitea-charts/gitea \
   --set gitea.admin.username=admin \
   --set gitea.admin.password=password
+# create minio
+helm repo add minio-operator https://operator.min.io
+helm install \
+  --namespace minio-operator \
+  --create-namespace \
+  operator minio-operator/operator
+helm install \
+  --namespace minio \
+  --create-namespace \
+  minio minio-operator/tenant
