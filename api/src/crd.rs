@@ -2,6 +2,7 @@ use kube::{CustomResource, Resource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strum::Display;
+use url::Url;
 
 use crate::validation::{
     runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
@@ -13,7 +14,15 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-pub struct WorkspaceRepo {
+#[serde(rename_all = "camelCase")]
+pub struct Requirement<T> {
+    pub min: Option<T>,
+    pub max: Option<T>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepo {
     pub url: String,
     pub branch: Option<String>,
     pub revision: Option<String>,
@@ -21,9 +30,16 @@ pub struct WorkspaceRepo {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceGit {
-    pub config_name: Option<String>,
-    pub config_email: Option<String>,
+pub struct GitConfig {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct S3Request {
+    pub url: Option<Url>,
+    pub secret: Option<String>,
 }
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -37,11 +53,11 @@ pub struct WorkspaceGit {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KubimoWorkspaceSpec {
-    pub min_storage: Option<StorageQuantity>,
-    pub max_storage: Option<StorageQuantity>,
-    pub repo: Option<WorkspaceRepo>,
-    pub git: Option<WorkspaceGit>,
+    pub storage: Option<Requirement<StorageQuantity>>,
+    pub repo: Option<GitRepo>,
+    pub git_config: Option<GitConfig>,
     pub ssh_key: Option<String>,
+    pub s3_request: Option<S3Request>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]
@@ -81,10 +97,8 @@ pub enum KubimoRunnerCommand {
 pub struct KubimoRunnerSpec {
     pub workspace: String,
     pub command: KubimoRunnerCommand,
-    pub min_memory: Option<StorageQuantity>,
-    pub max_memory: Option<StorageQuantity>,
-    pub min_cpu: Option<CpuQuantity>,
-    pub max_cpu: Option<CpuQuantity>,
+    pub memory: Option<Requirement<StorageQuantity>>,
+    pub cpu: Option<Requirement<CpuQuantity>>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]

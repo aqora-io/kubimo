@@ -8,6 +8,10 @@ fn default_marimo_image_name() -> String {
     "local/kubimo-marimo:dev".to_string()
 }
 
+fn default_s3_creds_secret() -> String {
+    "kubimo-s3-creds".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub namespace: Option<String>,
@@ -15,6 +19,8 @@ pub struct Config {
     pub name: String,
     #[serde(default = "default_marimo_image_name")]
     pub marimo_image_name: String,
+    #[serde(default = "default_s3_creds_secret")]
+    pub s3_creds_secret: String,
 }
 
 impl Config {

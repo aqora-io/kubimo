@@ -7,8 +7,9 @@ use flate2::{Compression, write::GzEncoder};
 use futures::prelude::*;
 use object_store::{ObjectStore, WriteMultipart, path::Path as ObjectPath};
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadHalf, SimplexStream};
+use tokio_util::io::SyncIoBridge;
 
-use crate::{Context, Error, Result, S3Url};
+use crate::{Context, Error, Result, S3Url, multipart::MultipartOptions};
 
 const INTERNAL_BUFFER_SIZE: usize = 128 * 1024;
 
@@ -17,25 +18,17 @@ pub struct Command {
     src: PathBuf,
     dst: S3Url,
     #[clap(flatten)]
-    pub pack: PackOptions,
+    pack: PackOptions,
     #[clap(flatten)]
-    pub multipart: MultipartOptions,
+    multipart: MultipartOptions,
 }
 
 #[derive(Args, Debug, Default)]
 pub struct PackOptions {
     #[clap(long, short = 'l', default_value_t = 6)]
-    pub compression_level: u32,
+    compression_level: u32,
     #[clap(long, short = 's')]
-    pub follow_symlinks: bool,
-}
-
-#[derive(Args, Debug, Default)]
-pub struct MultipartOptions {
-    #[clap(long, short = 'c', default_value_t = 10_000_000)]
-    pub upload_chunk_size: usize,
-    #[clap(long, short = 'u', default_value_t = 10)]
-    pub upload_concurrency: usize,
+    follow_symlinks: bool,
 }
 
 pub fn pack(src: impl AsRef<Path>, dst: impl Write, options: &PackOptions) -> Result<()> {
@@ -82,7 +75,7 @@ fn pack_reader(
 ) -> (ReadHalf<SimplexStream>, impl Future<Output = Result<()>>) {
     let (read, write) = tokio::io::simplex(INTERNAL_BUFFER_SIZE);
     let writer = tokio::task::spawn_blocking(move || {
-        let mut writer = tokio_util::io::SyncIoBridge::new(write);
+        let mut writer = SyncIoBridge::new(write);
         pack(src, &mut writer, &options)?;
         Ok::<_, Error>(writer.into_inner())
     })
@@ -104,7 +97,7 @@ async fn create_multipart_writer(
     let upload = store.put_multipart(location).await?;
     Ok(WriteMultipart::new_with_chunk_size(
         upload,
-        options.upload_chunk_size,
+        options.chunk_size,
     ))
 }
 
@@ -115,7 +108,7 @@ async fn upload_reader(
 ) -> Result<()> {
     let mut stream = tokio_util::io::ReaderStream::with_capacity(reader, INTERNAL_BUFFER_SIZE);
     while let Some(chunk) = stream.try_next().await? {
-        writer.wait_for_capacity(options.upload_concurrency).await?;
+        writer.wait_for_capacity(options.concurrency).await?;
         writer.put(chunk);
     }
     Ok(())

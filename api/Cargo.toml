@@ -9,12 +9,12 @@ json-patch-macros = { path = "../json-patch-macros" }
 futures = "0.3"
 hyper-util = "0.1"
 json-patch = { version = "4.0", default-features = false }
-k8s-openapi = { version = "0.25", features = ["latest", "schemars"] }
-kube = { version = "1.1", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.26", features = ["latest", "schemars"] }
+kube = { version = "2.0", features = ["runtime", "derive"] }
 lazy_static = "1.5"
 names = { version = "0.14", default-features = false }
 rand = "0.9"
-schemars = { version = "0.8", features = ["derive"] }
+schemars = { version = "1.0", features = ["derive", "url2"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 strum = { version = "0.27", features = ["derive"] }
@@ -29,6 +29,7 @@ tower = { version = "0.5" }
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
 
 [dev-dependencies]
 cel-interpreter = "0.10.0"

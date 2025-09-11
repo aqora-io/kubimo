@@ -1,13 +1,22 @@
-FROM python:3.10-slim-bookworm
+FROM rust:1.89-slim-bookworm AS s3_tar
+WORKDIR /build
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+  --mount=type=cache,target=/usr/local/cargo/git \
+  --mount=type=cache,target=target \
+  cargo build --release -p s3-tar \
+  && cp target/release/s3-tar /bin/s3-tar
+
+FROM ghcr.io/astral-sh/uv:0.8.17-python3.10-bookworm-slim
+ARG USER=me
+RUN useradd -ms /bin/bash -u 1000 ${USER} \
+  && mkdir /home/${USER}/workspace && chown 1000:1000 /home/${USER}/workspace \
+  && usermod -aG sudo ${USER}
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
   autoconf build-essential wget tcl gettext less ssh-client \
   libssl-dev libcurl4-openssl-dev libssh-dev libexpat1 libintl-perl zlib1g \
   && rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
-ARG USER=me
-RUN useradd -ms /bin/bash -u 1000 ${USER} \
-  && mkdir /home/${USER}/workspace && chown 1000:1000 /home/${USER}/workspace \
-  && usermod -aG sudo ${USER}
 ARG GIT_VERSION=2.51.0
 RUN wget https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.gz \
   && tar -xzf git-${GIT_VERSION}.tar.gz \
@@ -18,11 +27,12 @@ RUN wget https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.gz \
   && make install \
   && cd ../ \
   && rm -rf git-${GIT_VERSION}
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-COPY docker/app /app
-COPY docker/setup /setup
 ENV DEFAULT_MARIMO_VERSION="marimo[recommended,lsp]>=0.15.2"
 RUN su - me -c "cd /home/${USER}/workspace && uv venv && uv pip install '${DEFAULT_MARIMO_VERSION}'" \
+  && mkdir /setup \
   && mv /home/${USER}/workspace/.venv /setup/venv
+COPY docker/setup /setup
+COPY docker/app /app
+COPY --from=s3_tar /bin/s3-tar /bin/s3-tar
 USER 1000:1000
 WORKDIR /home/${USER}/workspace

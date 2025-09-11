@@ -9,19 +9,19 @@ pub fn runner_immutable_fields() -> Rule {
 pub fn workspace_max_storage_greater_than_min() -> Rule {
     Rule::new(include_str!("./workspace_max_storage_greater_than_min.cel"))
         .message("workspace max storage must be greater than or equal to min storage")
-        .field_path(".spec.maxStorage")
+        .field_path(".spec.storage.max")
 }
 
 pub fn runner_max_memory_greater_than_min() -> Rule {
     Rule::new(include_str!("./runner_max_memory_greater_than_min.cel"))
         .message("runner max memory must be greater than or equal to min memory")
-        .field_path(".spec.maxMemory")
+        .field_path(".spec.memory.max")
 }
 
 pub fn runner_max_cpu_greater_than_min() -> Rule {
     Rule::new(include_str!("./runner_max_cpu_greater_than_min.cel"))
         .message("runner max cpu must be greater than or equal to min cpu")
-        .field_path(".spec.maxCpu")
+        .field_path(".spec.cpu.max")
 }
 
 #[cfg(test)]

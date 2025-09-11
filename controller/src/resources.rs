@@ -1,13 +1,13 @@
 use kubimo::k8s_openapi::api::core::v1::{ResourceRequirements, VolumeResourceRequirements};
 use kubimo::k8s_openapi::apimachinery::pkg::api::resource::Quantity as KubeQuantity;
-use kubimo::{CpuUnit, Quantity, StorageUnit};
+use kubimo::{CpuQuantity, Requirement, StorageQuantity};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default)]
 pub struct ResourceRequirement {
-    pub storage: Option<Quantity<StorageUnit>>,
-    pub memory: Option<Quantity<StorageUnit>>,
-    pub cpu: Option<Quantity<CpuUnit>>,
+    pub storage: Option<StorageQuantity>,
+    pub memory: Option<StorageQuantity>,
+    pub cpu: Option<CpuQuantity>,
 }
 
 impl ResourceRequirement {
@@ -46,6 +46,41 @@ impl From<ResourceRequirement> for Option<BTreeMap<String, KubeQuantity>> {
 pub struct Resources {
     pub requests: ResourceRequirement,
     pub limits: ResourceRequirement,
+}
+
+impl Resources {
+    pub fn storage(mut self, requirement: Option<Requirement<StorageQuantity>>) -> Self {
+        if let Some(requirement) = requirement {
+            self.requests.storage = requirement.min;
+            self.limits.storage = requirement.max;
+        } else {
+            self.requests.storage = None;
+            self.limits.storage = None;
+        }
+        self
+    }
+
+    pub fn memory(mut self, requirement: Option<Requirement<StorageQuantity>>) -> Self {
+        if let Some(requirement) = requirement {
+            self.requests.memory = requirement.min;
+            self.limits.memory = requirement.max;
+        } else {
+            self.requests.memory = None;
+            self.limits.memory = None;
+        }
+        self
+    }
+
+    pub fn cpu(mut self, requirement: Option<Requirement<CpuQuantity>>) -> Self {
+        if let Some(requirement) = requirement {
+            self.requests.cpu = requirement.min;
+            self.limits.cpu = requirement.max;
+        } else {
+            self.requests.cpu = None;
+            self.limits.cpu = None;
+        }
+        self
+    }
 }
 
 impl From<Resources> for VolumeResourceRequirements {

@@ -1,8 +1,8 @@
 use git_url_parse::{GitUrl, Scheme};
 use kubimo::k8s_openapi::api::batch::v1::{Job, JobSpec};
 use kubimo::k8s_openapi::api::core::v1::{
-    Container, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
-    Volume, VolumeMount,
+    Container, EnvFromSource, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec,
+    PodTemplateSpec, SecretEnvSource, Volume, VolumeMount,
 };
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{KubimoWorkspace, prelude::*};
@@ -14,11 +14,11 @@ use super::WorkspaceReconciler;
 
 fn construct_command(workspace: &KubimoWorkspace) -> Vec<String> {
     let mut command = cmd!["bash", "/setup/init.sh"];
-    if let Some(git) = workspace.spec.git.as_ref() {
-        if let Some(name) = git.config_name.as_deref() {
+    if let Some(git) = workspace.spec.git_config.as_ref() {
+        if let Some(name) = git.name.as_deref() {
             command.extend(cmd!["--git-name", name,]);
         }
-        if let Some(name) = git.config_email.as_deref() {
+        if let Some(name) = git.email.as_deref() {
             command.extend(cmd!["--git-email", name,]);
         }
     }
@@ -42,6 +42,14 @@ fn construct_command(workspace: &KubimoWorkspace) -> Vec<String> {
     }
     if let Some(secret) = &workspace.spec.ssh_key {
         command.extend(cmd!["--ssh-key", secret]);
+    }
+    if let Some(s3_url) = &workspace
+        .spec
+        .s3_request
+        .as_ref()
+        .and_then(|s3_req| s3_req.url.as_ref())
+    {
+        command.extend(cmd!["--s3-url", s3_url]);
     }
     command
 }
@@ -70,6 +78,24 @@ impl WorkspaceReconciler {
                             volume_mounts: Some(vec![VolumeMount {
                                 mount_path: "/home/me".to_string(),
                                 name: workspace_name.into(),
+                                ..Default::default()
+                            }]),
+                            env_from: Some(vec![EnvFromSource {
+                                secret_ref: Some(
+                                    workspace
+                                        .spec
+                                        .s3_request
+                                        .as_ref()
+                                        .and_then(|s3_req| s3_req.secret.as_ref())
+                                        .map(|secret| SecretEnvSource {
+                                            name: secret.clone(),
+                                            optional: Some(true),
+                                        })
+                                        .unwrap_or_else(|| SecretEnvSource {
+                                            name: ctx.config.s3_creds_secret.clone(),
+                                            optional: Some(false),
+                                        }),
+                                ),
                                 ..Default::default()
                             }]),
                             command: Some(construct_command(workspace)),

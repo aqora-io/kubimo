@@ -39,15 +39,19 @@ pub struct Quantity<T> {
 }
 
 impl<T> JsonSchema for Quantity<T> {
-    fn schema_name() -> String {
+    #[inline]
+    fn schema_name() -> Cow<'static, str> {
         KubeQuantity::schema_name()
     }
-    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    #[inline]
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         KubeQuantity::json_schema(generator)
     }
-    fn is_referenceable() -> bool {
-        KubeQuantity::is_referenceable()
+    #[inline]
+    fn inline_schema() -> bool {
+        KubeQuantity::inline_schema()
     }
+    #[inline]
     fn schema_id() -> Cow<'static, str> {
         KubeQuantity::schema_id()
     }

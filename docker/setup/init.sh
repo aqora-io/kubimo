@@ -43,6 +43,15 @@ add_git_email() {
   fi
 }
 
+s3_download() {
+  if [ -z "$1" ]; then
+    echo "No S3 url provided"
+  else
+    s3-tar download "$1" .
+    echo "$1 unpacked"
+  fi
+}
+
 git_clone() {
   if [ -z "$1" ]; then
     echo "No repo provided"
@@ -128,6 +137,11 @@ while [[ $# -gt 0 ]]; do
     shift
     shift
     ;;
+  --s3-url)
+    S3_URL="$2"
+    shift
+    shift
+    ;;
   -* | --*)
     echo "Unknown option $1"
     exit 1
@@ -145,6 +159,7 @@ add_ssh_known_hosts "$SSH_HOST" "$SSH_PORT"
 add_ssh_key "$SSH_KEY"
 add_git_name "$GIT_NAME"
 add_git_email "$GIT_EMAIL"
+s3_download "$S3_URL"
 git_clone "$REPO" "$BRANCH" "$REVISION"
 if is_empty_or_empty_git; then
   init_template

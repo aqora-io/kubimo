@@ -3,7 +3,7 @@ use kubimo::kube::api::ObjectMeta;
 use kubimo::{KubimoWorkspace, prelude::*};
 
 use crate::context::Context;
-use crate::resources::{ResourceRequirement, Resources};
+use crate::resources::Resources;
 
 use super::WorkspaceReconciler;
 
@@ -22,17 +22,9 @@ impl WorkspaceReconciler {
             },
             spec: Some(PersistentVolumeClaimSpec {
                 access_modes: Some(vec!["ReadWriteMany".to_string()]),
-                resources: Resources {
-                    requests: ResourceRequirement {
-                        storage: workspace.spec.min_storage.clone(),
-                        ..Default::default()
-                    },
-                    limits: ResourceRequirement {
-                        storage: workspace.spec.max_storage.clone(),
-                        ..Default::default()
-                    },
-                }
-                .into(),
+                resources: Resources::default()
+                    .storage(workspace.spec.storage.clone())
+                    .into(),
                 ..Default::default()
             }),
             ..Default::default()

@@ -4,12 +4,13 @@ use clap::Args;
 use futures::prelude::*;
 use git_url_parse::{GitUrl, Scheme};
 use kubimo::{
-    FilterParams, KubimoWorkspace, KubimoWorkspaceSpec, WellKnownField, WorkspaceGit,
-    WorkspaceRepo,
+    FilterParams, GitConfig, GitRepo, KubimoWorkspace, KubimoWorkspaceSpec, Requirement, S3Request,
+    WellKnownField,
     k8s_openapi::api::batch::v1::{Job, JobCondition},
     kube::runtime::watcher::Event,
     prelude::*,
 };
+use url::Url;
 
 use crate::Context;
 
@@ -33,6 +34,8 @@ pub struct Create {
     git_name: Option<String>,
     #[clap(long)]
     git_email: Option<String>,
+    #[clap(long)]
+    s3: Option<String>,
     #[clap(long, default_value = "60")]
     job_timeout_secs: u64,
 }
@@ -110,11 +113,13 @@ impl Create {
         }
         let workspace = bmows
             .patch(&KubimoWorkspace::create(KubimoWorkspaceSpec {
-                min_storage: self.min_storage.as_deref().map(|s| s.parse()).transpose()?,
-                max_storage: self.max_storage.as_deref().map(|s| s.parse()).transpose()?,
-                git: Some(WorkspaceGit {
-                    config_name: self.git_name,
-                    config_email: self.git_email,
+                storage: Some(Requirement {
+                    min: self.min_storage.as_deref().map(|s| s.parse()).transpose()?,
+                    max: self.max_storage.as_deref().map(|s| s.parse()).transpose()?,
+                }),
+                git_config: Some(GitConfig {
+                    name: self.git_name,
+                    email: self.git_email,
                 }),
                 repo: self
                     .repo
@@ -125,7 +130,7 @@ impl Create {
                             format!("ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/{repo}")
                         }
                     })
-                    .map(|repo| WorkspaceRepo {
+                    .map(|repo| GitRepo {
                         url: repo,
                         branch: self.branch,
                         revision: self.revision,
@@ -136,6 +141,15 @@ impl Create {
                     .map(std::fs::read_to_string)
                     .transpose()
                     .map_err(|e| format!("Failed to read ssh key: {}", e))?,
+                s3_request: self
+                    .s3
+                    .as_ref()
+                    .map(|s| Url::parse(s))
+                    .transpose()?
+                    .map(|url| S3Request {
+                        url: Some(url),
+                        ..Default::default()
+                    }),
             }))
             .await?;
         let name = workspace.name()?;

@@ -1,6 +1,7 @@
 mod context;
 mod download;
 mod error;
+mod multipart;
 mod run;
 mod s3_url;
 mod upload;

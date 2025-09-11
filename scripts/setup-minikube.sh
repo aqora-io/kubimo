@@ -34,3 +34,8 @@ helm install \
   --namespace minio \
   --create-namespace \
   minio minio-operator/tenant
+kubectl create secret generic kubimo-s3-creds \
+  --from-literal=AWS_ACCESS_KEY_ID=minio \
+  --from-literal=AWS_SECRET_ACCESS_KEY=minio123 \
+  --from-literal=AWS_ENDPOINT=https://minio.minio.svc.cluster.local \
+  --from-literal=AWS_ALLOW_INVALID_CERTIFICATES=true

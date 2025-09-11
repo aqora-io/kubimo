@@ -8,7 +8,7 @@ use kubimo::{KubimoRunner, KubimoRunnerCommand, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
-use crate::resources::{ResourceRequirement, Resources};
+use crate::resources::Resources;
 
 use super::RunnerReconciler;
 
@@ -37,19 +37,10 @@ impl RunnerReconciler {
                 containers: vec![Container {
                     name: format!("{}-runner", runner.name()?),
                     image: Some(ctx.config.marimo_image_name.clone()),
-                    resources: Resources {
-                        requests: ResourceRequirement {
-                            cpu: runner.spec.min_cpu.clone(),
-                            memory: runner.spec.min_memory.clone(),
-                            ..Default::default()
-                        },
-                        limits: ResourceRequirement {
-                            cpu: runner.spec.max_cpu.clone(),
-                            memory: runner.spec.max_memory.clone(),
-                            ..Default::default()
-                        },
-                    }
-                    .into(),
+                    resources: Resources::default()
+                        .cpu(runner.spec.cpu.clone())
+                        .memory(runner.spec.memory.clone())
+                        .into(),
                     volume_mounts: Some(vec![VolumeMount {
                         mount_path: "/home/me".to_string(),
                         name: runner.spec.workspace.clone(),
