@@ -83,13 +83,14 @@ init_template() {
   echo "Added pyproject.toml"
   cp "$root/gitignore" .gitignore
   echo "Added .gitignore"
-  cp -R "$root/venv" .venv
-  echo "Added .venv"
   git init --initial-branch main
 }
 
-install_marimo() {
-  uv venv --allow-existing
+init_venv() {
+  if [ ! -d ".venv" ]; then
+    cp -R "$root/venv" .venv
+    echo "Added .venv"
+  fi
   if [ -z "$(uv pip list | grep '^marimo')" ]; then
     uv pip install "$DEFAULT_MARIMO_VERSION"
   fi
@@ -164,4 +165,4 @@ git_clone "$REPO" "$BRANCH" "$REVISION"
 if is_empty_or_empty_git; then
   init_template
 fi
-install_marimo
+init_venv

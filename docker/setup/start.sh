@@ -27,7 +27,10 @@ done
 
 set -x
 
-uv venv --allow-existing
+if [ ! -d ".venv" ]; then
+  cp -R "$root/venv" .venv
+  echo "Added .venv"
+fi
 if [ -z "$(uv pip list | grep '^marimo')" ]; then
   uv pip install "$DEFAULT_MARIMO_VERSION"
 fi

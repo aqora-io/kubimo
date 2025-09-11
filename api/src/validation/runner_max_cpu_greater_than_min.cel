@@ -1,3 +1,4 @@
+!has(self.spec.cpu) ||
 !has(self.spec.cpu.max) ||
 !has(self.spec.cpu.min) ||
 quantity(self.spec.cpu.max).isGreaterThan(quantity(self.spec.cpu.min))
