@@ -1,3 +1,6 @@
+use std::time::Duration;
+
+use backon::{ExponentialBuilder, Retryable};
 use clap::{Args, ValueEnum};
 use futures::prelude::*;
 use kubimo::{
@@ -7,6 +10,7 @@ use kubimo::{
     kube::runtime::watcher::Event,
     prelude::*,
 };
+use serde::Deserialize;
 use url::Url;
 
 use crate::Context;
@@ -66,24 +70,39 @@ async fn wait_for_pod(
     Ok(())
 }
 
-async fn wait_for_endpoint(
-    endpoint: &Url,
-    polling_interval: std::time::Duration,
-) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Deserialize)]
+struct Status {
+    status: String,
+}
+
+async fn wait_for_endpoint(endpoint: &Url) -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
-    loop {
-        let instant = std::time::Instant::now();
-        if let Ok(res) = client
-            .head(endpoint.to_string())
-            .timeout(polling_interval)
-            .send()
-            .await
-            && res.status().as_u16() < 500
-        {
-            return Ok(());
+    let fetch = || {
+        let client = client.clone();
+        async move {
+            let status = client
+                .get(endpoint.to_string())
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<Status>()
+                .await?;
+            if status.status == "healthy" {
+                Ok::<_, Box<dyn std::error::Error>>(())
+            } else {
+                Err(format!("Endpoint {endpoint} is not healthy").into())
+            }
         }
-        tokio::time::sleep(polling_interval - instant.elapsed()).await;
-    }
+    };
+    fetch
+        .retry(
+            ExponentialBuilder::new()
+                .with_min_delay(Duration::from_millis(100))
+                .with_max_delay(Duration::from_secs(1))
+                .without_max_times(),
+        )
+        .await?;
+    Ok(())
 }
 
 impl Create {
@@ -101,12 +120,18 @@ impl Create {
             .await?;
         let name = runner.name()?;
         spinner.set_message(format!("Waiting for pod {name}"));
-        let mut duration = std::time::Duration::from_secs(self.startup_timeout_secs);
+        let mut duration = Duration::from_secs(self.startup_timeout_secs);
         let instant = std::time::Instant::now();
         crate::utils::try_timeout(duration, wait_for_pod(&context.client, name)).await?;
         duration -= instant.elapsed();
         let res = if let Some(ip) = context.minikube_ip {
             let mut url = Url::parse(&format!("http://{ip}/{name}/"))?;
+            let health_url = match self.command {
+                RunnerCommand::Edit => url.join("health")?,
+                RunnerCommand::Run => url.join("_health")?,
+            };
+            spinner.set_message(format!("Waiting for endpoint {health_url}"));
+            crate::utils::try_timeout(duration, wait_for_endpoint(&health_url)).await?;
             if let Some(notebook) = self.notebook {
                 match self.command {
                     RunnerCommand::Edit => {
@@ -122,12 +147,6 @@ impl Create {
                     }
                 }
             }
-            spinner.set_message(format!("Waiting for endpoint {url}"));
-            crate::utils::try_timeout(
-                duration,
-                wait_for_endpoint(&url, std::time::Duration::from_millis(500)),
-            )
-            .await?;
             url.to_string()
         } else {
             name.to_string()

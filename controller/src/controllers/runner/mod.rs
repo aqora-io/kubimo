@@ -52,7 +52,7 @@ impl Reconciler for RunnerReconciler {
 
     async fn apply(&self, ctx: &Context, runner: &KubimoRunner) -> Result<Action, Self::Error> {
         futures::future::try_join_all([
-            self.apply_owner_references(ctx, runner).boxed(),
+            self.apply_owner_reference(ctx, runner).boxed(),
             self.apply_pod(ctx, runner).map_ok(|_| ()).boxed(),
             self.apply_service(ctx, runner).map_ok(|_| ()).boxed(),
             self.apply_ingress(ctx, runner).map_ok(|_| ()).boxed(),

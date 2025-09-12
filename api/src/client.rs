@@ -139,6 +139,7 @@ impl Client {
         self.patch_crd::<crate::KubimoWorkspace>(api.clone())
             .await?;
         self.patch_crd::<crate::KubimoRunner>(api.clone()).await?;
+        self.patch_crd::<crate::KubimoExporter>(api.clone()).await?;
         Ok(())
     }
 }

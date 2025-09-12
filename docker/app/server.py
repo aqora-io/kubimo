@@ -1,4 +1,11 @@
 import marimo
+from starlette.applications import Starlette
+from starlette.routing import Mount, Route
+from starlette.responses import JSONResponse
+
+
+async def health(_):
+    return JSONResponse({"status": "healthy"})
 
 
 def build_app(
@@ -9,7 +16,7 @@ def build_app(
     token: str | None = None,
     skew_protection: bool = False,
 ):
-    return (
+    marimo_app = (
         marimo.create_asgi_app(
             quiet=True,
             include_code=include_code,
@@ -18,6 +25,10 @@ def build_app(
         )
         .with_dynamic_directory(path=base_url, directory=directory)
         .build()
+    )
+    health_base = base_url[:-1] if base_url.endswith("/") else base_url
+    return Starlette(
+        routes=[Route(f"{health_base}/_health", health), Mount("/", marimo_app)]
     )
 
 

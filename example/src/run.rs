@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-use crate::{Context, runner, workspace};
+use crate::{Context, exporter, runner, workspace};
 
 #[derive(Parser)]
 struct Args {
@@ -14,6 +14,8 @@ enum Command {
     Workspace(workspace::Command),
     #[clap(subcommand)]
     Runner(runner::Command),
+    #[clap(subcommand)]
+    Exporter(exporter::Command),
 }
 
 impl Command {
@@ -21,6 +23,7 @@ impl Command {
         match self {
             Self::Workspace(workspace) => workspace.run(context).await,
             Self::Runner(runner) => runner.run(context).await,
+            Self::Exporter(exporter) => exporter.run(context).await,
         }
     }
 }

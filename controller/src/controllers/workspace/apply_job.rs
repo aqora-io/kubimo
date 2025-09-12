@@ -71,7 +71,6 @@ impl WorkspaceReconciler {
             spec: Some(JobSpec {
                 template: PodTemplateSpec {
                     spec: Some(PodSpec {
-                        runtime_class_name: Some("gvisor".to_string()),
                         containers: vec![Container {
                             name: format!("{}-init", workspace_name),
                             image: Some(ctx.config.marimo_image_name.clone()),
@@ -89,11 +88,11 @@ impl WorkspaceReconciler {
                                         .and_then(|s3_req| s3_req.secret.as_ref())
                                         .map(|secret| SecretEnvSource {
                                             name: secret.clone(),
-                                            optional: Some(true),
+                                            optional: Some(false),
                                         })
                                         .unwrap_or_else(|| SecretEnvSource {
                                             name: ctx.config.s3_creds_secret.clone(),
-                                            optional: Some(false),
+                                            optional: Some(true),
                                         }),
                                 ),
                                 ..Default::default()

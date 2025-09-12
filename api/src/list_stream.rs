@@ -88,11 +88,11 @@ where
                             .remaining_item_count
                             .map(|count| count + this.items.len() as i64);
                         this.items = list.items;
-                        if let Some(token) = list.metadata.continue_ {
-                            if !token.is_empty() {
-                                this.list_params.continue_token = Some(token);
-                                this.next = Some(list_request(api, &this.list_params));
-                            }
+                        if let Some(token) = list.metadata.continue_
+                            && !token.is_empty()
+                        {
+                            this.list_params.continue_token = Some(token);
+                            this.next = Some(list_request(api, &this.list_params));
                         }
                     }
                     Poll::Ready((Err(err), _)) => {

@@ -1,14 +1,9 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use futures::prelude::*;
 use git_url_parse::{GitUrl, Scheme};
 use kubimo::{
-    FilterParams, GitConfig, GitRepo, KubimoWorkspace, KubimoWorkspaceSpec, Requirement, S3Request,
-    WellKnownField,
-    k8s_openapi::api::batch::v1::{Job, JobCondition},
-    kube::runtime::watcher::Event,
-    prelude::*,
+    GitConfig, GitRepo, KubimoWorkspace, KubimoWorkspaceSpec, Requirement, S3Request, prelude::*,
 };
 use url::Url;
 
@@ -38,48 +33,6 @@ pub struct Create {
     s3: Option<String>,
     #[clap(long, default_value = "60")]
     job_timeout_secs: u64,
-}
-
-fn job_completition_cond(job: &Job) -> Option<&JobCondition> {
-    job.status
-        .as_ref()
-        .and_then(|status| status.conditions.as_ref())?
-        .iter()
-        .find(|c| c.type_ == "Complete")
-}
-
-fn assert_job_success(job: &Job) -> Result<(), String> {
-    let cond = job_completition_cond(job).ok_or_else(|| "Job not completed".to_string())?;
-    if cond.status == "True" {
-        Ok(())
-    } else {
-        Err(cond
-            .message
-            .clone()
-            .unwrap_or_else(|| "Unknown error".to_string()))
-    }
-}
-
-async fn wait_for_job(
-    client: &kubimo::Client,
-    name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let jobs = client.api::<Job>();
-    let next = jobs
-        .watch(&FilterParams::default().with_fields((WellKnownField::Name, name)))
-        .try_filter_map(|event| {
-            futures::future::ok(match event {
-                Event::Apply(job) => Some(job),
-                Event::InitApply(job) => Some(job),
-                _ => None,
-            })
-        })
-        .try_skip_while(|job| futures::future::ok(job_completition_cond(job).is_none()))
-        .try_next()
-        .await?
-        .ok_or_else(|| format!("Job {name} not found"))?;
-    assert_job_success(&next)?;
-    Ok(())
 }
 
 impl Create {
@@ -156,7 +109,7 @@ impl Create {
         spinner.set_message(format!("Waiting for job {name}"));
         crate::utils::try_timeout(
             std::time::Duration::from_secs(self.job_timeout_secs),
-            wait_for_job(&context.client, name),
+            crate::utils::wait_for_job(&context.client, name),
         )
         .await?;
         spinner.finish_with_message(format!("Created in {:?}", timer.elapsed()));

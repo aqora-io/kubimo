@@ -1,16 +1,16 @@
-use kubimo::{KubimoRunner, KubimoWorkspace, json_patch_macros::*, prelude::*};
+use kubimo::{KubimoExporter, KubimoWorkspace, json_patch_macros::*, prelude::*};
 
 use crate::context::Context;
 
-use super::RunnerReconciler;
+use super::ExporterReconciler;
 
-impl RunnerReconciler {
+impl ExporterReconciler {
     pub(crate) async fn apply_owner_reference(
         &self,
         ctx: &Context,
-        runner: &KubimoRunner,
+        exporter: &KubimoExporter,
     ) -> Result<(), kubimo::Error> {
-        if !runner
+        if !exporter
             .metadata
             .owner_references
             .as_ref()
@@ -18,19 +18,23 @@ impl RunnerReconciler {
                 orefs.iter().any(|oref| {
                     oref.controller.is_some_and(|yes| yes)
                         && oref.kind == KubimoWorkspace::kind(&())
-                        && oref.name == runner.spec.workspace
+                        && oref.name == exporter.spec.workspace
                 })
             })
         {
             let workspace = ctx
                 .api::<KubimoWorkspace>()
-                .get(runner.spec.workspace.as_ref())
+                .get(exporter.spec.workspace.as_ref())
                 .await?;
-            let mut owner_refs = runner.metadata.owner_references.clone().unwrap_or_default();
+            let mut owner_refs = exporter
+                .metadata
+                .owner_references
+                .clone()
+                .unwrap_or_default();
             owner_refs.push(workspace.static_controller_owner_ref()?);
-            ctx.api::<KubimoRunner>()
+            ctx.api::<KubimoExporter>()
                 .patch_json(
-                    runner.name()?,
+                    exporter.name()?,
                     patch![add!(["metadata", "ownerReferences"] => owner_refs)],
                 )
                 .await?;

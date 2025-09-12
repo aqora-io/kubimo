@@ -33,6 +33,7 @@ helm install \
 helm install \
   --namespace minio \
   --create-namespace \
+  --set-json 'tenant.buckets=[{"name": "kubimo"}]' \
   minio minio-operator/tenant
 kubectl create secret generic kubimo-s3-creds \
   --from-literal=AWS_ACCESS_KEY_ID=minio \

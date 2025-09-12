@@ -63,7 +63,7 @@ impl S3Url {
         }
         let bucket = url
             .host()
-            .ok_or_else(|| S3UrlParseError::MissingBucket)?
+            .ok_or(S3UrlParseError::MissingBucket)?
             .to_string();
         let mut path = url.path();
         if path.starts_with('/') {

@@ -141,3 +141,49 @@ impl KubimoWorkspace {
         }))
     }
 }
+
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[kube(
+    group = "aqora.io",
+    version = "v1",
+    kind = "KubimoExporter",
+    shortname = "bmoe",
+    selectable = ".spec.workspace",
+    namespaced
+)]
+#[serde(rename_all = "camelCase")]
+pub struct KubimoExporterSpec {
+    pub workspace: String,
+    pub s3_request: Option<S3Request>,
+}
+
+impl ResourceFactory for KubimoExporter {
+    fn new(name: &str, spec: Self::Spec) -> Self {
+        Self::new(name, spec)
+    }
+}
+
+impl KubimoWorkspace {
+    pub fn new_exporter(&self, name: &str, spec: KubimoExporterSpec) -> Result<KubimoExporter> {
+        let mut exporter = KubimoExporter::new(
+            name,
+            KubimoExporterSpec {
+                workspace: self.name()?.to_string(),
+                ..spec
+            },
+        );
+        exporter
+            .meta_mut()
+            .owner_references
+            .get_or_insert_default()
+            .push(self.static_controller_owner_ref()?);
+        Ok(exporter)
+    }
+
+    pub fn create_exporter(&self, spec: KubimoExporterSpec) -> Result<KubimoExporter> {
+        Ok(KubimoExporter::create(KubimoExporterSpec {
+            workspace: self.name()?.to_string(),
+            ..spec
+        }))
+    }
+}

@@ -7,8 +7,8 @@ use crate::Context;
 
 #[derive(Subcommand)]
 pub enum Command {
-    Create(create::Create),
-    Purge(purge::Purge),
+    Create(Box<create::Create>),
+    Purge(Box<purge::Purge>),
 }
 
 impl Command {
