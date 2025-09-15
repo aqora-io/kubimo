@@ -1,6 +1,6 @@
 use kubimo::k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{KubimoRunner, prelude::*};
+use kubimo::{Runner, prelude::*};
 
 use crate::context::Context;
 
@@ -10,7 +10,7 @@ impl RunnerReconciler {
     pub(crate) async fn apply_service(
         &self,
         ctx: &Context,
-        runner: &KubimoRunner,
+        runner: &Runner,
     ) -> Result<Service, kubimo::Error> {
         let svc = Service {
             metadata: ObjectMeta {

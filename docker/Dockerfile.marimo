@@ -27,12 +27,15 @@ RUN wget https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.gz \
   && make install \
   && cd ../ \
   && rm -rf git-${GIT_VERSION}
-ENV DEFAULT_MARIMO_VERSION="marimo[recommended,lsp]>=0.15.2"
-RUN su - me -c "cd /home/${USER}/workspace && uv venv && uv pip install '${DEFAULT_MARIMO_VERSION}'" \
-  && mkdir /setup \
-  && mv /home/${USER}/workspace/.venv /setup/venv
+COPY docker/setup/pyproject.toml /setup/pyproject.toml
+RUN cp /setup/pyproject.toml /home/${USER}/workspace/pyproject.toml \
+  && su - me -c "cd /home/${USER}/workspace && uv sync" \
+  && mv /home/${USER}/workspace/.venv /setup/venv \
+  && mv /home/${USER}/workspace/uv.lock /setup/uv.lock \
+  && find /home/${USER}/workspace -mindepth 1 -maxdepth 1 -print0 | xargs -r0 rm -R
 COPY docker/setup /setup
 COPY docker/app /app
 COPY --from=s3_tar /bin/s3-tar /bin/s3-tar
 USER 1000:1000
 WORKDIR /home/${USER}/workspace
+CMD ["uv", "run", "python"]

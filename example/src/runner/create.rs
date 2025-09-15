@@ -4,8 +4,7 @@ use backon::{ExponentialBuilder, Retryable};
 use clap::{Args, ValueEnum};
 use futures::prelude::*;
 use kubimo::{
-    FilterParams, KubimoRunner, KubimoRunnerCommand, KubimoRunnerSpec, KubimoWorkspace,
-    WellKnownField,
+    FilterParams, Runner, RunnerCommand, RunnerSpec, WellKnownField, Workspace,
     k8s_openapi::api::core::v1::{Pod, PodCondition},
     kube::runtime::watcher::Event,
     prelude::*,
@@ -16,16 +15,16 @@ use url::Url;
 use crate::Context;
 
 #[derive(ValueEnum, Clone, Copy)]
-pub enum RunnerCommand {
+pub enum CommandArg {
     Edit,
     Run,
 }
 
-impl From<RunnerCommand> for KubimoRunnerCommand {
-    fn from(command: RunnerCommand) -> Self {
+impl From<CommandArg> for RunnerCommand {
+    fn from(command: CommandArg) -> Self {
         match command {
-            RunnerCommand::Edit => Self::Edit,
-            RunnerCommand::Run => Self::Run,
+            CommandArg::Edit => Self::Edit,
+            CommandArg::Run => Self::Run,
         }
     }
 }
@@ -34,7 +33,7 @@ impl From<RunnerCommand> for KubimoRunnerCommand {
 pub struct Create {
     #[clap(long, default_value = "30")]
     startup_timeout_secs: u64,
-    command: RunnerCommand,
+    command: CommandArg,
     workspace: String,
     notebook: Option<String>,
 }
@@ -109,11 +108,11 @@ impl Create {
     pub async fn run(self, context: &Context) -> Result<(), Box<dyn std::error::Error>> {
         let spinner = crate::utils::spinner().with_message("Creating runner");
         let timer = std::time::Instant::now();
-        let bmows = context.client.api::<KubimoWorkspace>();
-        let bmor = context.client.api::<KubimoRunner>();
+        let bmows = context.client.api::<Workspace>();
+        let bmor = context.client.api::<Runner>();
         let workspace = bmows.get(&self.workspace).await?;
         let runner = bmor
-            .patch(&workspace.create_runner(KubimoRunnerSpec {
+            .patch(&workspace.create_runner(RunnerSpec {
                 command: self.command.into(),
                 ..Default::default()
             })?)
@@ -127,17 +126,17 @@ impl Create {
         let res = if let Some(ip) = context.minikube_ip {
             let mut url = Url::parse(&format!("http://{ip}/{name}/"))?;
             let health_url = match self.command {
-                RunnerCommand::Edit => url.join("health")?,
-                RunnerCommand::Run => url.join("_health")?,
+                CommandArg::Edit => url.join("health")?,
+                CommandArg::Run => url.join("_health")?,
             };
             spinner.set_message(format!("Waiting for endpoint {health_url}"));
             crate::utils::try_timeout(duration, wait_for_endpoint(&health_url)).await?;
             if let Some(notebook) = self.notebook {
                 match self.command {
-                    RunnerCommand::Edit => {
+                    CommandArg::Edit => {
                         url.query_pairs_mut().append_pair("file", &notebook);
                     }
-                    RunnerCommand::Run => {
+                    CommandArg::Run => {
                         let notebook = notebook
                             .rsplit_once('.')
                             .map(|(name, _)| name)

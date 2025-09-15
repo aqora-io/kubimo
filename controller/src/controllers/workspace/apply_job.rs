@@ -5,14 +5,14 @@ use kubimo::k8s_openapi::api::core::v1::{
     PodTemplateSpec, SecretEnvSource, Volume, VolumeMount,
 };
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{KubimoWorkspace, prelude::*};
+use kubimo::{Workspace, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
 
 use super::WorkspaceReconciler;
 
-fn construct_command(workspace: &KubimoWorkspace) -> Vec<String> {
+fn construct_command(workspace: &Workspace) -> Vec<String> {
     let mut command = cmd!["bash", "/setup/init.sh"];
     if let Some(git) = workspace.spec.git_config.as_ref() {
         if let Some(name) = git.name.as_deref() {
@@ -58,7 +58,7 @@ impl WorkspaceReconciler {
     pub(crate) async fn apply_job(
         &self,
         ctx: &Context,
-        workspace: &KubimoWorkspace,
+        workspace: &Workspace,
     ) -> Result<Job, kubimo::Error> {
         let workspace_name = workspace.name()?;
         let job = Job {

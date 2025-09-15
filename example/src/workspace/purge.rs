@@ -1,7 +1,7 @@
 use clap::Args;
 
 use futures::prelude::*;
-use kubimo::{KubimoWorkspace, prelude::*};
+use kubimo::{Workspace, prelude::*};
 
 use crate::Context;
 
@@ -12,12 +12,12 @@ impl Purge {
     pub async fn run(self, context: &Context) -> Result<(), Box<dyn std::error::Error>> {
         let spinner = crate::utils::spinner().with_message("Purging workspaces");
         let timer = std::time::Instant::now();
-        let bmows = context.client.api::<KubimoWorkspace>();
+        let bmows = context.client.api::<Workspace>();
         bmows
             .list(&Default::default())
             .map_err(kubimo::Error::from)
             .try_for_each_concurrent(None, |item| {
-                let bmows = context.client.api::<KubimoWorkspace>();
+                let bmows = context.client.api::<Workspace>();
                 let spinner = spinner.clone();
                 async move {
                     let name = item.item.name()?;

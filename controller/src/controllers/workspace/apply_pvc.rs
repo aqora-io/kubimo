@@ -1,6 +1,6 @@
 use kubimo::k8s_openapi::api::core::v1::{PersistentVolumeClaim, PersistentVolumeClaimSpec};
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{KubimoWorkspace, prelude::*};
+use kubimo::{Workspace, prelude::*};
 
 use crate::context::Context;
 use crate::resources::Resources;
@@ -11,7 +11,7 @@ impl WorkspaceReconciler {
     pub(crate) async fn apply_pvc(
         &self,
         ctx: &Context,
-        workspace: &KubimoWorkspace,
+        workspace: &Workspace,
     ) -> Result<PersistentVolumeClaim, kubimo::Error> {
         let pvc = PersistentVolumeClaim {
             metadata: ObjectMeta {

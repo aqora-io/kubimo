@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 use git_url_parse::{GitUrl, Scheme};
-use kubimo::{
-    GitConfig, GitRepo, KubimoWorkspace, KubimoWorkspaceSpec, Requirement, S3Request, prelude::*,
-};
+use kubimo::{GitConfig, GitRepo, Requirement, S3Request, Workspace, WorkspaceSpec, prelude::*};
 use url::Url;
 
 use crate::Context;
@@ -39,7 +37,7 @@ impl Create {
     pub async fn run(mut self, context: &Context) -> Result<(), Box<dyn std::error::Error>> {
         let spinner = crate::utils::spinner().with_message("Creating workspace");
         let timer = std::time::Instant::now();
-        let bmows = context.client.api::<KubimoWorkspace>();
+        let bmows = context.client.api::<Workspace>();
         if let Some(repo) = self.repo.as_deref() {
             let url = GitUrl::parse(repo)?;
             let user = if url.scheme == Scheme::File {
@@ -65,7 +63,7 @@ impl Create {
             }
         }
         let workspace = bmows
-            .patch(&KubimoWorkspace::create(KubimoWorkspaceSpec {
+            .patch(&Workspace::create(WorkspaceSpec {
                 storage: Some(Requirement {
                     min: self.min_storage.as_deref().map(|s| s.parse()).transpose()?,
                     max: self.max_storage.as_deref().map(|s| s.parse()).transpose()?,

@@ -136,10 +136,9 @@ impl Client {
 
     pub async fn patch_all_crds(&self) -> Result<()> {
         let api = kube::Api::<CustomResourceDefinition>::all(self.kube.clone());
-        self.patch_crd::<crate::KubimoWorkspace>(api.clone())
-            .await?;
-        self.patch_crd::<crate::KubimoRunner>(api.clone()).await?;
-        self.patch_crd::<crate::KubimoExporter>(api.clone()).await?;
+        self.patch_crd::<crate::Workspace>(api.clone()).await?;
+        self.patch_crd::<crate::Runner>(api.clone()).await?;
+        self.patch_crd::<crate::Exporter>(api.clone()).await?;
         Ok(())
     }
 }

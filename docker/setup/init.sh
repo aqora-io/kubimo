@@ -91,8 +91,12 @@ init_venv() {
     cp -R "$root/venv" .venv
     echo "Added .venv"
   fi
+  if [ ! -f "uv.lock" ]; then
+    cp "$root/uv.lock" uv.lock
+    echo "Added uv.lock"
+  fi
   if [ -z "$(uv pip list | grep '^marimo')" ]; then
-    uv pip install "$DEFAULT_MARIMO_VERSION"
+    uv pip install marimo
   fi
 }
 

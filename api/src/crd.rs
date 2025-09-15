@@ -44,15 +44,15 @@ pub struct S3Request {
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
-    group = "aqora.io",
+    group = "kubimo.aqora.io",
     version = "v1",
-    kind = "KubimoWorkspace",
+    kind = "Workspace",
     shortname = "bmow",
     namespaced,
     validation = workspace_max_storage_greater_than_min(),
 )]
 #[serde(rename_all = "camelCase")]
-pub struct KubimoWorkspaceSpec {
+pub struct WorkspaceSpec {
     pub storage: Option<Requirement<StorageQuantity>>,
     pub repo: Option<GitRepo>,
     pub git_config: Option<GitConfig>,
@@ -61,21 +61,21 @@ pub struct KubimoWorkspaceSpec {
 }
 
 #[derive(Clone, Copy, Debug, Display)]
-pub enum KubimoWorkspaceField {
+pub enum WorkspaceField {
     #[strum(serialize = "metadata.name")]
     Name,
     #[strum(serialize = "metadata.namespace")]
     Namespace,
 }
 
-impl ResourceFactory for KubimoWorkspace {
+impl ResourceFactory for Workspace {
     fn new(name: &str, spec: Self::Spec) -> Self {
         Self::new(name, spec)
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
-pub enum KubimoRunnerCommand {
+pub enum RunnerCommand {
     #[default]
     Edit,
     Run,
@@ -83,9 +83,9 @@ pub enum KubimoRunnerCommand {
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
-    group = "aqora.io",
+    group = "kubimo.aqora.io",
     version = "v1",
-    kind = "KubimoRunner",
+    kind = "Runner",
     shortname = "bmor",
     selectable = ".spec.workspace",
     namespaced,
@@ -94,15 +94,15 @@ pub enum KubimoRunnerCommand {
     validation = runner_max_cpu_greater_than_min(),
 )]
 #[serde(rename_all = "camelCase")]
-pub struct KubimoRunnerSpec {
+pub struct RunnerSpec {
     pub workspace: String,
-    pub command: KubimoRunnerCommand,
+    pub command: RunnerCommand,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]
-pub enum KubimoRunnerField {
+pub enum RunnerField {
     #[strum(serialize = "metadata.name")]
     Name,
     #[strum(serialize = "metadata.namespace")]
@@ -111,17 +111,17 @@ pub enum KubimoRunnerField {
     Workspace,
 }
 
-impl ResourceFactory for KubimoRunner {
+impl ResourceFactory for Runner {
     fn new(name: &str, spec: Self::Spec) -> Self {
         Self::new(name, spec)
     }
 }
 
-impl KubimoWorkspace {
-    pub fn new_runner(&self, name: &str, spec: KubimoRunnerSpec) -> Result<KubimoRunner> {
-        let mut runner = KubimoRunner::new(
+impl Workspace {
+    pub fn new_runner(&self, name: &str, spec: RunnerSpec) -> Result<Runner> {
+        let mut runner = Runner::new(
             name,
-            KubimoRunnerSpec {
+            RunnerSpec {
                 workspace: self.name()?.to_string(),
                 ..spec
             },
@@ -134,8 +134,8 @@ impl KubimoWorkspace {
         Ok(runner)
     }
 
-    pub fn create_runner(&self, spec: KubimoRunnerSpec) -> Result<KubimoRunner> {
-        Ok(KubimoRunner::create(KubimoRunnerSpec {
+    pub fn create_runner(&self, spec: RunnerSpec) -> Result<Runner> {
+        Ok(Runner::create(RunnerSpec {
             workspace: self.name()?.to_string(),
             ..spec
         }))
@@ -144,30 +144,30 @@ impl KubimoWorkspace {
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
-    group = "aqora.io",
+    group = "kubimo.aqora.io",
     version = "v1",
-    kind = "KubimoExporter",
+    kind = "Exporter",
     shortname = "bmoe",
     selectable = ".spec.workspace",
     namespaced
 )]
 #[serde(rename_all = "camelCase")]
-pub struct KubimoExporterSpec {
+pub struct ExporterSpec {
     pub workspace: String,
     pub s3_request: Option<S3Request>,
 }
 
-impl ResourceFactory for KubimoExporter {
+impl ResourceFactory for Exporter {
     fn new(name: &str, spec: Self::Spec) -> Self {
         Self::new(name, spec)
     }
 }
 
-impl KubimoWorkspace {
-    pub fn new_exporter(&self, name: &str, spec: KubimoExporterSpec) -> Result<KubimoExporter> {
-        let mut exporter = KubimoExporter::new(
+impl Workspace {
+    pub fn new_exporter(&self, name: &str, spec: ExporterSpec) -> Result<Exporter> {
+        let mut exporter = Exporter::new(
             name,
-            KubimoExporterSpec {
+            ExporterSpec {
                 workspace: self.name()?.to_string(),
                 ..spec
             },
@@ -180,8 +180,8 @@ impl KubimoWorkspace {
         Ok(exporter)
     }
 
-    pub fn create_exporter(&self, spec: KubimoExporterSpec) -> Result<KubimoExporter> {
-        Ok(KubimoExporter::create(KubimoExporterSpec {
+    pub fn create_exporter(&self, spec: ExporterSpec) -> Result<Exporter> {
+        Ok(Exporter::create(ExporterSpec {
             workspace: self.name()?.to_string(),
             ..spec
         }))

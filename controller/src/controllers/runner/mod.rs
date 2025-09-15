@@ -12,7 +12,7 @@ use kubimo::k8s_openapi::api::{
     networking::v1::Ingress,
 };
 use kubimo::kube::runtime::{Controller, controller::Action};
-use kubimo::{KubimoLabel, KubimoRunner, prelude::*};
+use kubimo::{KubimoLabel, Runner, prelude::*};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use crate::backoff::default_error_policy;
@@ -24,7 +24,7 @@ use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 struct RunnerReconciler;
 
 impl RunnerReconciler {
-    fn ingress_path(&self, runner: &KubimoRunner) -> kubimo::Result<String> {
+    fn ingress_path(&self, runner: &Runner) -> kubimo::Result<String> {
         const ASCII_SET: &AsciiSet = &NON_ALPHANUMERIC
             .remove(b'-')
             .remove(b'_')
@@ -35,7 +35,7 @@ impl RunnerReconciler {
             utf8_percent_encode(runner.name()?, ASCII_SET)
         ))
     }
-    fn pod_labels(&self, runner: &KubimoRunner) -> kubimo::Result<BTreeMap<String, String>> {
+    fn pod_labels(&self, runner: &Runner) -> kubimo::Result<BTreeMap<String, String>> {
         Ok([(
             KubimoLabel::new("name").to_string(),
             runner.name()?.to_string(),
@@ -47,10 +47,10 @@ impl RunnerReconciler {
 
 #[async_trait::async_trait]
 impl Reconciler for RunnerReconciler {
-    type Resource = KubimoRunner;
+    type Resource = Runner;
     type Error = kubimo::Error;
 
-    async fn apply(&self, ctx: &Context, runner: &KubimoRunner) -> Result<Action, Self::Error> {
+    async fn apply(&self, ctx: &Context, runner: &Runner) -> Result<Action, Self::Error> {
         futures::future::try_join_all([
             self.apply_owner_reference(ctx, runner).boxed(),
             self.apply_pod(ctx, runner).map_ok(|_| ()).boxed(),
@@ -66,10 +66,10 @@ pub async fn run(
     ctx: Arc<Context>,
     shutdown_signal: impl Future<Output = ()> + Send + Sync + 'static,
 ) -> Result<
-    impl Stream<Item = ControllerResult<KubimoRunner, ReconcileError<kubimo::Error>>>,
+    impl Stream<Item = ControllerResult<Runner, ReconcileError<kubimo::Error>>>,
     ReconcileError<kubimo::Error>,
 > {
-    let bmors = ctx.api::<KubimoRunner>().kube().clone();
+    let bmors = ctx.api::<Runner>().kube().clone();
     let pods = ctx.api::<Pod>().kube().clone();
     let svcs = ctx.api::<Service>().kube().clone();
     let ings = ctx.api::<Ingress>().kube().clone();

@@ -32,7 +32,7 @@ where
         .await
         {
             Ok(res) => res?,
-            Err(elapsed) => return Err(format!("Timeout after {elapsed:?}").into()),
+            Err(elapsed) => return Err(format!("Timeout: {elapsed}").into()),
         },
     )
 }

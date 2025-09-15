@@ -4,7 +4,7 @@ use kubimo::k8s_openapi::api::core::v1::{
 };
 use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{KubimoRunner, KubimoRunnerCommand, prelude::*};
+use kubimo::{Runner, RunnerCommand, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
@@ -16,7 +16,7 @@ impl RunnerReconciler {
     pub(crate) async fn apply_pod(
         &self,
         ctx: &Context,
-        runner: &KubimoRunner,
+        runner: &Runner,
     ) -> Result<Pod, kubimo::Error> {
         let pod = Pod {
             metadata: ObjectMeta {
@@ -64,8 +64,8 @@ impl RunnerReconciler {
                         "--base-url",
                         self.ingress_path(runner)?,
                         match runner.spec.command {
-                            KubimoRunnerCommand::Edit => "edit",
-                            KubimoRunnerCommand::Run => "run",
+                            RunnerCommand::Edit => "edit",
+                            RunnerCommand::Run => "run",
                         }
                     ]),
                     ..Default::default()

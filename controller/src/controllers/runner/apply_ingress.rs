@@ -3,7 +3,7 @@ use kubimo::k8s_openapi::api::networking::v1::{
     IngressServiceBackend, IngressSpec, ServiceBackendPort,
 };
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{KubimoRunner, prelude::*};
+use kubimo::{Runner, prelude::*};
 
 use crate::context::Context;
 
@@ -13,7 +13,7 @@ impl RunnerReconciler {
     pub(crate) async fn apply_ingress(
         &self,
         ctx: &Context,
-        runner: &KubimoRunner,
+        runner: &Runner,
     ) -> Result<Ingress, kubimo::Error> {
         let svc = Ingress {
             metadata: ObjectMeta {

@@ -4,7 +4,7 @@ mod apply_owner_reference;
 use std::sync::Arc;
 
 use futures::prelude::*;
-use kubimo::KubimoExporter;
+use kubimo::Exporter;
 use kubimo::k8s_openapi::api::batch::v1::Job;
 use kubimo::kube::runtime::{Controller, controller::Action};
 
@@ -18,10 +18,10 @@ struct ExporterReconciler;
 
 #[async_trait::async_trait]
 impl Reconciler for ExporterReconciler {
-    type Resource = KubimoExporter;
+    type Resource = Exporter;
     type Error = kubimo::Error;
 
-    async fn apply(&self, ctx: &Context, exporter: &KubimoExporter) -> Result<Action, Self::Error> {
+    async fn apply(&self, ctx: &Context, exporter: &Exporter) -> Result<Action, Self::Error> {
         futures::future::try_join_all([
             self.apply_owner_reference(ctx, exporter).boxed(),
             self.apply_job(ctx, exporter).map_ok(|_| ()).boxed(),
@@ -35,10 +35,10 @@ pub async fn run(
     ctx: Arc<Context>,
     shutdown_signal: impl Future<Output = ()> + Send + Sync + 'static,
 ) -> Result<
-    impl Stream<Item = ControllerResult<KubimoExporter, ReconcileError<kubimo::Error>>>,
+    impl Stream<Item = ControllerResult<Exporter, ReconcileError<kubimo::Error>>>,
     ReconcileError<kubimo::Error>,
 > {
-    let bmows = ctx.api::<KubimoExporter>().kube().clone();
+    let bmows = ctx.api::<Exporter>().kube().clone();
     let jobs = ctx.api::<Job>().kube().clone();
     Ok(Controller::new(bmows, Default::default())
         .owns(jobs, Default::default())

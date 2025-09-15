@@ -31,17 +31,22 @@ if [ ! -d ".venv" ]; then
   cp -R "$root/venv" .venv
   echo "Added .venv"
 fi
+if [ ! -f "uv.lock" ]; then
+  cp "$root/uv.lock" uv.lock
+  echo "Added uv.lock"
+fi
 if [ -z "$(uv pip list | grep '^marimo')" ]; then
-  uv pip install "$DEFAULT_MARIMO_VERSION"
+  uv pip install marimo
 fi
 uv sync &
+sync_pid=$!
 
 host="0.0.0.0"
 port="80"
 base_url="${BASE_URL:-/}"
 
 if [[ "$CMD" == "edit" ]]; then
-  uv run marimo \
+  uv run --no-sync marimo \
     --log-level=info \
     --yes \
     edit \
@@ -53,12 +58,15 @@ if [[ "$CMD" == "edit" ]]; then
     --allow-origins='*' \
     --no-token
 elif [[ "$CMD" == "run" ]]; then
-  uv run /app/server.py \
+  uv run --no-sync /app/server.py \
     --include-code \
     "--host=$host" \
     "--port=$port" \
     "--base-url=$base_url"
 else
   echo "Unknown command $CMD"
-  exit 1
 fi
+
+echo "Run failed"
+kill $sync_pid
+exit 1

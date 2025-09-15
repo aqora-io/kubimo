@@ -1,5 +1,5 @@
 use clap::Args;
-use kubimo::{KubimoExporter, KubimoExporterSpec, KubimoWorkspace, S3Request, prelude::*};
+use kubimo::{Exporter, ExporterSpec, S3Request, Workspace, prelude::*};
 use url::Url;
 
 use crate::Context;
@@ -16,11 +16,11 @@ impl Create {
     pub async fn run(self, context: &Context) -> Result<(), Box<dyn std::error::Error>> {
         let spinner = crate::utils::spinner().with_message("Creating runner");
         let timer = std::time::Instant::now();
-        let bmows = context.client.api::<KubimoWorkspace>();
-        let bmoes = context.client.api::<KubimoExporter>();
+        let bmows = context.client.api::<Workspace>();
+        let bmoes = context.client.api::<Exporter>();
         let workspace = bmows.get(&self.workspace).await?;
         let runner = bmoes
-            .patch(&workspace.create_exporter(KubimoExporterSpec {
+            .patch(&workspace.create_exporter(ExporterSpec {
                 s3_request: Some(S3Request {
                     url: Some(self.s3),
                     ..Default::default()

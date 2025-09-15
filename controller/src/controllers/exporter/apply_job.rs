@@ -4,7 +4,7 @@ use kubimo::k8s_openapi::api::core::v1::{
     PodTemplateSpec, SecretEnvSource, Volume, VolumeMount,
 };
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{KubimoExporter, prelude::*};
+use kubimo::{Exporter, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
@@ -15,7 +15,7 @@ impl ExporterReconciler {
     pub(crate) async fn apply_job(
         &self,
         ctx: &Context,
-        exporter: &KubimoExporter,
+        exporter: &Exporter,
     ) -> Result<Option<Job>, kubimo::Error> {
         let Some(s3_url) = exporter
             .spec
