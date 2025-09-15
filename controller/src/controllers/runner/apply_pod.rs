@@ -37,6 +37,7 @@ impl RunnerReconciler {
                 containers: vec![Container {
                     name: format!("{}-runner", runner.name()?),
                     image: Some(ctx.config.marimo_image_name.clone()),
+                    image_pull_policy: Some("IfNotPresent".into()),
                     resources: Resources::default()
                         .cpu(runner.spec.cpu.clone())
                         .memory(runner.spec.memory.clone())

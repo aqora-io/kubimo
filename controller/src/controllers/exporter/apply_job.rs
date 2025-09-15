@@ -38,6 +38,7 @@ impl ExporterReconciler {
                         containers: vec![Container {
                             name: format!("{}-export", exporter.name()?),
                             image: Some(ctx.config.marimo_image_name.clone()),
+                            image_pull_policy: Some("IfNotPresent".into()),
                             volume_mounts: Some(vec![VolumeMount {
                                 mount_path: "/home/me".to_string(),
                                 name: exporter.spec.workspace.clone(),

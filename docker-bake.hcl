@@ -1,17 +1,31 @@
 variable "VERSION" {
-  default = "dev"
+  default = "latest"
 }
 
 variable "REGISTRY" {
-  default = "local"
+  default = "ghcr.io/aqora-io"
 }
 
 variable "MARIMO_NAME" {
   default = "kubimo-marimo"
 }
 
+variable "CONTROLLER_NAME" {
+  default = "kubimo-controller"
+}
+
 group "default" {
-  targets = ["marimo"]
+  targets = ["marimo", "controller"]
+}
+
+target "controller" {
+  dockerfile = "docker/Dockerfile.controller"
+  context = "."
+  name = "controller-${version}"
+  matrix = {
+    version = split(",", VERSION)
+  }
+  tags = [ trimprefix("${REGISTRY}/${CONTROLLER_NAME}:${version}", "/") ]
 }
 
 target "marimo" {

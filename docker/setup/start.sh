@@ -31,10 +31,6 @@ if [ ! -d ".venv" ]; then
   cp -R "$root/venv" .venv
   echo "Added .venv"
 fi
-if [ ! -f "uv.lock" ]; then
-  cp "$root/uv.lock" uv.lock
-  echo "Added uv.lock"
-fi
 if [ -z "$(uv pip list | grep '^marimo')" ]; then
   uv pip install marimo
 fi

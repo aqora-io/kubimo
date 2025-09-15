@@ -1,5 +1,7 @@
 [workspace]
-
 resolver = "3"
 members = ["controller", "api", "json-patch-macros", "example", "s3-tar"]
 default-members = ["controller", "api"]
+
+[workspace.package]
+version = "0.1.0"

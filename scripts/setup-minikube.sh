@@ -9,10 +9,6 @@ minikube start --container-runtime=containerd \
 minikube addons enable ingress
 # enable gvisor addon
 minikube addons enable gvisor
-# build images
-docker buildx bake -f "$script_dir/../docker-bake.hcl"
-# load images
-minikube image load local/kubimo-marimo:dev
 # use minikube context
 kubectl config use-context minikube
 # create kubimo namespace

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use git_url_parse::{GitUrl, Scheme};
+use git_url_parse::GitUrl;
 use kubimo::{GitConfig, GitRepo, Requirement, S3Request, Workspace, WorkspaceSpec, prelude::*};
 use url::Url;
 
@@ -39,23 +39,23 @@ impl Create {
         let timer = std::time::Instant::now();
         let bmows = context.client.api::<Workspace>();
         if let Some(repo) = self.repo.as_deref() {
-            let url = GitUrl::parse(repo)?;
-            let user = if url.scheme == Scheme::File {
-                let components = url.path.split('/').collect::<Vec<_>>();
+            let user = if let Ok(git_url) = GitUrl::parse(repo) {
+                git_url.user().map(|u| u.to_string())
+            } else {
+                let components = repo.split("/").collect::<Vec<_>>();
                 if components.len() != 2 {
                     return Err(format!("Invalid repo: {repo}").into());
                 }
+                let user = components[0].to_string();
                 self.repo = Some(format!(
                     "ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/{}",
-                    url.path
+                    components.join("/")
                 ));
-                Some(components[0].to_string())
-            } else {
-                url.user
+                Some(user)
             };
             if let Some(user) = user {
                 if self.git_name.is_none() {
-                    self.git_name = Some(user.to_string());
+                    self.git_name = Some(user.clone());
                 }
                 if self.git_email.is_none() {
                     self.git_email = Some(format!("{}@local.domain", user));

@@ -81,6 +81,8 @@ is_empty_or_empty_git() {
 init_template() {
   cp "$root/pyproject.toml" pyproject.toml
   echo "Added pyproject.toml"
+  cp "$root/uv.lock" uv.lock
+  echo "Added uv.lock"
   cp "$root/gitignore" .gitignore
   echo "Added .gitignore"
   git init --initial-branch main
@@ -90,10 +92,6 @@ init_venv() {
   if [ ! -d ".venv" ]; then
     cp -R "$root/venv" .venv
     echo "Added .venv"
-  fi
-  if [ ! -f "uv.lock" ]; then
-    cp "$root/uv.lock" uv.lock
-    echo "Added uv.lock"
   fi
   if [ -z "$(uv pip list | grep '^marimo')" ]; then
     uv pip install marimo

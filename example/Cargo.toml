@@ -1,6 +1,6 @@
 [package]
 name = "example"
-version = "0.1.0"
+version = { workspace = true }
 edition = "2024"
 publish = false
 
@@ -18,7 +18,7 @@ tokio = { version = "1.47", features = [
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.3", features = ["derive"] }
-git-url-parse = "0.4"
+git-url-parse = "0.5"
 url = "2.5"
 indicatif = "0.18"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }

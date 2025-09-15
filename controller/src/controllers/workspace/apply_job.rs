@@ -1,4 +1,4 @@
-use git_url_parse::{GitUrl, Scheme};
+use git_url_parse::GitUrl;
 use kubimo::k8s_openapi::api::batch::v1::{Job, JobSpec};
 use kubimo::k8s_openapi::api::core::v1::{
     Container, EnvFromSource, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec,
@@ -24,11 +24,11 @@ fn construct_command(workspace: &Workspace) -> Vec<String> {
     }
     if let Some(repo) = workspace.spec.repo.as_ref() {
         if let Ok(url) = GitUrl::parse(&repo.url)
-            && url.host.is_some()
-            && matches!(url.scheme, Scheme::Ssh | Scheme::GitSsh)
+            && url.host().is_some()
+            && url.scheme().is_some_and(|s| s.ends_with("ssh"))
         {
-            command.extend(cmd!["--ssh-host", url.host.unwrap()]);
-            if let Some(port) = url.port {
+            command.extend(cmd!["--ssh-host", url.host().unwrap()]);
+            if let Some(port) = url.port() {
                 command.extend(cmd!["--ssh-port", port]);
             }
         }
@@ -74,6 +74,7 @@ impl WorkspaceReconciler {
                         containers: vec![Container {
                             name: format!("{}-init", workspace_name),
                             image: Some(ctx.config.marimo_image_name.clone()),
+                            image_pull_policy: Some("IfNotPresent".into()),
                             volume_mounts: Some(vec![VolumeMount {
                                 mount_path: "/home/me".to_string(),
                                 name: workspace_name.into(),

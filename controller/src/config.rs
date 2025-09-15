@@ -5,7 +5,7 @@ fn default_manager_name() -> String {
 }
 
 fn default_marimo_image_name() -> String {
-    "local/kubimo-marimo:dev".to_string()
+    concat!("ghcr.io/aqora-io/kubimo-marimo:", env!("CARGO_PKG_VERSION")).to_string()
 }
 
 fn default_s3_creds_secret() -> String {
