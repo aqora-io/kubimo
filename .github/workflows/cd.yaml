@@ -27,6 +27,9 @@ jobs:
       - name: Build and push
         uses: docker/bake-action@v6
         with:
+          set: |
+            *.cache-from=type=gha
+            *.cache-to=type=gha,mode=max
           push: true
 
   charts:
@@ -57,5 +60,7 @@ jobs:
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
       - name: Run chart-releaser
         uses: helm/chart-releaser-action@v1.7.0
+        with:
+          packages_with_index: true
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
