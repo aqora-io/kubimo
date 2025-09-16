@@ -1,4 +1,19 @@
+# version control
+.git/
+.github/
+.jj/
+.gitignore
+
+# ephemeral
 /target
+
+# secrets
 .envrc
+
+# docker
 docker-bake.hcl
 docker/Dockerfile.*
+
+# non-project
+scripts/
+charts/
