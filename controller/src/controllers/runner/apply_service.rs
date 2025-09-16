@@ -31,8 +31,6 @@ impl RunnerReconciler {
             }),
             ..Default::default()
         };
-        ctx.api_with_namespace::<Service>(namespace)
-            .patch(&svc)
-            .await
+        ctx.api_namespaced::<Service>(namespace).patch(&svc).await
     }
 }

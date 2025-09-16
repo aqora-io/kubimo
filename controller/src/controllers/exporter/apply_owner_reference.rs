@@ -24,7 +24,7 @@ impl ExporterReconciler {
             })
         {
             let workspace = ctx
-                .api_with_namespace::<Workspace>(namespace)
+                .api_namespaced::<Workspace>(namespace)
                 .get(exporter.spec.workspace.as_ref())
                 .await?;
             let mut owner_refs = exporter
@@ -33,7 +33,7 @@ impl ExporterReconciler {
                 .clone()
                 .unwrap_or_default();
             owner_refs.push(workspace.static_controller_owner_ref()?);
-            ctx.api_with_namespace::<Exporter>(namespace)
+            ctx.api_namespaced::<Exporter>(namespace)
                 .patch_json(
                     exporter.name()?,
                     patch![add!(["metadata", "ownerReferences"] => owner_refs)],

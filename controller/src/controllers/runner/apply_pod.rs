@@ -83,6 +83,6 @@ impl RunnerReconciler {
             }),
             ..Default::default()
         };
-        ctx.api_with_namespace::<Pod>(namespace).patch(&pod).await
+        ctx.api_namespaced::<Pod>(namespace).patch(&pod).await
     }
 }

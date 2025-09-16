@@ -87,7 +87,7 @@ impl ExporterReconciler {
             ..Default::default()
         };
         Ok(Some(
-            ctx.api_with_namespace::<Job>(namespace).patch(&job).await?,
+            ctx.api_namespaced::<Job>(namespace).patch(&job).await?,
         ))
     }
 }

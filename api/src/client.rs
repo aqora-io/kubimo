@@ -1,10 +1,7 @@
 use hyper_util::{client::legacy::Client as HttpClient, rt::TokioExecutor};
-use k8s_openapi::{
-    NamespaceResourceScope,
-    apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition,
-};
+use k8s_openapi::NamespaceResourceScope;
+use kube::Resource;
 use kube::client::ConfigExt as _;
-use kube::{CustomResourceExt, Resource};
 use tower::ServiceBuilder;
 use tower_http::{BoxError, trace::TraceLayer};
 
@@ -97,7 +94,7 @@ impl Client {
     }
 
     #[inline]
-    pub fn api_with_namespace<T>(&self, namespace: &str) -> Api<T>
+    pub fn api_namespaced<T>(&self, namespace: &str) -> Api<T>
     where
         T: Resource<Scope = NamespaceResourceScope>,
         <T as Resource>::DynamicType: Default,
@@ -109,36 +106,11 @@ impl Client {
     }
 
     #[inline]
-    pub fn api_all<T>(&self) -> Api<T>
+    pub fn api_global<T>(&self) -> Api<T>
     where
         T: Resource,
         <T as Resource>::DynamicType: Default,
     {
         Api::new(self.name.clone(), kube::Api::all(self.kube.clone()))
-    }
-
-    #[tracing::instrument(level = "debug", skip_all, ret, err)]
-    async fn patch_crd<T>(
-        &self,
-        api: kube::Api<CustomResourceDefinition>,
-    ) -> Result<CustomResourceDefinition>
-    where
-        T: CustomResourceExt,
-    {
-        Ok(api
-            .patch(
-                T::crd_name(),
-                &kube::api::PatchParams::apply(&self.name),
-                &kube::api::Patch::Apply(T::crd()),
-            )
-            .await?)
-    }
-
-    pub async fn patch_all_crds(&self) -> Result<()> {
-        let api = kube::Api::<CustomResourceDefinition>::all(self.kube.clone());
-        self.patch_crd::<crate::Workspace>(api.clone()).await?;
-        self.patch_crd::<crate::Runner>(api.clone()).await?;
-        self.patch_crd::<crate::Exporter>(api.clone()).await?;
-        Ok(())
     }
 }

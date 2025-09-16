@@ -69,10 +69,10 @@ pub async fn run(
     impl Stream<Item = ControllerResult<Runner, ReconcileError<kubimo::Error>>>,
     ReconcileError<kubimo::Error>,
 > {
-    let bmors = ctx.api_all::<Runner>().kube().clone();
-    let pods = ctx.api_all::<Pod>().kube().clone();
-    let svcs = ctx.api_all::<Service>().kube().clone();
-    let ings = ctx.api_all::<Ingress>().kube().clone();
+    let bmors = ctx.api_global::<Runner>().kube().clone();
+    let pods = ctx.api_global::<Pod>().kube().clone();
+    let svcs = ctx.api_global::<Service>().kube().clone();
+    let ings = ctx.api_global::<Ingress>().kube().clone();
     Ok(Controller::new(bmors, Default::default())
         .owns(pods, Default::default())
         .owns(svcs, Default::default())

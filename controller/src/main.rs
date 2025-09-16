@@ -40,9 +40,6 @@ async fn main() {
 
     let ctx = Arc::new(Context::new(client.clone(), config));
 
-    tracing::info!("Patching CRDs...");
-    client.patch_all_crds().await.unwrap();
-
     tracing::info!(
         "Processing events in {} namespace...",
         client.kube().default_namespace()

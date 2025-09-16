@@ -142,6 +142,6 @@ chown -R 1000:1000 /home/me
             }),
             ..Default::default()
         };
-        ctx.api_with_namespace::<Job>(namespace).patch(&job).await
+        ctx.api_namespaced::<Job>(namespace).patch(&job).await
     }
 }

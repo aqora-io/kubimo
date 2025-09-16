@@ -39,9 +39,9 @@ pub async fn run(
     impl Stream<Item = ControllerResult<Workspace, ReconcileError<kubimo::Error>>>,
     ReconcileError<kubimo::Error>,
 > {
-    let bmows = ctx.api_all::<Workspace>().kube().clone();
-    let pvc = ctx.api_all::<PersistentVolumeClaim>().kube().clone();
-    let jobs = ctx.api_all::<Job>().kube().clone();
+    let bmows = ctx.api_global::<Workspace>().kube().clone();
+    let pvc = ctx.api_global::<PersistentVolumeClaim>().kube().clone();
+    let jobs = ctx.api_global::<Job>().kube().clone();
     Ok(Controller::new(bmows, Default::default())
         .owns(pvc, Default::default())
         .owns(jobs, Default::default())

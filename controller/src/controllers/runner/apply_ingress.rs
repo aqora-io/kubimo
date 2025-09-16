@@ -48,8 +48,6 @@ impl RunnerReconciler {
             }),
             ..Default::default()
         };
-        ctx.api_with_namespace::<Ingress>(namespace)
-            .patch(&svc)
-            .await
+        ctx.api_namespaced::<Ingress>(namespace).patch(&svc).await
     }
 }

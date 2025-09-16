@@ -30,7 +30,7 @@ impl WorkspaceReconciler {
             }),
             ..Default::default()
         };
-        ctx.api_with_namespace::<PersistentVolumeClaim>(namespace)
+        ctx.api_namespaced::<PersistentVolumeClaim>(namespace)
             .patch(&pvc)
             .await
     }

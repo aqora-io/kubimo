@@ -38,8 +38,8 @@ pub async fn run(
     impl Stream<Item = ControllerResult<Exporter, ReconcileError<kubimo::Error>>>,
     ReconcileError<kubimo::Error>,
 > {
-    let bmows = ctx.api_all::<Exporter>().kube().clone();
-    let jobs = ctx.api_all::<Job>().kube().clone();
+    let bmows = ctx.api_global::<Exporter>().kube().clone();
+    let jobs = ctx.api_global::<Job>().kube().clone();
     Ok(Controller::new(bmows, Default::default())
         .owns(jobs, Default::default())
         .graceful_shutdown_on(shutdown_signal)

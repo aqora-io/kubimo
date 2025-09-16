@@ -28,3 +28,34 @@ jobs:
         uses: docker/bake-action@v6
         with:
           push: true
+
+  charts:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Print CRDs
+        run: |
+          cargo run --package kubimo --bin print_crds > charts/templates/crds.json
+      - name: Update chart appVersion
+        run: |
+          export VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*= *"([^"]+)".*/\1/')
+          sed -i "s/{{ VERSION }}/$VERSION/" charts/Chart.yaml
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+      - name: Run chart-releaser
+        uses: helm/chart-releaser-action@v1.7.0
+        env:
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
