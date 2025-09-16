@@ -1,9 +1,9 @@
 FROM rust:1.89-slim-bookworm AS s3_tar
 WORKDIR /build
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-  --mount=type=cache,target=/usr/local/cargo/git \
-  --mount=type=cache,target=target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+  --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+  --mount=type=cache,target=target,sharing=locked \
   cargo build --release -p s3-tar \
   && cp target/release/s3-tar /bin/s3-tar
 
