@@ -36,9 +36,6 @@ async fn main() {
 
     let mut builder = kubimo::Client::builder();
     builder.name(&config.name);
-    if let Some(namespace) = config.namespace.as_ref() {
-        builder.namespace(namespace);
-    }
     let client = builder.build().await.unwrap();
 
     let ctx = Arc::new(Context::new(client.clone(), config));

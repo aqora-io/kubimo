@@ -15,6 +15,7 @@ impl RunnerReconciler {
         ctx: &Context,
         runner: &Runner,
     ) -> Result<Ingress, kubimo::Error> {
+        let namespace = runner.require_namespace()?;
         let svc = Ingress {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
@@ -47,6 +48,8 @@ impl RunnerReconciler {
             }),
             ..Default::default()
         };
-        ctx.api::<Ingress>().patch(&svc).await
+        ctx.api_with_namespace::<Ingress>(namespace)
+            .patch(&svc)
+            .await
     }
 }

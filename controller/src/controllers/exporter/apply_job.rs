@@ -25,6 +25,7 @@ impl ExporterReconciler {
         else {
             return Ok(None);
         };
+        let namespace = exporter.require_namespace()?;
         let job = Job {
             metadata: ObjectMeta {
                 name: exporter.metadata.name.clone(),
@@ -38,7 +39,6 @@ impl ExporterReconciler {
                         containers: vec![Container {
                             name: format!("{}-export", exporter.name()?),
                             image: Some(ctx.config.marimo_image_name.clone()),
-                            image_pull_policy: Some("IfNotPresent".into()),
                             volume_mounts: Some(vec![VolumeMount {
                                 mount_path: "/home/me".to_string(),
                                 name: exporter.spec.workspace.clone(),
@@ -86,6 +86,8 @@ impl ExporterReconciler {
             }),
             ..Default::default()
         };
-        Ok(Some(ctx.client.api::<Job>().patch(&job).await?))
+        Ok(Some(
+            ctx.api_with_namespace::<Job>(namespace).patch(&job).await?,
+        ))
     }
 }

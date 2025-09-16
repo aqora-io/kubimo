@@ -12,6 +12,7 @@ impl RunnerReconciler {
         ctx: &Context,
         runner: &Runner,
     ) -> Result<Service, kubimo::Error> {
+        let namespace = runner.require_namespace()?;
         let svc = Service {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
@@ -30,6 +31,8 @@ impl RunnerReconciler {
             }),
             ..Default::default()
         };
-        ctx.api::<Service>().patch(&svc).await
+        ctx.api_with_namespace::<Service>(namespace)
+            .patch(&svc)
+            .await
     }
 }

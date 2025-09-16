@@ -18,6 +18,7 @@ impl RunnerReconciler {
         ctx: &Context,
         runner: &Runner,
     ) -> Result<Pod, kubimo::Error> {
+        let namespace = runner.require_namespace()?;
         let pod = Pod {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
@@ -37,7 +38,6 @@ impl RunnerReconciler {
                 containers: vec![Container {
                     name: format!("{}-runner", runner.name()?),
                     image: Some(ctx.config.marimo_image_name.clone()),
-                    image_pull_policy: Some("IfNotPresent".into()),
                     resources: Resources::default()
                         .cpu(runner.spec.cpu.clone())
                         .memory(runner.spec.memory.clone())
@@ -83,6 +83,6 @@ impl RunnerReconciler {
             }),
             ..Default::default()
         };
-        ctx.api::<Pod>().patch(&pod).await
+        ctx.api_with_namespace::<Pod>(namespace).patch(&pod).await
     }
 }

@@ -10,6 +10,7 @@ impl RunnerReconciler {
         ctx: &Context,
         runner: &Runner,
     ) -> Result<(), kubimo::Error> {
+        let namespace = runner.require_namespace()?;
         if !runner
             .metadata
             .owner_references
@@ -23,12 +24,12 @@ impl RunnerReconciler {
             })
         {
             let workspace = ctx
-                .api::<Workspace>()
+                .api_with_namespace::<Workspace>(namespace)
                 .get(runner.spec.workspace.as_ref())
                 .await?;
             let mut owner_refs = runner.metadata.owner_references.clone().unwrap_or_default();
             owner_refs.push(workspace.static_controller_owner_ref()?);
-            ctx.api::<Runner>()
+            ctx.api_with_namespace::<Runner>(namespace)
                 .patch_json(
                     runner.name()?,
                     patch![add!(["metadata", "ownerReferences"] => owner_refs)],

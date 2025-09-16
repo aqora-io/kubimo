@@ -13,6 +13,7 @@ impl WorkspaceReconciler {
         ctx: &Context,
         workspace: &Workspace,
     ) -> Result<PersistentVolumeClaim, kubimo::Error> {
+        let namespace = workspace.require_namespace()?;
         let pvc = PersistentVolumeClaim {
             metadata: ObjectMeta {
                 name: workspace.metadata.name.clone(),
@@ -29,6 +30,8 @@ impl WorkspaceReconciler {
             }),
             ..Default::default()
         };
-        ctx.client.api::<PersistentVolumeClaim>().patch(&pvc).await
+        ctx.api_with_namespace::<PersistentVolumeClaim>(namespace)
+            .patch(&pvc)
+            .await
     }
 }

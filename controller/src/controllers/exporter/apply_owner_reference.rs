@@ -10,6 +10,7 @@ impl ExporterReconciler {
         ctx: &Context,
         exporter: &Exporter,
     ) -> Result<(), kubimo::Error> {
+        let namespace = exporter.require_namespace()?;
         if !exporter
             .metadata
             .owner_references
@@ -23,7 +24,7 @@ impl ExporterReconciler {
             })
         {
             let workspace = ctx
-                .api::<Workspace>()
+                .api_with_namespace::<Workspace>(namespace)
                 .get(exporter.spec.workspace.as_ref())
                 .await?;
             let mut owner_refs = exporter
@@ -32,7 +33,7 @@ impl ExporterReconciler {
                 .clone()
                 .unwrap_or_default();
             owner_refs.push(workspace.static_controller_owner_ref()?);
-            ctx.api::<Exporter>()
+            ctx.api_with_namespace::<Exporter>(namespace)
                 .patch_json(
                     exporter.name()?,
                     patch![add!(["metadata", "ownerReferences"] => owner_refs)],

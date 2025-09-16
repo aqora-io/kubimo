@@ -9,9 +9,26 @@ pub trait ResourceNameExt: Resource {
             .as_deref()
             .ok_or(Error::ObjectMetaMissing("name"))
     }
+    fn namespace(&self) -> Result<&str> {
+        self.meta()
+            .namespace
+            .as_deref()
+            .ok_or(Error::ObjectMetaMissing("namespace"))
+    }
 }
 
 impl<T> ResourceNameExt for T where T: Resource {}
+
+pub trait ResourceNamespaceExt: Resource {
+    fn require_namespace(&self) -> Result<&str> {
+        self.meta()
+            .namespace
+            .as_deref()
+            .ok_or(Error::ObjectMetaMissing("namespace"))
+    }
+}
+
+impl<T> ResourceNamespaceExt for T where T: Resource {}
 
 pub trait ResourceOwnerRefExt: Resource<DynamicType = ()> {
     fn static_controller_owner_ref(&self) -> Result<OwnerReference> {

@@ -61,6 +61,7 @@ impl WorkspaceReconciler {
         workspace: &Workspace,
     ) -> Result<Job, kubimo::Error> {
         let workspace_name = workspace.name()?;
+        let namespace = workspace.require_namespace()?;
         let job = Job {
             metadata: ObjectMeta {
                 name: workspace.metadata.name.clone(),
@@ -74,7 +75,6 @@ impl WorkspaceReconciler {
                         containers: vec![Container {
                             name: format!("{}-init", workspace_name),
                             image: Some(ctx.config.marimo_image_name.clone()),
-                            image_pull_policy: Some("IfNotPresent".into()),
                             volume_mounts: Some(vec![VolumeMount {
                                 mount_path: "/home/me".to_string(),
                                 name: workspace_name.into(),
@@ -142,6 +142,6 @@ chown -R 1000:1000 /home/me
             }),
             ..Default::default()
         };
-        ctx.client.api::<Job>().patch(&job).await
+        ctx.api_with_namespace::<Job>(namespace).patch(&job).await
     }
 }

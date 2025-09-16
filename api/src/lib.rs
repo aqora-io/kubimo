@@ -27,14 +27,14 @@ pub use filter_params::FilterParams;
 pub use label::{KubimoLabel, ResourceLabelExt};
 pub use list_stream::ApiListStreamExt;
 pub use list_stream::ListStream;
-pub use meta::{ObjectMetaExt, ResourceNameExt, ResourceOwnerRefExt};
+pub use meta::{ObjectMetaExt, ResourceNameExt, ResourceNamespaceExt, ResourceOwnerRefExt};
 pub use quantity::{CpuQuantity, CpuUnit, Quantity, StorageQuantity, StorageUnit};
 pub use selector::{Expression, Selector, WellKnownField};
 
 pub mod prelude {
     pub use super::{
         ApiListStreamExt, ObjectMetaExt, ResourceFactory, ResourceFactoryExt, ResourceLabelExt,
-        ResourceNameExt, ResourceOwnerRefExt,
+        ResourceNameExt, ResourceNamespaceExt, ResourceOwnerRefExt,
     };
     pub use kube::{Resource, ResourceExt};
 }

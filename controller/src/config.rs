@@ -14,7 +14,6 @@ fn default_s3_creds_secret() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    pub namespace: Option<String>,
     #[serde(default = "default_manager_name")]
     pub name: String,
     #[serde(default = "default_marimo_image_name")]
