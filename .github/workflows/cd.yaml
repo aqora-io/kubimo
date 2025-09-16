@@ -42,8 +42,9 @@ jobs:
         uses: docker/bake-action@v6
         with:
           set: |
-            *.cache-from=type=gha
-            *.cache-to=type=gha,mode=max
+            marimo*.cache-from=type=registry,ref=ghcr.io/aqora-io/kubimo-marimo:latest
+            controller*.cache-from=type=registry,ref=ghcr.io/aqora-io/kubimo-controller:latest
+            *.cache-to=type=inline
           push: true
 
   charts:
