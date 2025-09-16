@@ -21,7 +21,7 @@ group "default" {
 target "controller" {
   dockerfile = "docker/Dockerfile.controller"
   context = "."
-  name = "controller-${version}"
+  name = "controller-${replace(version, ".", "-")}"
   matrix = {
     version = split(",", VERSION)
   }
@@ -31,7 +31,7 @@ target "controller" {
 target "marimo" {
   dockerfile = "docker/Dockerfile.marimo"
   context = "."
-  name = "marimo-${version}"
+  name = "marimo-${replace(version, ".", "-")}"
   matrix = {
     version = split(",", VERSION)
   }

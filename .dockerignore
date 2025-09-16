@@ -1,2 +1,4 @@
 /target
 .envrc
+docker-bake.hcl
+docker/Dockerfile.*

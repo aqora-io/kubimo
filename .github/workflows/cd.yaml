@@ -1,7 +1,9 @@
-name: ci
+name: cd
 
 on:
   push:
+    branches:
+      - main
 
 jobs:
   bake:
