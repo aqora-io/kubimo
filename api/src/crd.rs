@@ -1,4 +1,5 @@
-use kube::{CustomResource, Resource};
+use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+use kube::{CustomResource, CustomResourceExt, Resource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strum::Display;
@@ -186,4 +187,8 @@ impl Workspace {
             ..spec
         }))
     }
+}
+
+pub fn all_crds() -> Vec<CustomResourceDefinition> {
+    vec![Workspace::crd(), Runner::crd(), Exporter::crd()]
 }

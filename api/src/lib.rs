@@ -19,7 +19,7 @@ pub use api::Api;
 pub use client::{Client, ClientBuilder};
 pub use crd::{
     Exporter, ExporterSpec, GitConfig, GitRepo, Requirement, Runner, RunnerCommand, RunnerField,
-    RunnerSpec, S3Request, Workspace, WorkspaceField, WorkspaceSpec,
+    RunnerSpec, S3Request, Workspace, WorkspaceField, WorkspaceSpec, all_crds,
 };
 pub use error::{ClientBuildError, Error, Result};
 pub use factory::{ResourceFactory, ResourceFactoryExt};

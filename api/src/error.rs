@@ -12,6 +12,8 @@ pub enum Error {
     Serde(#[from] serde_json::Error),
     #[error("Expected a value of type {0} but found {1}")]
     ExpectedType(&'static str, &'static str),
+    #[error(transparent)]
+    ClientBuildError(#[from] ClientBuildError),
 }
 
 impl Error {

@@ -1,11 +1,16 @@
 use clap::{Parser, Subcommand};
 
-use crate::{Context, exporter, runner, workspace};
+use crate::{
+    context::{Context, GlobalArgs},
+    exporter, runner, workspace,
+};
 
 #[derive(Parser)]
 struct Args {
     #[clap(subcommand)]
     command: Command,
+    #[clap(flatten)]
+    global: GlobalArgs,
 }
 
 #[derive(Subcommand)]
@@ -30,7 +35,7 @@ impl Command {
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let context = Context::load().await?;
+    let context = Context::load(args.global).await?;
     args.command.run(&context).await?;
     Ok(())
 }

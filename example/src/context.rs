@@ -1,5 +1,13 @@
 use std::net::IpAddr;
 
+use clap::Args;
+
+#[derive(Args, Debug, Default, Clone)]
+pub struct GlobalArgs {
+    #[arg(global = true, long, short = 'n')]
+    namespace: Option<String>,
+}
+
 pub struct Context {
     pub client: kubimo::Client,
     pub minikube_ip: Option<IpAddr>,
@@ -21,8 +29,12 @@ async fn get_minikube_ip() -> Result<IpAddr, Box<dyn std::error::Error>> {
 }
 
 impl Context {
-    pub async fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let client = kubimo::Client::infer().await?;
+    pub async fn load(global: GlobalArgs) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut client_builder = kubimo::Client::builder();
+        if let Some(namespace) = global.namespace {
+            client_builder.namespace(namespace);
+        }
+        let client = client_builder.build().await?;
         let minikube_ip = get_minikube_ip().await.ok();
         Ok(Self {
             client,

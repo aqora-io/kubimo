@@ -2,7 +2,6 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use futures::future::{BoxFuture, FutureExt};
-use kubimo::KubimoLabel;
 use kubimo::k8s_openapi::NamespaceResourceScope;
 use kubimo::kube::{
     Resource,
@@ -11,6 +10,7 @@ use kubimo::kube::{
         finalizer::{Event, finalizer},
     },
 };
+use kubimo::{KubimoLabel, prelude::*};
 use serde::{Serialize, de::DeserializeOwned};
 use tower::{Service, ServiceExt};
 
@@ -61,8 +61,11 @@ where
         let finalizer_name = KubimoLabel::new(&self.name);
         let reconciler = self.reconciler.clone();
         async move {
+            let namespace = resource.require_namespace().map_err(|err| {
+                FinalizerError::AddFinalizer(kubimo::kube::Error::Service(err.into()))
+            })?;
             finalizer(
-                ctx.api::<R>().kube(),
+                ctx.api_namespaced::<R>(namespace).kube(),
                 &finalizer_name.to_string(),
                 resource,
                 |event| async move {
