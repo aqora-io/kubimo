@@ -14,7 +14,7 @@ use crate::{
     StorageQuantity,
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Requirement<T> {
     pub min: Option<T>,
