@@ -8,7 +8,7 @@ mod label;
 mod list_stream;
 mod meta;
 mod quantity;
-mod selector;
+pub mod selector;
 mod validation;
 
 pub use json_patch_macros;
@@ -29,7 +29,7 @@ pub use list_stream::ApiListStreamExt;
 pub use list_stream::ListStream;
 pub use meta::{ObjectMetaExt, ResourceNameExt, ResourceNamespaceExt, ResourceOwnerRefExt};
 pub use quantity::{CpuQuantity, CpuUnit, Quantity, StorageQuantity, StorageUnit};
-pub use selector::{Expression, Selector, WellKnownField};
+pub use selector::{Expr, WellKnownField};
 
 pub mod prelude {
     pub use super::{

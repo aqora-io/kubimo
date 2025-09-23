@@ -1,57 +1,56 @@
+use std::collections::BTreeSet;
 use std::fmt;
 
 use strum::Display;
 
 #[derive(Clone, Debug)]
+pub struct Expr(String);
+
+impl Expr {
+    #[inline]
+    pub fn new(key: impl ToString) -> Self {
+        Self(key.to_string())
+    }
+
+    #[inline]
+    pub fn eq(self, value: impl ToString) -> Expression {
+        Expression::Eq(self.0, value.to_string())
+    }
+
+    #[inline]
+    pub fn neq(self, value: impl ToString) -> Expression {
+        Expression::Neq(self.0, value.to_string())
+    }
+
+    #[inline]
+    pub fn in_(self, values: impl IntoIterator<Item = impl ToString>) -> Expression {
+        Expression::In(self.0, values.into_iter().map(|v| v.to_string()).collect())
+    }
+
+    #[inline]
+    pub fn not_in(self, values: impl IntoIterator<Item = impl ToString>) -> Expression {
+        Expression::NotIn(self.0, values.into_iter().map(|v| v.to_string()).collect())
+    }
+
+    #[inline]
+    pub fn exists(self) -> Expression {
+        Expression::Exists(self.0)
+    }
+
+    #[inline]
+    pub fn not_exists(self) -> Expression {
+        Expression::NotExists(self.0)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum Expression {
     Eq(String, String),
     Neq(String, String),
-    In(String, Vec<String>),
-    NotIn(String, Vec<String>),
+    In(String, BTreeSet<String>),
+    NotIn(String, BTreeSet<String>),
     Exists(String),
     NotExists(String),
-}
-
-impl Expression {
-    #[inline]
-    pub fn eq(key: impl ToString, value: impl ToString) -> Self {
-        Self::Eq(key.to_string(), value.to_string())
-    }
-
-    #[inline]
-    pub fn neq(key: impl ToString, value: impl ToString) -> Self {
-        Self::Neq(key.to_string(), value.to_string())
-    }
-
-    #[inline]
-    pub fn in_(key: impl ToString, values: impl IntoIterator<Item = impl ToString>) -> Self {
-        let mut vec = values
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<String>>();
-        vec.dedup();
-        Self::In(key.to_string(), vec)
-    }
-
-    #[inline]
-    pub fn not_in(key: impl ToString, values: impl IntoIterator<Item = impl ToString>) -> Self {
-        let mut vec = values
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<String>>();
-        vec.dedup();
-        Self::NotIn(key.to_string(), vec)
-    }
-
-    #[inline]
-    pub fn exists(key: impl ToString) -> Self {
-        Self::Exists(key.to_string())
-    }
-
-    #[inline]
-    pub fn not_exists(key: impl ToString) -> Self {
-        Self::NotExists(key.to_string())
-    }
 }
 
 impl<K, V> From<(K, V)> for Expression
@@ -60,8 +59,20 @@ where
     V: ToString,
 {
     fn from(tuple: (K, V)) -> Self {
-        Self::eq(tuple.0, tuple.1)
+        Self::Eq(tuple.0.to_string(), tuple.1.to_string())
     }
+}
+
+fn join_values(values: &BTreeSet<String>) -> String {
+    let mut out = String::with_capacity(values.iter().map(|v| v.len() + 1).sum());
+    let mut iter = values.iter().peekable();
+    while let Some(value) = iter.next() {
+        out.push_str(value);
+        if iter.peek().is_some() {
+            out.push(',');
+        }
+    }
+    out
 }
 
 impl fmt::Display for Expression {
@@ -69,9 +80,9 @@ impl fmt::Display for Expression {
         match self {
             Self::Eq(key, value) => write!(f, "{key}={value}"),
             Self::Neq(key, value) => write!(f, "{key}!={value}"),
-            Self::In(key, values) => write!(f, "{key} in ({items})", items = values.join(",")),
+            Self::In(key, values) => write!(f, "{key} in ({items})", items = join_values(values)),
             Self::NotIn(key, values) => {
-                write!(f, "{key} notin ({items})", items = values.join(","))
+                write!(f, "{key} notin ({items})", items = join_values(values))
             }
             Self::Exists(key) => write!(f, "{key}"),
             Self::NotExists(key) => write!(f, "!{key}"),
