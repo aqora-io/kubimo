@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 use futures::prelude::*;
-use futures::stream::BoxStream;
+use futures::stream::{BoxStream, MapErr};
 use kube::{
     Resource,
     api::{Patch, PatchParams},
@@ -9,7 +9,9 @@ use kube::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{ApiListStreamExt, FilterParams, ListStream, ObjectMetaExt, ResourceNameExt, Result};
+use crate::{
+    ApiListStreamExt, Error, FilterParams, ListStream, ObjectMetaExt, ResourceNameExt, Result,
+};
 
 pub struct Api<T> {
     name: String,
@@ -76,8 +78,11 @@ where
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    pub fn list(&self, params: &FilterParams) -> ListStream<T> {
-        self.inner.list_stream(params)
+    pub fn list(&self, params: &FilterParams) -> MapErr<ListStream<T>, fn(kube::Error) -> Error>
+    where
+        T: Unpin,
+    {
+        self.inner.list_stream(params).map_err(Error::from)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
