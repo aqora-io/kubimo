@@ -2,10 +2,34 @@
 
 set -e
 
+wait_for_file() {
+  local file="$1"
+  local timeout="${2:-30}" # default timeout (seconds) if not provided
+  local interval=0.1       # polling interval (seconds)
+  local start_time=$(date +%s.%N)
+
+  while [ ! -f "$file" ]; do
+    local now=$(date +%s.%N)
+    # Compute elapsed time with awk (fast, no external bc)
+    local elapsed=$(awk -v n="$now" -v s="$start_time" 'BEGIN {print n - s}')
+    if awk -v e="$elapsed" -v t="$timeout" 'BEGIN {exit (e>=t)?0:1}'; then
+      return 1 # timed out
+    fi
+    sleep "$interval"
+  done
+
+  return 0 # file found
+}
+
 while [[ $# -gt 0 ]]; do
   case $1 in
   --base-url)
     BASE_URL="$2"
+    shift
+    shift
+    ;;
+  --init-timeout)
+    INIT_TIMEOUT="$2"
     shift
     shift
     ;;
@@ -26,6 +50,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 set -x
+
+file="$HOME/.kubimo/trigger"
+timeout="${INIT_TIMEOUT:-30}"
+if wait_for_file "$file" "$timeout"; then
+  echo "$file detected"
+else
+  echo "Error: Timed out waiting for $file after $timeout seconds." >&2
+  exit 1
+fi
 
 if [ ! -d ".venv" ]; then
   cp -R "$root/venv" .venv

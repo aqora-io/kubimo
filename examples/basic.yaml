@@ -1,0 +1,23 @@
+apiVersion: kubimo.aqora.io/v1
+kind: Workspace
+metadata:
+  name: "workspace"
+spec:
+  storage:
+    min: "10Gi"
+---
+apiVersion: kubimo.aqora.io/v1
+kind: Runner
+metadata:
+  name: "editor"
+spec:
+  command: "Edit"
+  workspace: "workspace"
+---
+apiVersion: kubimo.aqora.io/v1
+kind: Runner
+metadata:
+  name: "runner"
+spec:
+  command: "Run"
+  workspace: "workspace"

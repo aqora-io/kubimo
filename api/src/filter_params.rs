@@ -30,6 +30,7 @@ impl FilterParams {
     }
 }
 
+#[cfg(feature = "client")]
 impl From<&FilterParams> for kube::api::ListParams {
     fn from(params: &FilterParams) -> Self {
         let mut list_params = Self::default();
@@ -46,6 +47,7 @@ impl From<&FilterParams> for kube::api::ListParams {
     }
 }
 
+#[cfg(feature = "client")]
 impl From<&FilterParams> for kube::api::WatchParams {
     fn from(params: &FilterParams) -> Self {
         let mut watch_params = Self::default();
@@ -62,6 +64,7 @@ impl From<&FilterParams> for kube::api::WatchParams {
     }
 }
 
+#[cfg(feature = "runtime")]
 impl From<&FilterParams> for kube::runtime::watcher::Config {
     fn from(params: &FilterParams) -> Self {
         let mut watch_config = Self::default();

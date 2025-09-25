@@ -16,4 +16,5 @@ docker/Dockerfile.*
 
 # non-project
 scripts/
+examples/
 charts/

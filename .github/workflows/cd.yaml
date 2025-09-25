@@ -66,7 +66,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Print CRDs
         run: |
-          cargo run --package kubimo --bin print_crds > charts/kubimo-controller/templates/crds.json
+          cargo run --package kubimo --example print_crds > charts/kubimo-controller/templates/crds.json
       - name: Update chart appVersion
         run: |
           export VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*= *"([^"]+)".*/\1/')

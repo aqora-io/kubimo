@@ -1,6 +1,6 @@
 use kubimo::k8s_openapi::api::core::v1::{
-    Container, ContainerPort, PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec,
-    Probe, TCPSocketAction, Volume, VolumeMount,
+    Container, ContainerPort, HTTPGetAction, PersistentVolumeClaimVolumeSource, Pod,
+    PodSecurityContext, PodSpec, Probe, Volume, VolumeMount,
 };
 use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
@@ -19,6 +19,16 @@ impl RunnerReconciler {
         runner: &Runner,
     ) -> Result<Pod, kubimo::Error> {
         let namespace = runner.require_namespace()?;
+        let ingress_path = self.ingress_path(runner)?;
+        let path_prefix = ingress_path.strip_suffix('/').unwrap_or(&ingress_path);
+        let probe_action = HTTPGetAction {
+            path: Some(match runner.spec.command {
+                RunnerCommand::Edit => format!("{path_prefix}/health"),
+                RunnerCommand::Run => format!("{path_prefix}/_health"),
+            }),
+            port: IntOrString::Int(80),
+            ..Default::default()
+        };
         let pod = Pod {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
@@ -35,8 +45,9 @@ impl RunnerReconciler {
                     fs_group: Some(1000),
                     ..Default::default()
                 }),
+                hostname: Some("kubimo".into()),
                 containers: vec![Container {
-                    name: format!("{}-runner", runner.name()?),
+                    name: "runner".into(),
                     image: Some(ctx.config.marimo_image_name.clone()),
                     resources: Resources::default()
                         .cpu(runner.spec.cpu.clone())
@@ -52,18 +63,22 @@ impl RunnerReconciler {
                         name: Some("marimo".to_string()),
                         ..Default::default()
                     }]),
+                    startup_probe: Some(Probe {
+                        http_get: Some(probe_action.clone()),
+                        failure_threshold: Some(90),
+                        period_seconds: Some(1),
+                        ..Default::default()
+                    }),
                     liveness_probe: Some(Probe {
-                        tcp_socket: Some(TCPSocketAction {
-                            port: IntOrString::Int(80),
-                            ..Default::default()
-                        }),
+                        http_get: Some(probe_action.clone()),
+                        period_seconds: Some(10),
                         ..Default::default()
                     }),
                     command: Some(cmd![
                         "bash",
                         "/setup/start.sh",
                         "--base-url",
-                        self.ingress_path(runner)?,
+                        ingress_path,
                         match runner.spec.command {
                             RunnerCommand::Edit => "edit",
                             RunnerCommand::Run => "run",

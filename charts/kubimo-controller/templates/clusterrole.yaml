@@ -13,5 +13,5 @@ rules:
     resources: ["jobs"]
     verbs: ["*"]
   - apiGroups: [""]
-    resources: ["pods", "services", "persistentvolumeclaims"]
+    resources: ["pods", "services", "persistentvolumeclaims", "secrets"]
     verbs: ["*"]

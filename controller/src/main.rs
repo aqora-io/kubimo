@@ -54,10 +54,6 @@ async fn main() {
                 .await
                 .unwrap()
                 .wait(),
-            controllers::exporter::run(ctx.clone(), shutdown_signal("exporter"))
-                .await
-                .unwrap()
-                .wait(),
         ])
         .map(|_| Ok(())),
         shutdown_timeout(Duration::from_secs(60)).boxed(),

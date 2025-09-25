@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["controller", "api", "json-patch-macros", "example", "s3-tar"]
+members = ["controller", "api", "json-patch-macros"]
 default-members = ["controller"]
 
 [workspace.package]

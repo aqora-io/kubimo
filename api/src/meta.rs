@@ -1,6 +1,6 @@
 use crate::{Error, Result};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::{Resource, api::ObjectMeta};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
+use kube::Resource;
 
 pub trait ResourceNameExt: Resource {
     fn name(&self) -> Result<&str> {
@@ -8,12 +8,6 @@ pub trait ResourceNameExt: Resource {
             .name
             .as_deref()
             .ok_or(Error::ObjectMetaMissing("name"))
-    }
-    fn namespace(&self) -> Result<&str> {
-        self.meta()
-            .namespace
-            .as_deref()
-            .ok_or(Error::ObjectMetaMissing("namespace"))
     }
 }
 
@@ -43,7 +37,7 @@ pub trait ObjectMetaExt {
     fn strip_system(&self) -> Self;
 }
 
-impl ObjectMetaExt for kube::api::ObjectMeta {
+impl ObjectMetaExt for ObjectMeta {
     fn strip_system(&self) -> Self {
         ObjectMeta {
             name: self.name.clone(),

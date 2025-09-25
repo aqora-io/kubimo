@@ -1,17 +1,20 @@
+use std::collections::BTreeMap;
+
+use k8s_openapi::ByteString;
+use k8s_openapi::api::core::v1::{Container, EnvFromSource, EnvVar};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{CustomResource, CustomResourceExt, Resource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strum::Display;
-use url::Url;
 
 use crate::validation::{
     runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
     workspace_max_storage_greater_than_min,
 };
 use crate::{
-    CpuQuantity, ResourceFactory, ResourceFactoryExt, ResourceNameExt, ResourceOwnerRefExt, Result,
-    StorageQuantity,
+    CpuQuantity, ResourceFactory, ResourceNameExt, ResourceOwnerRefExt, Result, StorageQuantity,
 };
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
@@ -21,26 +24,9 @@ pub struct Requirement<T> {
     pub max: Option<T>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct GitRepo {
-    pub url: String,
-    pub branch: Option<String>,
-    pub revision: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct GitConfig {
-    pub name: Option<String>,
-    pub email: Option<String>,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct S3Request {
-    pub url: Option<Url>,
-    pub secret: Option<String>,
+pub struct WorkspaceStatus {
+    pub conditions: Option<Vec<Condition>>,
 }
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -50,15 +36,15 @@ pub struct S3Request {
     kind = "Workspace",
     shortname = "bmow",
     namespaced,
+    status = "WorkspaceStatus",
     validation = workspace_max_storage_greater_than_min(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSpec {
     pub storage: Option<Requirement<StorageQuantity>>,
-    pub repo: Option<GitRepo>,
-    pub git_config: Option<GitConfig>,
-    pub ssh_key: Option<String>,
-    pub s3_request: Option<S3Request>,
+    pub init_containers: Option<Vec<Container>>,
+    #[schemars(with = "Option<BTreeMap<String, String>>")]
+    pub secret_data: Option<BTreeMap<String, ByteString>>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]
@@ -82,6 +68,11 @@ pub enum RunnerCommand {
     Run,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+pub struct RunnerStatus {
+    conditions: Option<Vec<Condition>>,
+}
+
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
     group = "kubimo.aqora.io",
@@ -90,6 +81,7 @@ pub enum RunnerCommand {
     shortname = "bmor",
     selectable = ".spec.workspace",
     namespaced,
+    status = "RunnerStatus",
     validation = runner_immutable_fields(),
     validation = runner_max_memory_greater_than_min(),
     validation = runner_max_cpu_greater_than_min(),
@@ -100,6 +92,8 @@ pub struct RunnerSpec {
     pub command: RunnerCommand,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,
+    pub env: Option<Vec<EnvVar>>,
+    pub env_from: Option<Vec<EnvFromSource>>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]
@@ -134,61 +128,8 @@ impl Workspace {
             .push(self.static_controller_owner_ref()?);
         Ok(runner)
     }
-
-    pub fn create_runner(&self, spec: RunnerSpec) -> Result<Runner> {
-        Ok(Runner::create(RunnerSpec {
-            workspace: self.name()?.to_string(),
-            ..spec
-        }))
-    }
-}
-
-#[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
-#[kube(
-    group = "kubimo.aqora.io",
-    version = "v1",
-    kind = "Exporter",
-    shortname = "bmoe",
-    selectable = ".spec.workspace",
-    namespaced
-)]
-#[serde(rename_all = "camelCase")]
-pub struct ExporterSpec {
-    pub workspace: String,
-    pub s3_request: Option<S3Request>,
-}
-
-impl ResourceFactory for Exporter {
-    fn new(name: &str, spec: Self::Spec) -> Self {
-        Self::new(name, spec)
-    }
-}
-
-impl Workspace {
-    pub fn new_exporter(&self, name: &str, spec: ExporterSpec) -> Result<Exporter> {
-        let mut exporter = Exporter::new(
-            name,
-            ExporterSpec {
-                workspace: self.name()?.to_string(),
-                ..spec
-            },
-        );
-        exporter
-            .meta_mut()
-            .owner_references
-            .get_or_insert_default()
-            .push(self.static_controller_owner_ref()?);
-        Ok(exporter)
-    }
-
-    pub fn create_exporter(&self, spec: ExporterSpec) -> Result<Exporter> {
-        Ok(Exporter::create(ExporterSpec {
-            workspace: self.name()?.to_string(),
-            ..spec
-        }))
-    }
 }
 
 pub fn all_crds() -> Vec<CustomResourceDefinition> {
-    vec![Workspace::crd(), Runner::crd(), Exporter::crd()]
+    vec![Workspace::crd(), Runner::crd()]
 }

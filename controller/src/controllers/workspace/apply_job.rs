@@ -1,8 +1,7 @@
-use git_url_parse::GitUrl;
 use kubimo::k8s_openapi::api::batch::v1::{Job, JobSpec};
 use kubimo::k8s_openapi::api::core::v1::{
-    Container, EnvFromSource, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec,
-    PodTemplateSpec, SecretEnvSource, Volume, VolumeMount,
+    Container, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
+    SecretVolumeSource, Volume, VolumeMount,
 };
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{Workspace, prelude::*};
@@ -12,48 +11,6 @@ use crate::context::Context;
 
 use super::WorkspaceReconciler;
 
-fn construct_command(workspace: &Workspace) -> Vec<String> {
-    let mut command = cmd!["bash", "/setup/init.sh"];
-    if let Some(git) = workspace.spec.git_config.as_ref() {
-        if let Some(name) = git.name.as_deref() {
-            command.extend(cmd!["--git-name", name,]);
-        }
-        if let Some(name) = git.email.as_deref() {
-            command.extend(cmd!["--git-email", name,]);
-        }
-    }
-    if let Some(repo) = workspace.spec.repo.as_ref() {
-        if let Ok(url) = GitUrl::parse(&repo.url)
-            && url.host().is_some()
-            && url.scheme().is_some_and(|s| s.ends_with("ssh"))
-        {
-            command.extend(cmd!["--ssh-host", url.host().unwrap()]);
-            if let Some(port) = url.port() {
-                command.extend(cmd!["--ssh-port", port]);
-            }
-        }
-        command.extend(cmd!["--repo", repo.url]);
-        if let Some(branch) = repo.branch.as_ref() {
-            command.extend(cmd!["--branch", branch]);
-        }
-        if let Some(revision) = repo.revision.as_ref() {
-            command.extend(cmd!["--revision", revision]);
-        }
-    }
-    if let Some(secret) = &workspace.spec.ssh_key {
-        command.extend(cmd!["--ssh-key", secret]);
-    }
-    if let Some(s3_url) = &workspace
-        .spec
-        .s3_request
-        .as_ref()
-        .and_then(|s3_req| s3_req.url.as_ref())
-    {
-        command.extend(cmd!["--s3-url", s3_url]);
-    }
-    command
-}
-
 impl WorkspaceReconciler {
     pub(crate) async fn apply_job(
         &self,
@@ -62,6 +19,47 @@ impl WorkspaceReconciler {
     ) -> Result<Job, kubimo::Error> {
         let workspace_name = workspace.name()?;
         let namespace = workspace.require_namespace()?;
+        let mut volumes = vec![Volume {
+            name: "workspace".into(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: workspace_name.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+        if workspace.spec.secret_data.is_some() {
+            volumes.push(Volume {
+                name: "secret".into(),
+                secret: Some(SecretVolumeSource {
+                    secret_name: Some(workspace_name.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        }
+        let mut init_containers = vec![Container {
+            name: "init-dirs".into(),
+            image: Some("busybox".into()),
+            image_pull_policy: Some("IfNotPresent".into()),
+            volume_mounts: Some(vec![VolumeMount {
+                mount_path: "/home/me".into(),
+                name: "workspace".into(),
+                ..Default::default()
+            }]),
+            command: Some(cmd![
+                "sh",
+                "-c",
+                r#"
+set -ex
+mkdir -p /home/me/workspace
+chown -R 1000:1000 /home/me
+"#,
+            ]),
+            ..Default::default()
+        }];
+        if let Some(spec_init_containers) = workspace.spec.init_containers.clone() {
+            init_containers.extend(spec_init_containers)
+        }
         let job = Job {
             metadata: ObjectMeta {
                 name: workspace.metadata.name.clone(),
@@ -73,66 +71,22 @@ impl WorkspaceReconciler {
                 template: PodTemplateSpec {
                     spec: Some(PodSpec {
                         containers: vec![Container {
-                            name: format!("{}-init", workspace_name),
+                            name: "init".into(),
                             image: Some(ctx.config.marimo_image_name.clone()),
                             volume_mounts: Some(vec![VolumeMount {
-                                mount_path: "/home/me".to_string(),
-                                name: workspace_name.into(),
+                                mount_path: "/home/me".into(),
+                                name: "workspace".into(),
                                 ..Default::default()
                             }]),
-                            env_from: Some(vec![EnvFromSource {
-                                secret_ref: Some(
-                                    workspace
-                                        .spec
-                                        .s3_request
-                                        .as_ref()
-                                        .and_then(|s3_req| s3_req.secret.as_ref())
-                                        .map(|secret| SecretEnvSource {
-                                            name: secret.clone(),
-                                            optional: Some(false),
-                                        })
-                                        .unwrap_or_else(|| SecretEnvSource {
-                                            name: ctx.config.s3_creds_secret.clone(),
-                                            optional: Some(true),
-                                        }),
-                                ),
-                                ..Default::default()
-                            }]),
-                            command: Some(construct_command(workspace)),
+                            command: Some(cmd!["bash", "/setup/init.sh"]),
                             ..Default::default()
                         }],
-                        init_containers: Some(vec![Container {
-                            name: format!("{}-init-dirs", workspace_name),
-                            image: Some("busybox".into()),
-                            volume_mounts: Some(vec![VolumeMount {
-                                mount_path: "/home/me".to_string(),
-                                name: workspace_name.into(),
-                                ..Default::default()
-                            }]),
-                            command: Some(cmd![
-                                "sh",
-                                "-c",
-                                r#"
-set -ex
-mkdir -p /home/me/.ssh
-mkdir -p /home/me/workspace
-chown -R 1000:1000 /home/me
-"#,
-                            ]),
-                            ..Default::default()
-                        }]),
+                        init_containers: Some(init_containers),
                         security_context: Some(PodSecurityContext {
                             fs_group: Some(1000),
                             ..Default::default()
                         }),
-                        volumes: Some(vec![Volume {
-                            name: workspace_name.into(),
-                            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                                claim_name: workspace_name.into(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }]),
+                        volumes: Some(volumes),
                         restart_policy: Some("Never".into()),
                         ..Default::default()
                     }),

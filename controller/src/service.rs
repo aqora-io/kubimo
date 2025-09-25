@@ -10,7 +10,7 @@ use kubimo::kube::{
         finalizer::{Event, finalizer},
     },
 };
-use kubimo::{KubimoLabel, prelude::*};
+use kubimo::prelude::*;
 use serde::{Serialize, de::DeserializeOwned};
 use tower::{Service, ServiceExt};
 
@@ -58,7 +58,7 @@ where
         std::task::Poll::Ready(Ok(()))
     }
     fn call(&mut self, (resource, ctx): (Arc<R>, Arc<Context>)) -> Self::Future {
-        let finalizer_name = KubimoLabel::new(&self.name);
+        let finalizer_name = self.name.clone();
         let reconciler = self.reconciler.clone();
         async move {
             let namespace = resource.require_namespace().map_err(|err| {
@@ -66,7 +66,7 @@ where
             })?;
             finalizer(
                 ctx.api_namespaced::<R>(namespace).kube(),
-                &finalizer_name.to_string(),
+                &finalizer_name,
                 resource,
                 |event| async move {
                     match event {

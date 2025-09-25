@@ -2,11 +2,14 @@ use std::fmt::Debug;
 
 use futures::prelude::*;
 use futures::stream::{BoxStream, MapErr};
+use kube::core::object::HasStatus;
 use kube::{
     Resource,
     api::{Patch, PatchParams},
-    runtime::watcher::{Event, watcher},
 };
+
+#[cfg(feature = "runtime")]
+use kube::runtime::watcher::{Event, watcher};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
@@ -85,6 +88,7 @@ where
         self.inner.list_stream(params).map_err(Error::from)
     }
 
+    #[cfg(feature = "runtime")]
     #[tracing::instrument(level = "debug", skip(self))]
     pub fn watch(&self, params: &FilterParams) -> BoxStream<'static, Result<Event<T>>> {
         watcher(self.inner.clone(), params.into())
@@ -98,7 +102,10 @@ where
     }
 
     #[tracing::instrument(level = "debug", skip(self), ret, err)]
-    pub async fn patch_status(&self, resource: &T) -> Result<T> {
+    pub async fn patch_status(&self, resource: &T) -> Result<T>
+    where
+        T: HasStatus,
+    {
         let mut json = serde_json::to_value(resource)?;
         let Some(object) = json.as_object_mut() else {
             return Err(crate::Error::expected_json_type("object", &json));

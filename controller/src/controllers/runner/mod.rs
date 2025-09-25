@@ -37,7 +37,7 @@ impl RunnerReconciler {
     }
     fn pod_labels(&self, runner: &Runner) -> kubimo::Result<BTreeMap<String, String>> {
         Ok([(
-            KubimoLabel::new("name").to_string(),
+            KubimoLabel::borrow("name").to_string(),
             runner.name()?.to_string(),
         )]
         .into_iter()
