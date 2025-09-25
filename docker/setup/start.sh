@@ -39,7 +39,12 @@ sync_pid=$!
 
 host="0.0.0.0"
 port="80"
-base_url="${BASE_URL:-/}"
+
+if [ -z "$BASE_URL" ]; then
+  base_url_flag=""
+else
+  base_url_flag="--base-url=$BASE_URL"
+fi
 
 if [[ "$CMD" == "edit" ]]; then
   uv run --no-sync marimo \
@@ -50,7 +55,7 @@ if [[ "$CMD" == "edit" ]]; then
     --watch \
     "--host=$host" \
     "--port=$port" \
-    "--base-url=$base_url" \
+    $base_url_flag \
     --allow-origins='*' \
     --no-token
 elif [[ "$CMD" == "run" ]]; then
@@ -58,7 +63,7 @@ elif [[ "$CMD" == "run" ]]; then
     --include-code \
     "--host=$host" \
     "--port=$port" \
-    "--base-url=$base_url"
+    $base_url_flag
 else
   echo "Unknown command $CMD"
 fi

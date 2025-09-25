@@ -14,7 +14,7 @@ RUN useradd -ms /bin/bash -u 1000 ${USER} \
   && usermod -aG sudo ${USER}
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-  autoconf build-essential wget tcl gettext less ssh-client \
+  autoconf build-essential wget tcl gettext less ssh-client cmake \
   libssl-dev libcurl4-openssl-dev libssh-dev libexpat1 libintl-perl zlib1g \
   && rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
 ARG GIT_VERSION=2.51.0
