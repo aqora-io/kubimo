@@ -63,6 +63,8 @@ impl RunnerReconciler {
                         name: Some("marimo".to_string()),
                         ..Default::default()
                     }]),
+                    env: runner.spec.env.clone(),
+                    env_from: runner.spec.env_from.clone(),
                     startup_probe: Some(Probe {
                         http_get: Some(probe_action.clone()),
                         failure_threshold: Some(90),
