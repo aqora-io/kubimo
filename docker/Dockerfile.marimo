@@ -16,5 +16,7 @@ RUN cp /setup/pyproject.toml /home/${USER}/workspace/pyproject.toml \
 COPY docker/setup /setup
 COPY docker/app /app
 USER 1000:1000
+ENV UV_TOOL_BIN_DIR=
+ENV PATH="/home/${USER}/.local/bin:$PATH"
 WORKDIR /home/${USER}/workspace
 CMD ["uv", "run", "python"]
