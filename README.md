@@ -12,13 +12,14 @@ To run the controller run the following
 ```bash
 sh scripts/setup-minikube-dev.sh # setup minikube
 export RUST_LOG=info # set log level
+cargo run -p kubimo --example apply_crds # apply CRDs
 cargo run # run controller
 ```
 
-To create an example runner run the example
+To create an example runner run
 
 ```bash
-cargo run --example runner
+kubectl apply -f examples/basic.yaml
 ```
 
-You should be able to access it soon with `$(minikube ip)/<runner-name>`
+You should be able to access it soon with `$(minikube ip)/editor`

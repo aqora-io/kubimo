@@ -25,6 +25,23 @@ init_template() {
   git init --initial-branch main
 }
 
+init_marimo() {
+  marimo_home="$HOME/.config/marimo"
+  if [ -f "$marimo_home/marimo.toml" ]; then
+    echo "Found $marimo_home/marimo.toml"
+  else
+    mkdir -p "$marimo_home"
+    cp "$root/marimo.toml" "$marimo_home/marimo.toml"
+    echo "Added $marimo_home/marimo.toml"
+  fi
+  if [ -d "__marimo__" ]; then
+    echo "Found __marimo__"
+  else
+    mkdir "__marimo__"
+    echo "Created __marimo__"
+  fi
+}
+
 init_venv() {
   if [ ! -d ".venv" ]; then
     cp -R "$root/venv" .venv
@@ -59,5 +76,6 @@ done
 if is_empty_or_empty_git; then
   init_template
 fi
+init_marimo
 init_venv
 create_trigger
