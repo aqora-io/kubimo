@@ -62,6 +62,17 @@ impl Reconciler for RunnerReconciler {
     }
 }
 
+pub fn controller(ctx: &Context) -> Controller<Runner> {
+    let bmors = ctx.api_global::<Runner>().kube().clone();
+    let pods = ctx.api_global::<Pod>().kube().clone();
+    let svcs = ctx.api_global::<Service>().kube().clone();
+    let ings = ctx.api_global::<Ingress>().kube().clone();
+    Controller::new(bmors, Default::default())
+        .owns(pods, Default::default())
+        .owns(svcs, Default::default())
+        .owns(ings, Default::default())
+}
+
 pub async fn run(
     ctx: Arc<Context>,
     shutdown_signal: impl Future<Output = ()> + Send + Sync + 'static,
@@ -69,18 +80,9 @@ pub async fn run(
     impl Stream<Item = ControllerResult<Runner, ReconcileError<kubimo::Error>>>,
     ReconcileError<kubimo::Error>,
 > {
-    let bmors = ctx.api_global::<Runner>().kube().clone();
-    let pods = ctx.api_global::<Pod>().kube().clone();
-    let svcs = ctx.api_global::<Service>().kube().clone();
-    let ings = ctx.api_global::<Ingress>().kube().clone();
-    Ok(Controller::new(bmors, Default::default())
-        .owns(pods, Default::default())
-        .owns(svcs, Default::default())
-        .owns(ings, Default::default())
-        .graceful_shutdown_on(shutdown_signal)
-        .run(
-            RunnerReconciler.reconcile("controller").await?,
-            default_error_policy,
-            ctx,
-        ))
+    Ok(controller(&ctx).graceful_shutdown_on(shutdown_signal).run(
+        RunnerReconciler.reconcile("controller").await?,
+        default_error_policy,
+        ctx,
+    ))
 }

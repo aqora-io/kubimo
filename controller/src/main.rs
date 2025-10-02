@@ -1,3 +1,4 @@
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,18 +17,26 @@ async fn ctrl_c() {
 
 async fn shutdown_signal(service: &'static str) {
     ctrl_c().await;
-    tracing::info!("Received shutdown signal, shutting down {service} controller...");
+    tracing::info!("Shutting down {service} controller...");
 }
 
-async fn shutdown_timeout(timeout: Duration) -> Result<(), BoxError> {
+async fn shutdown_timeout(timeout: Duration) -> Result<ExitCode, BoxError> {
     ctrl_c().await;
-    tokio::time::sleep(timeout).await;
-    tracing::warn!("Shutdown timeout reached, shutting down forcefully");
-    Err(BoxError::from("Shutdown timeout reached"))
+    tracing::info!("Shutting down gracefully... (Ctrl+c to force)");
+    match tokio::time::timeout(timeout, ctrl_c()).await {
+        Ok(_) => {
+            tracing::warn!("Ctrl+c signal received, shutting down forcefully");
+            Ok(ExitCode::from(2))
+        }
+        Err(_) => {
+            tracing::warn!("Shutdown timeout reached, shutting down forcefully");
+            Err(BoxError::from("Shutdown timeout reached"))
+        }
+    }
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     tracing_subscriber::registry()
         .with(fmt::layer())
         .with(EnvFilter::from_default_env())
@@ -54,11 +63,17 @@ async fn main() {
                 .await
                 .unwrap()
                 .wait(),
+            // controllers::runner_status::run(ctx.clone(), shutdown_signal("runner_status"))
+            //     .await
+            //     .unwrap()
+            //     .wait(),
         ])
-        .map(|_| Ok(())),
+        .map(|_| Ok(ExitCode::SUCCESS)),
         shutdown_timeout(Duration::from_secs(60)).boxed(),
     )
     .await
     .map_err(|err| err.factor_first().0)
-    .unwrap();
+    .unwrap()
+    .factor_first()
+    .0
 }

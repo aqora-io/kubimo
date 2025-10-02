@@ -96,6 +96,7 @@ elif [[ "$CMD" == "run" ]]; then
     --include-code \
     "--host=$host" \
     "--port=$port" \
+    --allow-origins='*' \
     $base_url_flag
 else
   echo "Unknown command $CMD"
