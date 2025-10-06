@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
 use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1::{Container, EnvFromSource, EnvVar};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
@@ -70,7 +71,8 @@ pub enum RunnerCommand {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 pub struct RunnerStatus {
-    conditions: Option<Vec<Condition>>,
+    pub conditions: Option<Vec<Condition>>,
+    pub last_active: Option<DateTime<Utc>>,
 }
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]

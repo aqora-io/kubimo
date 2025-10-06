@@ -63,10 +63,10 @@ async fn main() -> ExitCode {
                 .await
                 .unwrap()
                 .wait(),
-            // controllers::runner_status::run(ctx.clone(), shutdown_signal("runner_status"))
-            //     .await
-            //     .unwrap()
-            //     .wait(),
+            controllers::runner_status::run(ctx.clone(), shutdown_signal("runner_status"))
+                .await
+                .unwrap()
+                .wait(),
         ])
         .map(|_| Ok(ExitCode::SUCCESS)),
         shutdown_timeout(Duration::from_secs(60)).boxed(),

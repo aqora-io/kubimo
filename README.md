@@ -11,7 +11,12 @@ To run the controller run the following
 
 ```bash
 sh scripts/setup-minikube-dev.sh # setup minikube
-export RUST_LOG=info # set log level
+
+# setup env vars
+export RUST_LOG=info
+export KUBIMO__RUNNER_STATUS__RESOLUTION__METHOD="Ingress"
+export KUBIMO__RUNNER_STATUS__RESOLUTION__HOST="http://$(minikube ip)"
+
 cargo run -p kubimo --example apply_crds # apply CRDs
 cargo run # run controller
 ```

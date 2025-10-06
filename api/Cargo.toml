@@ -30,7 +30,7 @@ hyper-util = { version = "0.1", optional = true, default-features = false, featu
 json-patch = { version = "4.0", default-features = false, optional = true }
 k8s-openapi = { version = "0.26", features = ["latest", "schemars"] }
 kube = { version = "2.0", default-features = false, features = ["derive"] }
-schemars = { version = "1.0", features = ["derive", "url2"] }
+schemars = { version = "1.0", features = ["derive", "chrono04"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", optional = true }
 strum = { version = "0.27", features = ["derive"] }
@@ -38,6 +38,7 @@ thiserror = "2.0"
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", features = ["trace"], optional = true }
 tracing = { version = "0.1", optional = true }
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 cel-interpreter = "0.10.0"

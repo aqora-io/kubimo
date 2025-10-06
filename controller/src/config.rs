@@ -20,7 +20,7 @@ fn default_runner_status_check_interval_secs() -> u64 {
 #[serde(tag = "method")]
 pub enum StatusCheckResolution {
     #[default]
-    Service,
+    ServiceDns,
     Ingress {
         host: Url,
     },
@@ -56,7 +56,7 @@ pub struct Config {
 impl Config {
     pub fn load() -> Result<Config, config::ConfigError> {
         config::Config::builder()
-            .add_source(config::Environment::with_prefix("KUBIMO"))
+            .add_source(config::Environment::with_prefix("KUBIMO").separator("__"))
             .build()?
             .try_deserialize()
     }
