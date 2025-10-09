@@ -48,7 +48,7 @@ impl RunnerReconciler {
                 hostname: Some("kubimo".into()),
                 containers: vec![Container {
                     name: "runner".into(),
-                    image: Some(ctx.config.marimo_image_name.clone()),
+                    image: Some(ctx.config.marimo_image.clone()),
                     resources: Resources::default()
                         .cpu(runner.spec.cpu.clone())
                         .memory(runner.spec.memory.clone())

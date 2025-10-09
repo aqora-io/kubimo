@@ -41,6 +41,37 @@ spec:
           volumeMounts:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- with .Values.controller }}
+          env:
+            {{- if .managerName }}
+            - name: KUBIMO__MANAGER_NAME
+              value: {{ .managerName | quote }}
+            {{- end }}
+            {{- if .marimoImage }}
+            - name: KUBIMO__MARIMO_IMAGE
+              value: {{ .marimoImage | quote }}
+            {{- end}}
+            {{- if .busyboxImage }}
+            - name: KUBIMO__BUSYBOX_IMAGE
+              value: {{ .busyboxImage | quote }}
+            {{- end }}
+            {{- with .runnerStatus }}
+            {{- with .resolution }}
+            {{- if .method }}
+            - name: KUBIMO__RUNNER_STATUS__RESOLUTION__METHOD
+              value: {{ .method | quote }}
+            {{- end }}
+            {{- if .host }}
+            - name: KUBIMO__RUNNER_STATUS__RESOLUTION__HOST
+              value: {{ .host | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .intervalSecs }}
+            - name: KUBIMO__RUNNER_STATUS__INTERVAL_SECS
+              value: {{ .intervalSecs | quote }}
+            {{- end }}
+            {{- end }}
+          {{- end }}
       {{- with .Values.volumes }}
       volumes:
         {{- toYaml . | nindent 8 }}

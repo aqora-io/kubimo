@@ -44,7 +44,7 @@ async fn main() -> ExitCode {
     let config = Config::load().unwrap();
 
     let mut builder = kubimo::Client::builder();
-    builder.name(&config.name);
+    builder.name(&config.manager_name);
     let client = builder.build().await.unwrap();
 
     let ctx = Arc::new(Context::new(client.clone(), config));

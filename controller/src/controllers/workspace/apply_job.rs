@@ -39,8 +39,7 @@ impl WorkspaceReconciler {
         }
         let mut init_containers = vec![Container {
             name: "init-dirs".into(),
-            image: Some("busybox".into()),
-            image_pull_policy: Some("IfNotPresent".into()),
+            image: Some(ctx.config.busybox_image.clone()),
             volume_mounts: Some(vec![VolumeMount {
                 mount_path: "/home/me".into(),
                 name: "workspace".into(),
@@ -72,7 +71,7 @@ chown -R 1000:1000 /home/me
                     spec: Some(PodSpec {
                         containers: vec![Container {
                             name: "init".into(),
-                            image: Some(ctx.config.marimo_image_name.clone()),
+                            image: Some(ctx.config.marimo_image.clone()),
                             volume_mounts: Some(vec![VolumeMount {
                                 mount_path: "/home/me".into(),
                                 name: "workspace".into(),

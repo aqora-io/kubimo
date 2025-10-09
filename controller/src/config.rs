@@ -7,8 +7,13 @@ fn default_manager_name() -> String {
 }
 
 #[inline]
-fn default_marimo_image_name() -> String {
+fn default_marimo_image() -> String {
     concat!("ghcr.io/aqora-io/kubimo-marimo:", env!("CARGO_PKG_VERSION")).to_string()
+}
+
+#[inline]
+fn default_busybox_image() -> String {
+    "busybox:1.36.1".to_string()
 }
 
 #[inline]
@@ -46,9 +51,11 @@ impl Default for StatusCheck {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_manager_name")]
-    pub name: String,
-    #[serde(default = "default_marimo_image_name")]
-    pub marimo_image_name: String,
+    pub manager_name: String,
+    #[serde(default = "default_marimo_image")]
+    pub marimo_image: String,
+    #[serde(default = "default_busybox_image")]
+    pub busybox_image: String,
     #[serde(default)]
     pub runner_status: StatusCheck,
 }

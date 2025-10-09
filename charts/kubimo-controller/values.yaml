@@ -10,6 +10,16 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
 
+# controller:
+#   managerName: kubimo-controller
+#   marimoImage: ghcr.io/aqora-io/kubimo-marimo:latest
+#   busyboxImage: busybox:stable
+#   runnerStatus:
+#     resolution:
+#       method: ServiceDns
+#       # host: https://kubimo.org
+#     intervalSecs: 10
+
 # This is to override the chart name.
 nameOverride: ""
 fullnameOverride: ""
