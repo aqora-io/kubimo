@@ -22,7 +22,7 @@ impl WorkspaceReconciler {
                 ..Default::default()
             },
             spec: Some(PersistentVolumeClaimSpec {
-                access_modes: Some(vec!["ReadWriteMany".to_string()]),
+                access_modes: Some(vec!["ReadWriteOnce".to_string()]),
                 resources: Resources::default()
                     .storage(workspace.spec.storage.clone())
                     .into(),
