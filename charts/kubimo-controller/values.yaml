@@ -11,6 +11,7 @@ image:
   tag: ""
 
 # controller:
+#   rustLog: info
 #   managerName: kubimo-controller
 #   marimoImage: ghcr.io/aqora-io/kubimo-marimo:latest
 #   busyboxImage: busybox:stable

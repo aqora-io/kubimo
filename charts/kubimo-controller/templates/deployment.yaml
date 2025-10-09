@@ -43,6 +43,10 @@ spec:
           {{- end }}
           {{- with .Values.controller }}
           env:
+            {{- if .rustLog }}
+            - name: RUST_LOG
+              value: {{ .rustLog | quote }}
+            {{- end }}
             {{- if .managerName }}
             - name: KUBIMO__MANAGER_NAME
               value: {{ .managerName | quote }}

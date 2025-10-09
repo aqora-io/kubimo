@@ -13,6 +13,10 @@ metadata:
 spec:
   command: "Edit"
   workspace: "workspace"
+  # ingress:
+  #   tls:
+  #     host: "kubimo.org"
+  #     clusterIssuer: "letsencrypt-prod"
 ---
 apiVersion: kubimo.aqora.io/v1
 kind: Runner
@@ -21,3 +25,7 @@ metadata:
 spec:
   command: "Run"
   workspace: "workspace"
+  # ingress:
+  #   tls:
+  #     host: "kubimo.org"
+  #     clusterIssuer: "letsencrypt-prod"
