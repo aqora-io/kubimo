@@ -26,6 +26,7 @@ pub struct Requirement<T> {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceStatus {
     pub conditions: Option<Vec<Condition>>,
 }
@@ -63,6 +64,31 @@ impl ResourceFactory for Workspace {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerTls {
+    pub host: String,
+    pub cluster_issuer: String,
+    pub secret_name: Option<String>,
+}
+
+impl RunnerTls {
+    pub fn secret_name(&self) -> String {
+        if let Some(secret_name) = &self.secret_name {
+            secret_name.clone()
+        } else {
+            format!("{}-tls", self.host.replace('.', "-"))
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerIngress {
+    pub class_name: Option<String>,
+    pub tls: Option<RunnerTls>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 pub enum RunnerCommand {
     #[default]
     Edit,
@@ -70,6 +96,7 @@ pub enum RunnerCommand {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct RunnerStatus {
     pub conditions: Option<Vec<Condition>>,
     pub last_active: Option<DateTime<Utc>>,
@@ -96,6 +123,7 @@ pub struct RunnerSpec {
     pub cpu: Option<Requirement<CpuQuantity>>,
     pub env: Option<Vec<EnvVar>>,
     pub env_from: Option<Vec<EnvFromSource>>,
+    pub ingress: Option<RunnerIngress>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]

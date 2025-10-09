@@ -17,6 +17,11 @@ fn default_busybox_image() -> String {
 }
 
 #[inline]
+fn default_ingress_class_name() -> String {
+    "nginx".to_string()
+}
+
+#[inline]
 fn default_runner_status_check_interval_secs() -> u64 {
     10
 }
@@ -56,6 +61,8 @@ pub struct Config {
     pub marimo_image: String,
     #[serde(default = "default_busybox_image")]
     pub busybox_image: String,
+    #[serde(default = "default_ingress_class_name")]
+    pub ingress_class_name: String,
     #[serde(default)]
     pub runner_status: StatusCheck,
 }
