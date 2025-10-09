@@ -55,6 +55,10 @@ spec:
             - name: KUBIMO__BUSYBOX_IMAGE
               value: {{ .busyboxImage | quote }}
             {{- end }}
+            {{- if .ingressClassName }}
+            - name: KUBIMO__INGRESS_CLASS_NAME
+              value: {{ .ingressClassName | quote }}
+            {{- end }}
             {{- with .runnerStatus }}
             {{- with .resolution }}
             {{- if .method }}
