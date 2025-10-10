@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
+  pull_request:
+  merge_group:
+  workflow_dispatch:
 
 jobs:
   bake:
@@ -26,11 +31,18 @@ jobs:
         with:
           path: cargo-cache-mount
           key: ${{ runner.os }}-cargo-cache-mount-${{ hashFiles('**/Cargo.lock') }}
-      - name: Get version
-        run: |
-          export VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*= *"([^"]+)".*/\1/')
-          export VERSION_LIST="$(cut -d. -f1 <<<"$VERSION"),$(cut -d. -f1,2 <<<"$VERSION"),$VERSION,latest"
-          echo "VERSION=$VERSION_LIST" >> $GITHUB_ENV
+      - name: Docker meta controller
+        id: meta-controller
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/aqora-io/kunimo-controller
+          bake-target: docker-metadata-controller
+      - name: Docker meta marimo
+        id: meta-marimo
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/aqora-io/kunimo-marimo
+          bake-target: docker-metadata-marimo
       - name: Restore Docker cache mounts
         uses: reproducible-containers/buildkit-cache-dance@v3
         with:
@@ -42,15 +54,20 @@ jobs:
         uses: docker/bake-action@v6
         with:
           set: |
-            marimo*.cache-from=type=registry,ref=ghcr.io/aqora-io/kubimo-marimo:latest
-            controller*.cache-from=type=registry,ref=ghcr.io/aqora-io/kubimo-controller:latest
+            marimo*.cache-from=type=registry,ref=ghcr.io/aqora-io/kubimo-marimo:main
+            controller*.cache-from=type=registry,ref=ghcr.io/aqora-io/kubimo-controller:main
             *.cache-to=type=inline
-          push: true
+          files: |
+            ./docker-bake.hcl
+            cwd://${{ steps.meta-controller.outputs.bake-file }}
+            cwd://${{ steps.meta-marimo.outputs.bake-file }}
+          push: ${{ github.event_name != 'pull_request' }}
 
   charts:
     permissions:
       contents: write
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,10 +84,6 @@ jobs:
       - name: Print CRDs
         run: |
           cargo run --package kubimo --example print_crds > charts/kubimo-controller/templates/crds.json
-      - name: Update chart appVersion
-        run: |
-          export VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*= *"([^"]+)".*/\1/')
-          sed -i "s/{{ VERSION }}/$VERSION/" charts/kubimo-controller/Chart.yaml
       - name: Configure Git
         run: |
           git config user.name "$GITHUB_ACTOR"
