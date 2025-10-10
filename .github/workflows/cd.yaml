@@ -35,14 +35,26 @@ jobs:
         id: meta-controller
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/aqora-io/kunimo-controller
+          images: ghcr.io/aqora-io/kubimo-controller
           bake-target: docker-metadata-controller
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
       - name: Docker meta marimo
         id: meta-marimo
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/aqora-io/kunimo-marimo
+          images: ghcr.io/aqora-io/kubimo-marimo
           bake-target: docker-metadata-marimo
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
       - name: Restore Docker cache mounts
         uses: reproducible-containers/buildkit-cache-dance@v3
         with:
