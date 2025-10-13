@@ -21,16 +21,19 @@ pub struct ClientBuilder {
 }
 
 impl ClientBuilder {
+    #[inline]
     pub fn name(&mut self, name: impl ToString) -> &mut Self {
         self.name = Some(name.to_string());
         self
     }
 
+    #[inline]
     pub fn namespace(&mut self, namespace: impl ToString) -> &mut Self {
         self.namespace = Some(namespace.to_string());
         self
     }
 
+    #[inline]
     pub fn config(&mut self, config: kube::Config) -> &mut Self {
         self.config = Some(config);
         self
@@ -55,20 +58,27 @@ impl ClientBuilder {
             kube_service,
             self.namespace.take().unwrap_or(config.default_namespace),
         );
-        Ok(Client {
-            name,
-            kube: kube_client,
-        })
+        Ok(Client::new(kube_client, name))
     }
 }
 
 impl Client {
+    #[inline]
     pub async fn infer() -> Result<Client, ClientBuildError> {
         Self::builder().build().await
     }
 
+    #[inline]
     pub fn builder() -> ClientBuilder {
         ClientBuilder::default()
+    }
+
+    #[inline]
+    pub fn new(kube: kube::Client, name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kube,
+        }
     }
 
     #[inline]
