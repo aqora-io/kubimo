@@ -14,7 +14,6 @@ client = [
   "json-patch",
   "futures",
   "hyper-util",
-  "serde_json",
   "tower",
   "tower-http",
   "tracing",
@@ -33,7 +32,7 @@ k8s-openapi = { version = "0.26", features = ["latest", "schemars"] }
 kube = { version = "2.0", default-features = false, features = ["derive"] }
 schemars = { version = "1.0", features = ["derive", "chrono04"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", optional = true }
+serde_json = "1.0"
 strum = { version = "0.27", features = ["derive"] }
 thiserror = "2.0"
 tower = { version = "0.5", optional = true }
