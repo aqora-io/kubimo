@@ -62,6 +62,7 @@ function watchChildrenHeights(container, onChange) {
 
 window.addEventListener("load", () => {
   waitForElement("App", (appEl) => {
+    appEl.setAttribute("data-command", "run");
     watchChildrenHeights(appEl, (height) => {
       window.parent.postMessage({ type: "AppHeight", height }, "*");
     });
