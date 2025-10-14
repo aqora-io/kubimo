@@ -64,6 +64,8 @@ pub struct Config {
     #[serde(default = "default_ingress_class_name")]
     pub ingress_class_name: String,
     #[serde(default)]
+    pub cluster_issuer: Option<String>,
+    #[serde(default)]
     pub runner_status: StatusCheck,
 }
 

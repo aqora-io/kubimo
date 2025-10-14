@@ -67,7 +67,7 @@ impl ResourceFactory for Workspace {
 #[serde(rename_all = "camelCase")]
 pub struct RunnerTls {
     pub host: String,
-    pub cluster_issuer: String,
+    pub cluster_issuer: Option<String>,
     pub secret_name: Option<String>,
 }
 

@@ -16,6 +16,7 @@ image:
 #   marimoImage: ghcr.io/aqora-io/kubimo-marimo:latest
 #   busyboxImage: busybox:stable
 #   ingressClassName: nginx
+#   clusterIssuer: letsencrypt-prod
 #   runnerStatus:
 #     resolution:
 #       method: ServiceDns

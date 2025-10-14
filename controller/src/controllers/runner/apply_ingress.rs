@@ -34,10 +34,13 @@ impl RunnerReconciler {
             "kubernetes.io/ingress.class".to_string(),
             ingress_class_name.clone(),
         );
-        if let Some(tls) = tls {
+        if let Some(cluster_issuer) = tls
+            .and_then(|tls| tls.cluster_issuer.as_ref())
+            .or(ctx.config.cluster_issuer.as_ref())
+        {
             annotations.insert(
                 "cert-manager.io/cluster-issuer".to_string(),
-                tls.cluster_issuer.clone(),
+                cluster_issuer.clone(),
             );
         }
         let svc = Ingress {

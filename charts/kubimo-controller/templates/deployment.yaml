@@ -59,6 +59,10 @@ spec:
             - name: KUBIMO__BUSYBOX_IMAGE
               value: {{ .busyboxImage | quote }}
             {{- end }}
+            {{- if .clusterIssuer }}
+            - name: KUBIMO__CLUSTER_ISSUER
+              value: {{ .clusterIssuer | quote }}
+            {{- end }}
             {{- if .ingressClassName }}
             - name: KUBIMO__INGRESS_CLASS_NAME
               value: {{ .ingressClassName | quote }}
