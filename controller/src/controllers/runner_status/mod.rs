@@ -97,12 +97,26 @@ impl Reconciler for RunnerStatusReconciler {
                 return Ok(Action::requeue(interval));
             }
         };
+        let bmors = ctx.api_for(runner)?;
         if connections.is_active() {
             let mut patched = runner.clone();
             patched.status.get_or_insert_default().last_active = Some(now);
-            ctx.api_namespaced::<Runner>(patched.require_namespace()?)
-                .patch_status(&patched)
-                .await?;
+            bmors.patch_status(&patched).await?;
+        } else if let Some(delete_after_secs_inactive) = runner
+            .spec
+            .lifecycle
+            .as_ref()
+            .and_then(|l| l.delete_after_secs_inactive)
+        {
+            let last_active = runner
+                .status
+                .as_ref()
+                .and_then(|status| status.last_active)
+                .or_else(|| runner.metadata.creation_timestamp.as_ref().map(|t| t.0))
+                .unwrap_or(Utc::now());
+            if last_active + TimeDelta::seconds(delete_after_secs_inactive.into()) < now {
+                bmors.delete(runner.name()?).await?;
+            }
         }
         Ok(Action::requeue(interval))
     }

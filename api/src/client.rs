@@ -5,7 +5,7 @@ use kube::client::ConfigExt as _;
 use tower::ServiceBuilder;
 use tower_http::{BoxError, trace::TraceLayer};
 
-use crate::{Api, ClientBuildError, Result};
+use crate::{Api, ClientBuildError, ResourceNamespaceExt, Result};
 
 #[derive(Clone)]
 pub struct Client {
@@ -113,6 +113,16 @@ impl Client {
             self.name.clone(),
             kube::Api::namespaced(self.kube.clone(), namespace),
         )
+    }
+
+    #[inline]
+    pub fn api_for<T>(&self, resource: &T) -> Result<Api<T>>
+    where
+        T: Resource<Scope = NamespaceResourceScope>,
+        <T as Resource>::DynamicType: Default,
+    {
+        let namespace = resource.require_namespace()?;
+        Ok(self.api_namespaced::<T>(namespace))
     }
 
     #[inline]

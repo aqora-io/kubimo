@@ -13,6 +13,8 @@ metadata:
 spec:
   command: "Edit"
   workspace: "workspace"
+  # lifecycle:
+  #   deleteAfterSecsInactive: 60
   # ingress:
   #   tls:
   #     host: "kubimo.org"
@@ -25,6 +27,8 @@ metadata:
 spec:
   command: "Run"
   workspace: "workspace"
+  # lifecycle:
+  #   deleteAfterSecsInactive: 60
   # ingress:
   #   tls:
   #     host: "kubimo.org"

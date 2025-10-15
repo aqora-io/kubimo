@@ -89,6 +89,12 @@ pub struct RunnerIngress {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerLifecycle {
+    pub delete_after_secs_inactive: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 pub enum RunnerCommand {
     #[default]
     Edit,
@@ -124,6 +130,7 @@ pub struct RunnerSpec {
     pub env: Option<Vec<EnvVar>>,
     pub env_from: Option<Vec<EnvFromSource>>,
     pub ingress: Option<RunnerIngress>,
+    pub lifecycle: Option<RunnerLifecycle>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]
