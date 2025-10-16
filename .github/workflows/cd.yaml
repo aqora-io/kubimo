@@ -95,7 +95,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Print CRDs
         run: |
-          cargo run --package kubimo --example print_crds > charts/kubimo-controller/templates/crds.json
+          cargo run --package kubimo --example print_crds -- --helm-if .Values.crds.enabled \
+            > charts/kubimo-controller/templates/crds.json
       - name: Configure Git
         run: |
           git config user.name "$GITHUB_ACTOR"
