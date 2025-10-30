@@ -1,0 +1,2 @@
+!has(self.spec.volumes) ||
+  self.spec.volumes.all(v, v.name != self.metadata.name)

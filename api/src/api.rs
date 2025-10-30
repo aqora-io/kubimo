@@ -16,6 +16,9 @@ use crate::{
     ApiListStreamExt, Error, FilterParams, ListStream, ObjectMetaExt, ResourceNameExt, Result,
 };
 
+pub type ApiListStream<T> = MapErr<ListStream<T>, fn(kube::Error) -> Error>;
+
+#[derive(Clone, Debug)]
 pub struct Api<T> {
     name: String,
     inner: kube::api::Api<T>,
@@ -81,7 +84,7 @@ where
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    pub fn list(&self, params: &FilterParams) -> MapErr<ListStream<T>, fn(kube::Error) -> Error>
+    pub fn list(&self, params: &FilterParams) -> ApiListStream<T>
     where
         T: Unpin,
     {

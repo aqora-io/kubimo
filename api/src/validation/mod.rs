@@ -1,15 +1,21 @@
 use kube::core::Rule;
 
-pub fn runner_immutable_fields() -> Rule {
-    Rule::new(include_str!("./runner_immutable_fields.cel"))
-        .message("workspace is immutable")
-        .field_path(".spec.workspace")
-}
-
 pub fn workspace_max_storage_greater_than_min() -> Rule {
     Rule::new(include_str!("./workspace_max_storage_greater_than_min.cel"))
         .message("workspace max storage must be greater than or equal to min storage")
         .field_path(".spec.storage.max")
+}
+
+pub fn workspace_no_volume_with_name() -> Rule {
+    Rule::new(include_str!("./workspace_no_volume_with_name.cel"))
+        .message("Volume names must not match the resource metadata.name")
+        .field_path(".spec.volumes")
+}
+
+pub fn runner_immutable_fields() -> Rule {
+    Rule::new(include_str!("./runner_immutable_fields.cel"))
+        .message("workspace is immutable")
+        .field_path(".spec.workspace")
 }
 
 pub fn runner_max_memory_greater_than_min() -> Rule {
@@ -37,8 +43,9 @@ mod tests {
 
     #[test]
     fn test_runner_cel_compiles() {
-        test_compiles(runner_immutable_fields());
         test_compiles(workspace_max_storage_greater_than_min());
+        test_compiles(workspace_no_volume_with_name());
+        test_compiles(runner_immutable_fields());
         test_compiles(runner_max_memory_greater_than_min());
         test_compiles(runner_max_cpu_greater_than_min());
     }

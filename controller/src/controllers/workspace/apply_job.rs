@@ -1,7 +1,7 @@
 use kubimo::k8s_openapi::api::batch::v1::{Job, JobSpec};
 use kubimo::k8s_openapi::api::core::v1::{
     Container, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
-    SecretVolumeSource, Volume, VolumeMount,
+    Volume, VolumeMount,
 };
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{Workspace, prelude::*};
@@ -19,30 +19,21 @@ impl WorkspaceReconciler {
     ) -> Result<Job, kubimo::Error> {
         let workspace_name = workspace.name()?;
         let namespace = workspace.require_namespace()?;
-        let mut volumes = vec![Volume {
-            name: "workspace".into(),
+        let mut volumes = workspace.spec.volumes.clone().unwrap_or_default();
+        volumes.push(Volume {
+            name: workspace_name.into(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
                 claim_name: workspace_name.into(),
                 ..Default::default()
             }),
             ..Default::default()
-        }];
-        if workspace.spec.secret_data.is_some() {
-            volumes.push(Volume {
-                name: "secret".into(),
-                secret: Some(SecretVolumeSource {
-                    secret_name: Some(workspace_name.into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            })
-        }
+        });
         let mut init_containers = vec![Container {
             name: "init-dirs".into(),
             image: Some(ctx.config.busybox_image.clone()),
             volume_mounts: Some(vec![VolumeMount {
                 mount_path: "/home/me".into(),
-                name: "workspace".into(),
+                name: workspace_name.into(),
                 ..Default::default()
             }]),
             command: Some(cmd![
@@ -74,7 +65,7 @@ chown -R 1000:1000 /home/me
                             image: Some(ctx.config.marimo_image.clone()),
                             volume_mounts: Some(vec![VolumeMount {
                                 mount_path: "/home/me".into(),
-                                name: "workspace".into(),
+                                name: workspace_name.into(),
                                 ..Default::default()
                             }]),
                             command: Some(cmd!["bash", "/setup/init.sh"]),

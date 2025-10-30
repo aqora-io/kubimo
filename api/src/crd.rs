@@ -1,8 +1,5 @@
-use std::collections::BTreeMap;
-
 use chrono::{DateTime, Utc};
-use k8s_openapi::ByteString;
-use k8s_openapi::api::core::v1::{Container, EnvFromSource, EnvVar};
+use k8s_openapi::api::core::v1::{Container, EnvFromSource, EnvVar, Volume};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{CustomResource, CustomResourceExt, Resource};
@@ -12,7 +9,7 @@ use strum::Display;
 
 use crate::validation::{
     runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
-    workspace_max_storage_greater_than_min,
+    workspace_max_storage_greater_than_min, workspace_no_volume_with_name,
 };
 use crate::{
     CpuQuantity, ResourceFactory, ResourceNameExt, ResourceOwnerRefExt, Result, StorageQuantity,
@@ -40,13 +37,14 @@ pub struct WorkspaceStatus {
     namespaced,
     status = "WorkspaceStatus",
     validation = workspace_max_storage_greater_than_min(),
+    validation = workspace_no_volume_with_name(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSpec {
     pub storage: Option<Requirement<StorageQuantity>>,
     pub init_containers: Option<Vec<Container>>,
-    #[schemars(with = "Option<BTreeMap<String, String>>")]
-    pub secret_data: Option<BTreeMap<String, ByteString>>,
+    #[schemars(length(max = 25))]
+    pub volumes: Option<Vec<Volume>>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]

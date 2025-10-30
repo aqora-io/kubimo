@@ -19,7 +19,7 @@ pub use k8s_openapi;
 pub use kube;
 
 #[cfg(feature = "client")]
-pub use api::Api;
+pub use api::{Api, ApiListStream};
 #[cfg(feature = "client")]
 pub use client::{Client, ClientBuilder};
 pub use crd::{
@@ -40,7 +40,7 @@ pub use selector::{Expr, WellKnownField};
 
 pub mod prelude {
     #[cfg(feature = "client")]
-    pub use super::ApiListStreamExt;
+    pub use super::{ApiListStream, ApiListStreamExt};
     pub use super::{
         ObjectMetaExt, ResourceFactory, ResourceNameExt, ResourceNamespaceExt, ResourceOwnerRefExt,
     };

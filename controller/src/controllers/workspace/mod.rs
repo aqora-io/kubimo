@@ -1,6 +1,5 @@
 mod apply_job;
 mod apply_pvc;
-mod apply_secret;
 mod apply_status;
 
 use std::sync::Arc;
@@ -8,7 +7,7 @@ use std::sync::Arc;
 use futures::prelude::*;
 use kubimo::Workspace;
 use kubimo::k8s_openapi::api::batch::v1::Job;
-use kubimo::k8s_openapi::api::core::v1::{PersistentVolumeClaim, Secret};
+use kubimo::k8s_openapi::api::core::v1::PersistentVolumeClaim;
 use kubimo::kube::runtime::{Controller, controller::Action};
 
 use crate::backoff::default_error_policy;
@@ -27,7 +26,6 @@ impl Reconciler for WorkspaceReconciler {
     async fn apply(&self, ctx: &Context, workspace: &Workspace) -> Result<Action, Self::Error> {
         futures::future::try_join_all([
             self.apply_pvc(ctx, workspace).map_ok(|_| ()).boxed(),
-            self.apply_secret(ctx, workspace).map_ok(|_| ()).boxed(),
             self.apply_job(ctx, workspace).map_ok(|_| ()).boxed(),
             self.apply_status(ctx, workspace).boxed(),
         ])
@@ -46,11 +44,9 @@ pub async fn run(
     let bmows = ctx.api_global::<Workspace>().kube().clone();
     let pvc = ctx.api_global::<PersistentVolumeClaim>().kube().clone();
     let jobs = ctx.api_global::<Job>().kube().clone();
-    let secrets = ctx.api_global::<Secret>().kube().clone();
     Ok(Controller::new(bmows, Default::default())
         .owns(pvc, Default::default())
         .owns(jobs, Default::default())
-        .owns(secrets, Default::default())
         .graceful_shutdown_on(shutdown_signal)
         .run(
             WorkspaceReconciler.reconcile("controller").await?,
