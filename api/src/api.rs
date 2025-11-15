@@ -91,6 +91,17 @@ where
         self.inner.list_stream(params).map_err(Error::from)
     }
 
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub async fn find(&self, params: &FilterParams) -> Result<Option<T>> {
+        Ok(self
+            .inner
+            .list(&kube::api::ListParams::from(params).limit(1))
+            .await?
+            .items
+            .into_iter()
+            .next())
+    }
+
     #[cfg(feature = "runtime")]
     #[tracing::instrument(level = "debug", skip(self))]
     pub fn watch(&self, params: &FilterParams) -> BoxStream<'static, Result<Event<T>>> {
