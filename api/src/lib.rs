@@ -24,7 +24,8 @@ pub use api::{Api, ApiListStream};
 pub use client::{Client, ClientBuilder};
 pub use crd::{
     Requirement, Runner, RunnerCommand, RunnerField, RunnerIngress, RunnerLifecycle, RunnerSpec,
-    RunnerStatus, RunnerTls, Workspace, WorkspaceField, WorkspaceSpec, WorkspaceStatus, all_crds,
+    RunnerStatus, RunnerTls, RunnerToken, Workspace, WorkspaceField, WorkspaceSpec,
+    WorkspaceStatus, all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;
