@@ -33,6 +33,11 @@ while [[ $# -gt 0 ]]; do
     shift
     shift
     ;;
+  --token)
+    TOKEN="$2"
+    shift
+    shift
+    ;;
   -* | --*)
     echo "Unknown option $1"
     exit 1
@@ -79,6 +84,12 @@ else
   base_url_flag="--base-url=$BASE_URL"
 fi
 
+if [ -z "$TOKEN" ]; then
+  token_flag="--no-token"
+else
+  token_flag="--token-password=$TOKEN"
+fi
+
 if [[ "$CMD" == "edit" ]]; then
   uv run --no-sync marimo \
     --log-level=info \
@@ -88,16 +99,17 @@ if [[ "$CMD" == "edit" ]]; then
     --watch \
     "--host=$host" \
     "--port=$port" \
-    $base_url_flag \
     --allow-origins='*' \
-    --no-token
+    $base_url_flag \
+    $token_flag
 elif [[ "$CMD" == "run" ]]; then
   uv run --no-sync /app/server.py \
     --include-code \
     "--host=$host" \
     "--port=$port" \
     --allow-origins='*' \
-    $base_url_flag
+    $base_url_flag \
+    $token_flag
 else
   echo "Unknown command $CMD"
 fi

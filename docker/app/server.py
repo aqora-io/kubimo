@@ -165,7 +165,8 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", default=8000, type=int)
     parser.add_argument("--include-code", action="store_true")
-    parser.add_argument("--token")
+    parser.add_argument("--token-password")
+    parser.add_argument("--no-token", action="store_true")
     parser.add_argument("--skew-protection", action="store_true")
     parser.add_argument("--base-url", default="/")
     parser.add_argument(
@@ -177,12 +178,17 @@ if __name__ == "__main__":
     parser.add_argument("directory", nargs="?", default=".")
     args = parser.parse_args()
 
+    if args.token_password and args.no_token:
+        raise ValueError("Cannot specify both --token and --no-token")
+    if not args.token_password and not args.no_token:
+        print("WARNING: No token specified")
+
     uvicorn.run(
         build_app(
             args.directory,
             base_url=args.base_url,
             include_code=args.include_code,
-            token=args.token,
+            token=args.token_password,
             skew_protection=args.skew_protection,
             allow_origins=args.allow_origins,
         ),

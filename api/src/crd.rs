@@ -106,6 +106,12 @@ pub struct RunnerStatus {
     pub last_active: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerToken {
+    pub value: Option<String>,
+}
+
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
     group = "kubimo.aqora.io",
@@ -129,6 +135,7 @@ pub struct RunnerSpec {
     pub env_from: Option<Vec<EnvFromSource>>,
     pub ingress: Option<RunnerIngress>,
     pub lifecycle: Option<RunnerLifecycle>,
+    pub token: Option<RunnerToken>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]

@@ -13,6 +13,8 @@ metadata:
 spec:
   command: "Edit"
   workspace: "workspace"
+  # token:
+  #   value: "token"
   # lifecycle:
   #   deleteAfterSecsInactive: 60
   # ingress:
@@ -27,6 +29,8 @@ metadata:
 spec:
   command: "Run"
   workspace: "workspace"
+  # token:
+  #   value: "token"
   # lifecycle:
   #   deleteAfterSecsInactive: 60
   # ingress:

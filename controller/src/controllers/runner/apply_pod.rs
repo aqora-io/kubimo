@@ -29,6 +29,22 @@ impl RunnerReconciler {
             port: IntOrString::Int(80),
             ..Default::default()
         };
+        let mut command = cmd!["bash", "/setup/start.sh", "--base-url", ingress_path,];
+        if let Some(token) = runner
+            .spec
+            .token
+            .as_ref()
+            .and_then(|token| token.value.as_ref())
+        {
+            command.extend(cmd!["--token", token]);
+        }
+        command.push(
+            match runner.spec.command {
+                RunnerCommand::Edit => "edit",
+                RunnerCommand::Run => "run",
+            }
+            .into(),
+        );
         let pod = Pod {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
@@ -76,16 +92,7 @@ impl RunnerReconciler {
                         period_seconds: Some(10),
                         ..Default::default()
                     }),
-                    command: Some(cmd![
-                        "bash",
-                        "/setup/start.sh",
-                        "--base-url",
-                        ingress_path,
-                        match runner.spec.command {
-                            RunnerCommand::Edit => "edit",
-                            RunnerCommand::Run => "run",
-                        }
-                    ]),
+                    command: Some(command),
                     ..Default::default()
                 }],
                 volumes: Some(vec![Volume {
