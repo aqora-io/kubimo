@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "json-patch-macros"
-version = "0.1.3"
+version = "0.1.4"
 
 [[package]]
 name = "json5"
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "kubimo"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "cel-interpreter",
  "chrono",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "kubimo-controller"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "chrono",
