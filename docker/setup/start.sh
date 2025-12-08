@@ -56,6 +56,11 @@ done
 
 set -x
 
+# Unset kubernetes env vars
+for name in $(env | sed -n 's/^\(KUBERNETES[^=]*\)=.*/\1/p'); do
+  unset "$name"
+done
+
 file="$HOME/.kubimo/trigger"
 timeout="${INIT_TIMEOUT:-30}"
 if wait_for_file "$file" "$timeout"; then
