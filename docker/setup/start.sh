@@ -95,6 +95,7 @@ if [[ "$CMD" == "edit" ]]; then
     --log-level=info \
     --yes \
     edit \
+    --skip-update-check \
     --headless \
     --watch \
     "--host=$host" \
