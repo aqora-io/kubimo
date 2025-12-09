@@ -83,6 +83,7 @@ impl RunnerTls {
 #[serde(rename_all = "camelCase")]
 pub struct RunnerIngress {
     pub class_name: Option<String>,
+    pub path: Option<String>,
     pub tls: Option<RunnerTls>,
 }
 

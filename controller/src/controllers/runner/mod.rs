@@ -24,7 +24,7 @@ use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 struct RunnerReconciler;
 
 impl RunnerReconciler {
-    fn ingress_path(&self, runner: &Runner) -> kubimo::Result<String> {
+    fn base_ingress_path(&self, runner: &Runner) -> kubimo::Result<String> {
         const ASCII_SET: &AsciiSet = &NON_ALPHANUMERIC
             .remove(b'-')
             .remove(b'_')
@@ -35,6 +35,20 @@ impl RunnerReconciler {
             utf8_percent_encode(runner.name()?, ASCII_SET)
         ))
     }
+
+    fn ingress_path(&self, runner: &Runner) -> kubimo::Result<String> {
+        if let Some(path) = runner
+            .spec
+            .ingress
+            .as_ref()
+            .and_then(|ingress| ingress.path.as_ref())
+        {
+            Ok(path.clone())
+        } else {
+            self.base_ingress_path(runner)
+        }
+    }
+
     fn pod_labels(&self, runner: &Runner) -> kubimo::Result<BTreeMap<String, String>> {
         Ok([(
             KubimoLabel::borrow("name").to_string(),

@@ -17,10 +17,11 @@ spec:
   #   value: "token"
   # lifecycle:
   #   deleteAfterSecsInactive: 60
-  # ingress:
-  #   tls:
-  #     host: "kubimo.org"
-  #     clusterIssuer: "letsencrypt-prod"
+  ingress:
+    path: "/workspace/edit"
+    # tls:
+    #   host: "kubimo.org"
+    #   clusterIssuer: "letsencrypt-prod"
 ---
 apiVersion: kubimo.aqora.io/v1
 kind: Runner
@@ -33,7 +34,8 @@ spec:
   #   value: "token"
   # lifecycle:
   #   deleteAfterSecsInactive: 60
-  # ingress:
-  #   tls:
-  #     host: "kubimo.org"
-  #     clusterIssuer: "letsencrypt-prod"
+  ingress:
+    path: "/workspace/run"
+    # tls:
+    #   host: "kubimo.org"
+    #   clusterIssuer: "letsencrypt-prod"
