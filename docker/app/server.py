@@ -1,4 +1,3 @@
-import os
 import threading
 
 import marimo
@@ -8,11 +7,6 @@ from starlette.routing import Mount, Route
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.middleware.cors import CORSMiddleware
-
-script_dir = os.path.dirname(os.path.abspath(__file__))
-script_js_path = os.path.join(script_dir, "script.js")
-with open(script_js_path, "rb") as f:
-    script_js_bytes = f.read()
 
 
 class AtomicInteger:
@@ -62,42 +56,6 @@ class ActiveConnectionsMiddleware:
         await self.app(scope, wrapped_receive, send)
 
 
-class InjectScriptMiddleware:
-    def __init__(self, app: ASGIApp):
-        self.app = app
-        self.content_type = None
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        async def send_wrapper(message: Message):
-            if message["type"] == "http.response.start":
-                headers = []
-                for k, v in message["headers"]:
-                    if k.lower() == b"content-type":
-                        self.content_type = v
-                    # Drop content-length for now; we'll fix it later
-                    if k.lower() != b"content-length":
-                        headers.append((k, v))
-
-                message["headers"] = headers
-                await send(message)
-
-            elif message["type"] == "http.response.body":
-                if self.content_type and b"text/html" in self.content_type:
-                    message["body"] = message["body"].replace(
-                        b"<head>",
-                        b"<head><script>" + script_js_bytes + b"</script>",
-                        1,
-                    )
-
-                await send(message)
-
-        await self.app(scope, receive, send_wrapper)
-
-
 async def connections(_):
     return JSONResponse({"active": active_connections.value})
 
@@ -127,7 +85,6 @@ def build_app(
     )
     middleware = [
         Middleware(ActiveConnectionsMiddleware),
-        Middleware(InjectScriptMiddleware),
     ]
     root_url = base_url.rstrip("/")
     app = Starlette(
