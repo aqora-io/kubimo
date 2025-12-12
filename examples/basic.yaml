@@ -20,7 +20,8 @@ spec:
   ingress:
     path: "/workspace/edit"
     # tls:
-    #   host: "kubimo.org"
+    #   hosts:
+    #     - "example.com"
     #   clusterIssuer: "letsencrypt-prod"
 ---
 apiVersion: kubimo.aqora.io/v1
@@ -37,5 +38,6 @@ spec:
   ingress:
     path: "/workspace/run"
     # tls:
-    #   host: "kubimo.org"
+    #   hosts:
+    #     - "example.com"
     #   clusterIssuer: "letsencrypt-prod"

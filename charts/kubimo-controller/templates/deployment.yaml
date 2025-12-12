@@ -67,6 +67,10 @@ spec:
             - name: KUBIMO__INGRESS_CLASS_NAME
               value: {{ .ingressClassName | quote }}
             {{- end }}
+            {{- if .runnerHosts }}
+            - name: KUBIMO__RUNNER_HOSTS
+              value: {{ if kindIs "string" .runnerHosts }}{{ .runnerHosts | quote }}{{ else }}{{ join "," .runnerHosts | quote }}{{ end }}
+            {{- end }}
             {{- with .runnerStatus }}
             {{- with .resolution }}
             {{- if .method }}

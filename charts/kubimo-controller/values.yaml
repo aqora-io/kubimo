@@ -16,6 +16,8 @@ image:
 #   marimoImage: ghcr.io/aqora-io/kubimo-marimo:latest
 #   busyboxImage: busybox:stable
 #   ingressClassName: nginx
+#   runnerHosts:
+#     - kubimo.org
 #   clusterIssuer: letsencrypt-prod
 #   runnerStatus:
 #     resolution:

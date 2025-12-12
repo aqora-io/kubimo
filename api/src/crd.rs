@@ -64,19 +64,9 @@ impl ResourceFactory for Workspace {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerTls {
-    pub host: String,
+    pub hosts: Option<Vec<String>>,
     pub cluster_issuer: Option<String>,
     pub secret_name: Option<String>,
-}
-
-impl RunnerTls {
-    pub fn secret_name(&self) -> String {
-        if let Some(secret_name) = &self.secret_name {
-            secret_name.clone()
-        } else {
-            format!("{}-tls", self.host.replace('.', "-"))
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -152,6 +142,24 @@ pub enum RunnerField {
 impl ResourceFactory for Runner {
     fn new(name: &str, spec: Self::Spec) -> Self {
         Self::new(name, spec)
+    }
+}
+
+impl Runner {
+    pub fn ingress_tls_secret_name(&self) -> Result<String> {
+        Ok(
+            if let Some(secret_name) = self
+                .spec
+                .ingress
+                .as_ref()
+                .and_then(|ingress| ingress.tls.as_ref())
+                .and_then(|tls| tls.secret_name.as_ref())
+            {
+                secret_name.clone()
+            } else {
+                format!("{}-tls", self.name()?)
+            },
+        )
     }
 }
 

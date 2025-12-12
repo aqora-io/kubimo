@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kubimo::k8s_openapi::api::networking::v1::{
     HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
@@ -24,7 +24,7 @@ impl RunnerReconciler {
             .as_ref()
             .and_then(|ingress| ingress.class_name.clone())
             .unwrap_or_else(|| ctx.config.ingress_class_name.clone());
-        let tls = runner
+        let spec_tls = runner
             .spec
             .ingress
             .as_ref()
@@ -34,7 +34,7 @@ impl RunnerReconciler {
             "kubernetes.io/ingress.class".to_string(),
             ingress_class_name.clone(),
         );
-        if let Some(cluster_issuer) = tls
+        if let Some(cluster_issuer) = spec_tls
             .and_then(|tls| tls.cluster_issuer.as_ref())
             .or(ctx.config.cluster_issuer.as_ref())
         {
@@ -43,24 +43,33 @@ impl RunnerReconciler {
                 cluster_issuer.clone(),
             );
         }
-        let svc = Ingress {
-            metadata: ObjectMeta {
-                name: runner.metadata.name.clone(),
-                namespace: runner.metadata.namespace.clone(),
-                owner_references: Some(vec![runner.static_controller_owner_ref()?]),
-                annotations: Some(annotations),
-                ..Default::default()
-            },
-            spec: Some(IngressSpec {
-                ingress_class_name: Some(ingress_class_name),
-                tls: tls.map(|tls| {
-                    vec![IngressTLS {
-                        hosts: Some(vec![tls.host.clone()]),
-                        secret_name: Some(tls.secret_name()),
-                    }]
-                }),
-                rules: Some(vec![IngressRule {
-                    host: tls.map(|tls| tls.host.clone()),
+        let mut hosts = ctx
+            .config
+            .runner_hosts
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if let Some(spec_hosts) = spec_tls.and_then(|tls| tls.hosts.as_ref()) {
+            for host in spec_hosts {
+                hosts.insert(host.clone());
+            }
+        }
+        let (tls, hosts) = if hosts.is_empty() {
+            (None, vec![None])
+        } else {
+            (
+                Some(vec![IngressTLS {
+                    hosts: Some(hosts.iter().cloned().collect()),
+                    secret_name: Some(runner.ingress_tls_secret_name()?),
+                }]),
+                hosts.into_iter().map(Some).collect(),
+            )
+        };
+        let rules = hosts
+            .into_iter()
+            .map(|host| {
+                kubimo::Result::Ok(IngressRule {
+                    host,
                     http: Some(HTTPIngressRuleValue {
                         paths: vec![HTTPIngressPath {
                             path: Some(self.ingress_path(runner)?),
@@ -77,7 +86,21 @@ impl RunnerReconciler {
                             },
                         }],
                     }),
-                }]),
+                })
+            })
+            .collect::<kubimo::Result<Vec<_>>>()?;
+        let svc = Ingress {
+            metadata: ObjectMeta {
+                name: runner.metadata.name.clone(),
+                namespace: runner.metadata.namespace.clone(),
+                owner_references: Some(vec![runner.static_controller_owner_ref()?]),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: Some(IngressSpec {
+                ingress_class_name: Some(ingress_class_name),
+                tls,
+                rules: Some(rules),
                 ..Default::default()
             }),
             ..Default::default()
