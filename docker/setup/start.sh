@@ -28,11 +28,6 @@ while [[ $# -gt 0 ]]; do
     shift
     shift
     ;;
-  --init-timeout)
-    INIT_TIMEOUT="$2"
-    shift
-    shift
-    ;;
   --token)
     TOKEN="$2"
     shift
@@ -116,10 +111,14 @@ elif [[ "$CMD" == "run" ]]; then
     --allow-origins='*' \
     $base_url_flag \
     $token_flag
+elif [[ "$CMD" == "cache" ]]; then
+  uv run --no-sync /app/cache.py
+  kill $sync_pid || echo "No sync process to kill"
+  exit 0
 else
   echo "Unknown command $CMD"
 fi
 
 echo "Run failed"
-kill $sync_pid
+kill $sync_pid || echo "No sync process to kill"
 exit 1

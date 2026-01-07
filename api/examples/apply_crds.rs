@@ -9,6 +9,7 @@ pub async fn main() -> Result<()> {
     let client = Client::infer().await?;
     let crds = client.api_global::<CustomResourceDefinition>();
     for crd in all_crds() {
+        println!("Applying {}", crd.metadata.name.as_ref().unwrap());
         crds.patch(&crd).await?;
     }
     Ok(())

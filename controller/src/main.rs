@@ -67,6 +67,10 @@ async fn main() -> ExitCode {
                 .await
                 .unwrap()
                 .wait(),
+            controllers::cache_job::run(ctx.clone(), shutdown_signal("cache_job"))
+                .await
+                .unwrap()
+                .wait(),
         ])
         .map(|_| Ok(ExitCode::SUCCESS)),
         shutdown_timeout(Duration::from_secs(60)).boxed(),

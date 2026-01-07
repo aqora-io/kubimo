@@ -41,3 +41,11 @@ spec:
     #   hosts:
     #     - "example.com"
     #   clusterIssuer: "letsencrypt-prod"
+---
+apiVersion: kubimo.aqora.io/v1
+kind: CacheJob
+metadata:
+  name: "cache"
+spec:
+  workspace: "workspace"
+  backoffLimit: 0

@@ -181,6 +181,59 @@ impl Workspace {
     }
 }
 
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[kube(
+    group = "kubimo.aqora.io",
+    version = "v1",
+    kind = "CacheJob",
+    shortname = "bmocj",
+    selectable = ".spec.workspace",
+    namespaced
+)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheJobSpec {
+    pub workspace: String,
+    pub memory: Option<Requirement<StorageQuantity>>,
+    pub cpu: Option<Requirement<CpuQuantity>>,
+    pub env: Option<Vec<EnvVar>>,
+    pub env_from: Option<Vec<EnvFromSource>>,
+    pub backoff_limit: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, Display)]
+pub enum CacheJobField {
+    #[strum(serialize = "metadata.name")]
+    Name,
+    #[strum(serialize = "metadata.namespace")]
+    Namespace,
+    #[strum(serialize = "spec.workspace")]
+    Workspace,
+}
+
+impl ResourceFactory for CacheJob {
+    fn new(name: &str, spec: Self::Spec) -> Self {
+        Self::new(name, spec)
+    }
+}
+
+impl Workspace {
+    pub fn new_cache_job(&self, name: &str, spec: CacheJobSpec) -> Result<CacheJob> {
+        let mut cache_job = CacheJob::new(
+            name,
+            CacheJobSpec {
+                workspace: self.name()?.to_string(),
+                ..spec
+            },
+        );
+        cache_job
+            .meta_mut()
+            .owner_references
+            .get_or_insert_default()
+            .push(self.static_controller_owner_ref()?);
+        Ok(cache_job)
+    }
+}
+
 pub fn all_crds() -> Vec<CustomResourceDefinition> {
-    vec![Workspace::crd(), Runner::crd()]
+    vec![Workspace::crd(), Runner::crd(), CacheJob::crd()]
 }
