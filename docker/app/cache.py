@@ -1,40 +1,31 @@
 import logging
 from pathlib import Path
 import importlib.util
-import json
 import asyncio
-import threading
-from contextlib import asynccontextmanager
 from concurrent.futures import ProcessPoolExecutor
 import subprocess
+import itertools
 
 import marimo
-from marimo._server.notebook import (
-    AppFileManager,
-)  # will be moved to marimo._session.notebook
-from marimo._server.session.serialize import (
-    serialize_session_view,
-)  # will be moved to marimo._session.state.serialize
-from marimo._server.export import run_app_until_completion
+from marimo._server.export import run_app_then_export_as_html
+from marimo._utils.marimo_path import MarimoPath
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-async def _cache_app(path: Path):
+async def _cache_app(path: Path, *, include_code: bool):
     logger.info(f"Caching {path}")
-    file_manager = AppFileManager(path)
-    session_view, _ = await run_app_until_completion(
-        file_manager, cli_args={}, argv=None
+    export_result = await run_app_then_export_as_html(
+        MarimoPath(path),
+        include_code=include_code,
+        cli_args={},
+        argv=[],
     )
-    session_snapshot = serialize_session_view(
-        session_view,
-        cell_ids=list(file_manager.app.cell_manager.cell_ids()),
-    )
-    session_dir = path.parent / "__marimo__" / "session"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    with open(session_dir / f"{path.name}.json", "w") as f:
-        json.dump(session_snapshot, f, indent=2)
+    export_dir = path.parent / "__marimo__"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    export_path = export_dir / export_result.download_filename
+    export_path.write_text(export_result.contents, encoding="utf-8")
 
 
 def _is_gitignored(path: Path, git_root: Path) -> bool:
@@ -62,10 +53,10 @@ def _is_app(path: Path):
     return hasattr(module, "app") and isinstance(getattr(module, "app"), marimo.App)
 
 
-def _cache_app_sync(path: Path):
+def _cache_app_sync(path: Path, include_code: bool):
     try:
         if _is_app(path):
-            asyncio.run(_cache_app(path))
+            asyncio.run(_cache_app(path, include_code=include_code))
             logger.info(f"Cached {path}")
             return True
         else:
@@ -76,24 +67,26 @@ def _cache_app_sync(path: Path):
         return False
 
 
-def _get_python_files(directory: str) -> list[Path]:
+def _get_python_files(directory: str, include_gitignored: bool = False) -> list[Path]:
     """Get all Python files in directory, excluding gitignored files and directories."""
     directory_path = Path(directory).resolve()
 
+    git_root = None
     # Find git root directory
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=directory_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        git_root = Path(result.stdout.strip())
-    except Exception:
-        # If not in a git repo, proceed without filtering
-        logger.warning("Not in a git repository, skipping gitignore filtering")
-        git_root = None
+    if not include_gitignored:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=directory_path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            git_root = Path(result.stdout.strip())
+        except Exception:
+            # If not in a git repo, proceed without filtering
+            logger.warning("Not in a git repository, skipping gitignore filtering")
+            git_root = None
 
     files = []
 
@@ -123,12 +116,21 @@ def _get_python_files(directory: str) -> list[Path]:
     return files
 
 
-def _cache_all_apps(directory: str):
-    files = _get_python_files(directory)
+def _cache_all_apps(
+    directory: str,
+    *,
+    include_gitignored: bool = False,
+    include_code: bool = False,
+):
+    files = _get_python_files(directory, include_gitignored=include_gitignored)
 
     # Run _cache_app in parallel with process workers
     with ProcessPoolExecutor() as executor:
-        results = list(executor.map(_cache_app_sync, files))
+        results = list(
+            executor.map(
+                _cache_app_sync, files, itertools.repeat(include_code)
+            )
+        )
 
     successful = sum(results)
     failed = len(results) - successful
@@ -141,6 +143,18 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("directory", nargs="?", default=".")
+    parser.add_argument(
+        "--include-gitignored", help="Include gitignored files", action="store_true"
+    )
+    parser.add_argument(
+        "--include-code",
+        action="store_true",
+        help="Include code cells in cached HTML output.",
+    )
+    parser.add_argument("directory", nargs="?", default=".", help="Directory to cache")
     args = parser.parse_args()
-    _cache_all_apps(args.directory)
+    _cache_all_apps(
+        args.directory,
+        include_gitignored=args.include_gitignored,
+        include_code=args.include_code,
+    )

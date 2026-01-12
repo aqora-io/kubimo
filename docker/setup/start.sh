@@ -112,7 +112,7 @@ elif [[ "$CMD" == "run" ]]; then
     $base_url_flag \
     $token_flag
 elif [[ "$CMD" == "cache" ]]; then
-  uv run --no-sync /app/cache.py
+  uv run --no-sync /app/cache.py --include-code
   kill $sync_pid || echo "No sync process to kill"
   exit 0
 else
