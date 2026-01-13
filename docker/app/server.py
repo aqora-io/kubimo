@@ -1,17 +1,23 @@
+import functools
 import json
 import logging
 import re
 import threading
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import marimo
-from marimo._session.model import SessionMode
-from marimo._session.types import KernelState
+from marimo._server.api.auth import (
+    CookieSession,
+    CustomSessionMiddleware,
+    RANDOM_SECRET,
+    TOKEN_QUERY_PARAM,
+)
 
 from starlette.applications import Starlette
-from starlette.datastructures import QueryParams
+from starlette.datastructures import MutableHeaders
 from starlette.middleware import Middleware
 from starlette.routing import Mount, Route
+from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.middleware.cors import CORSMiddleware
@@ -19,33 +25,14 @@ from starlette.middleware.cors import CORSMiddleware
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_AUTOSWITCH_SCRIPT_PATH = Path(__file__).resolve().parent / "marimo_autoswitch.js"
-_WS_REPLAY_PATCHED = False
 _MARIMO_CODE_BLOCK = re.compile(r"(<marimo-code[^>]*>)(.*?)(</marimo-code>)", re.DOTALL)
 _SHOW_APP_CODE_PATTERN = re.compile(r'("showAppCode"\s*:\s*)(true|false)')
 _CODE_FIELD_PATTERN = re.compile(r'("code"\s*:\s*)"(?:(?:\\.)|[^"\\])*"')
-
-
-def _patch_run_mode_reconnect() -> None:
-    global _WS_REPLAY_PATCHED
-    if _WS_REPLAY_PATCHED:
-        return
-    try:
-        from marimo._server.api.endpoints.ws_endpoint import WebSocketHandler
-    except Exception as exc:
-        logger.warning("Failed to patch marimo reconnect behavior: %s", exc)
-        return
-
-    original = WebSocketHandler._reconnect_session
-
-    def patched(self, session, replay: bool) -> None:
-        force_replay = self.websocket.query_params.get("force_replay") == "1"
-        if self.mode == SessionMode.RUN and force_replay:
-            replay = True
-        return original(self, session, replay)
-
-    WebSocketHandler._reconnect_session = patched
-    _WS_REPLAY_PATCHED = True
+_JSON_SCRIPT_ESCAPES = {
+    ord(">"): "\\u003E",
+    ord("<"): "\\u003C",
+    ord("&"): "\\u0026",
+}
 
 
 class AtomicInteger:
@@ -95,130 +82,41 @@ class ActiveConnectionsMiddleware:
         await self.app(scope, wrapped_receive, send)
 
 
-def _strip_base_url(request_path: str, base_url: str) -> str | None:
-    base = base_url.rstrip("/")
-    if not base:
-        return request_path.lstrip("/")
-    if not request_path.startswith(f"{base}/"):
-        return None
-    return request_path[len(base) + 1 :]
-
-
-def _find_app_file(directory: Path, relative_path: str) -> tuple[Path, str] | None:
-    if not relative_path or Path(relative_path).suffix:
-        return None
-
-    direct_match = directory / f"{relative_path}.py"
-    if direct_match.exists() and not direct_match.name.startswith("_"):
-        return direct_match, ""
-
-    parts = relative_path.split("/")
-    for i in range(len(parts), 0, -1):
-        prefix = parts[:i]
-        remaining = parts[i:]
-        candidate = directory.joinpath(*prefix).with_suffix(".py")
-        if candidate.exists() and not candidate.name.startswith("_"):
-            return candidate, "/".join(remaining)
+def _app_path(request_path: str, base_url: str, directory: Path) -> Path | None:
+    request = PurePosixPath("/") / request_path.strip("/")
+    base = PurePosixPath("/") / base_url.strip("/")
+    rel_path = request.relative_to(base)
+    app_path = (Path(directory) / rel_path).with_suffix(".py")
+    if not app_path.name.startswith("_") and app_path.exists():
+        return app_path
     return None
-
-
-def _resolve_app_file(request_path: str, base_url: str, directory: Path) -> Path | None:
-    relative_path = _strip_base_url(request_path, base_url)
-    if relative_path is None:
-        return None
-    relative_path = relative_path.lstrip("/").rstrip("/")
-    if not relative_path or relative_path.startswith("_"):
-        return None
-    match = _find_app_file(directory, relative_path)
-    if not match:
-        return None
-    file_path, remaining = match
-    if remaining:
-        return None
-    return file_path
 
 
 def _cached_export_path(file_path: Path) -> Path:
     return file_path.parent / "__marimo__" / file_path.with_suffix(".html").name
 
 
-def _get_dynamic_directory(app: ASGIApp) -> ASGIApp | None:
-    if hasattr(app, "_app_cache") and hasattr(app, "directory"):
-        return app
-    return None
+def _resolve_cached_html_path(relative_path: str, directory: Path) -> Path | None:
+    app_path = _app_path(relative_path, "/", directory)
+    if not app_path:
+        return None
+    return _cached_export_path(app_path)
 
 
-def _get_session(marimo_app: ASGIApp, file_path: Path, session_id: str | None = None):
-    dynamic = _get_dynamic_directory(marimo_app)
-    if dynamic is None:
-        return None
-    cache_key = str(file_path)
-    try:
-        cached_app = dynamic._app_cache.get(cache_key)
-    except Exception:
-        return None
-    if cached_app is None:
-        return None
-    session_manager = getattr(
-        getattr(cached_app, "state", None), "session_manager", None
-    )
-    if session_manager is None:
-        return None
-    if session_id:
-        session = session_manager.get_session(session_id)
-        if session is None:
-            return None
-        if session.app_file_manager.path != str(file_path.absolute()):
-            return None
-    else:
-        session = session_manager.get_session_by_file_key(str(file_path.absolute()))
-    return session
-
-
-def _is_run_complete(session) -> bool:
-    cell_ids = list(session.app_file_manager.app.cell_manager.cell_ids())
-    if not cell_ids:
+def _is_cached_request_authorized(request: Request, auth_token: str | None) -> bool:
+    if not auth_token:
         return True
-    for cell_id in cell_ids:
-        cell_notification = session.session_view.cell_notifications.get(cell_id)
-        if cell_notification is None or cell_notification.status is None:
-            return False
-        if cell_notification.status in ("queued", "running"):
-            return False
-    return True
-
-
-def _session_cell_statuses(session) -> dict[str, str | None]:
-    cell_ids = list(session.app_file_manager.app.cell_manager.cell_ids())
-    statuses: dict[str, str | None] = {}
-    for cell_id in cell_ids:
-        cell_notification = session.session_view.cell_notifications.get(cell_id)
-        statuses[str(cell_id)] = cell_notification.status if cell_notification else None
-    return statuses
-
-
-def _load_autoswitch_script(
-    ready_path: str, skip_param: str, include_code: bool
-) -> str | None:
     try:
-        template = _AUTOSWITCH_SCRIPT_PATH.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        logger.warning("Auto-switch script missing: %s", _AUTOSWITCH_SCRIPT_PATH)
-        return None
-    return (
-        template.replace("__READY_PATH__", json.dumps(ready_path))
-        .replace("__SKIP_PARAM__", json.dumps(skip_param))
-        .replace("__INCLUDE_CODE__", json.dumps(include_code))
-        .strip()
-    )
-
-
-def _inject_auto_switch(html: str, script: str) -> str:
-    script_tag = f"\n<script>\n{script}\n</script>\n"
-    marker = "</body>"
-    if marker in html:
-        return html.replace(marker, f"{script_tag}{marker}", 1)
-    return f"{html}{script_tag}"
+        cookie_session = CookieSession(request.session)
+    except AssertionError as exc:
+        logger.warning("Session middleware missing for cached auth: %s", exc)
+        return False
+    if cookie_session.get_access_token() == auth_token:
+        return True
+    if request.query_params.get(TOKEN_QUERY_PARAM) == auth_token:
+        cookie_session.set_access_token(auth_token)
+        return True
+    return False
 
 
 def _find_mount_config_bounds(html: str) -> tuple[int, int] | None:
@@ -254,6 +152,119 @@ def _find_mount_config_bounds(html: str) -> tuple[int, int] | None:
     return None
 
 
+def _strip_trailing_commas(text: str) -> str:
+    output: list[str] = []
+    in_string = False
+    escape = False
+    for index, char in enumerate(text):
+        if in_string:
+            output.append(char)
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            output.append(char)
+            continue
+        if char == ",":
+            next_index = index + 1
+            while next_index < len(text) and text[next_index].isspace():
+                next_index += 1
+            if next_index < len(text) and text[next_index] in "}]":
+                continue
+        output.append(char)
+    return "".join(output)
+
+
+def _parse_mount_config(
+    html: str,
+) -> tuple[dict | None, tuple[int, int] | None]:
+    bounds = _find_mount_config_bounds(html)
+    if bounds is None:
+        return None, None
+    start, end = bounds
+    config_text = _strip_trailing_commas(html[start:end])
+    try:
+        return json.loads(config_text), bounds
+    except json.JSONDecodeError as exc:
+        logger.warning("Failed to parse mount config: %s", exc)
+        return None, None
+
+
+def _json_script(data: object) -> str:
+    return json.dumps(data, sort_keys=True).translate(_JSON_SCRIPT_ESCAPES)
+
+
+def _strip_config_code(config: dict) -> None:
+    if "code" in config:
+        config["code"] = ""
+    notebook = config.get("notebook")
+    if isinstance(notebook, dict):
+        cells = notebook.get("cells")
+        if isinstance(cells, list):
+            for cell in cells:
+                if isinstance(cell, dict) and "code" in cell:
+                    cell["code"] = ""
+    session = config.get("session")
+    if isinstance(session, dict):
+        cells = session.get("cells")
+        if isinstance(cells, list):
+            for cell in cells:
+                if isinstance(cell, dict) and "code" in cell:
+                    cell["code"] = ""
+
+
+def _apply_show_code(config: dict, include_code: bool, show_code: bool) -> None:
+    view = config.get("view")
+    if not isinstance(view, dict):
+        view = {}
+    view["showAppCode"] = bool(include_code and show_code)
+    config["view"] = view
+    if not include_code:
+        _strip_config_code(config)
+
+
+def _load_cached_mount_config(cache_path: Path) -> dict | None:
+    try:
+        html = cache_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Failed to read cached export %s: %s", cache_path, exc)
+        return None
+    config, _ = _parse_mount_config(html)
+    return config
+
+
+def _apply_cached_html(
+    html: str,
+    *,
+    cached_config: dict | None,
+    file_path: Path | None,
+    include_code: bool,
+    show_code: bool,
+    include_session: bool,
+) -> str:
+    config, bounds = _parse_mount_config(html)
+    if config is None or bounds is None:
+        return html
+    if include_session and isinstance(cached_config, dict):
+        cached_session = cached_config.get("session")
+        if cached_session is not None:
+            config["session"] = cached_session
+    notebook_snapshot = _resolve_notebook_snapshot(
+        file_path, cached_config, include_code
+    )
+    if notebook_snapshot is not None:
+        config["notebook"] = notebook_snapshot
+    _apply_show_code(config, include_code, show_code)
+    start, end = bounds
+    config_text = _json_script(config)
+    return f"{html[:start]}{config_text}{html[end:]}"
+
+
 def _strip_cached_code(html: str) -> str:
     html = _MARIMO_CODE_BLOCK.sub(r"\1\3", html, count=1)
     bounds = _find_mount_config_bounds(html)
@@ -266,22 +277,160 @@ def _strip_cached_code(html: str) -> str:
     return f"{html[:start]}{config_text}{html[end:]}"
 
 
-class CachedExportFallback:
+@functools.lru_cache(maxsize=128)
+def _load_notebook_snapshot_with_code_cached(
+    file_path: str, _mtime: float
+) -> dict | None:
+    try:
+        from marimo._session.notebook import AppFileManager
+        from marimo._utils.code import hash_code
+        from marimo._version import __version__
+    except Exception as exc:
+        logger.warning("Notebook code loader unavailable: %s", exc)
+        return None
+
+    path = Path(file_path)
+    try:
+        app_manager = AppFileManager(path)
+    except Exception as exc:
+        logger.warning("Failed to load notebook %s: %s", path, exc)
+        return None
+
+    cells = []
+    for cell in app_manager.app.cell_manager.cell_data():
+        code = cell.code or ""
+        code_hash = hash_code(code) if code else None
+        cells.append(
+            {
+                "id": cell.cell_id,
+                "code": code,
+                "code_hash": code_hash,
+                "name": cell.name,
+                "config": cell.config.asdict(),
+            }
+        )
+
+    return {
+        "version": "1",
+        "metadata": {"marimo_version": __version__},
+        "cells": cells,
+    }
+
+
+def _load_notebook_snapshot_with_code(file_path: Path) -> dict | None:
+    try:
+        mtime = file_path.stat().st_mtime
+    except OSError as exc:
+        logger.warning("Failed to stat notebook %s: %s", file_path, exc)
+        return None
+    return _load_notebook_snapshot_with_code_cached(str(file_path), mtime)
+
+
+def _resolve_notebook_snapshot(
+    file_path: Path | None,
+    cached_config: dict | None,
+    include_code: bool,
+) -> dict | None:
+    if include_code and file_path is not None:
+        notebook_snapshot = _load_notebook_snapshot_with_code(file_path)
+        if notebook_snapshot is not None:
+            return notebook_snapshot
+    if isinstance(cached_config, dict):
+        notebook = cached_config.get("notebook")
+        if isinstance(notebook, dict):
+            return notebook
+    return None
+
+
+def _seed_session_view_from_cached_export(session, file_path: Path) -> bool:
+    cache_path = _cached_export_path(file_path)
+    if not cache_path.exists():
+        return False
+    cached_config = _load_cached_mount_config(cache_path)
+    if not isinstance(cached_config, dict):
+        return False
+    session_snapshot = cached_config.get("session")
+    if not isinstance(session_snapshot, dict):
+        return False
+    try:
+        app = session.app_file_manager.app
+        cell_data = tuple(app.cell_manager.cell_data())
+        if not cell_data:
+            return False
+        from marimo._session.state.serialize import deserialize_session
+        from marimo._utils.code import hash_code
+    except Exception as exc:
+        logger.warning("Failed to prepare cached session for %s: %s", file_path, exc)
+        return False
+
+    code_hash_to_cell_id: dict[str, str] = {}
+    for cell in cell_data:
+        if cell.code:
+            code_hash_to_cell_id[hash_code(cell.code)] = cell.cell_id
+    try:
+        session_view = deserialize_session(session_snapshot, code_hash_to_cell_id)
+    except Exception as exc:
+        logger.warning("Failed to load cached session for %s: %s", file_path, exc)
+        return False
+
+    session.session_view = session_view
+    return True
+
+
+_CACHED_SESSION_SEEDER_INSTALLED = False
+
+
+def _install_cached_session_seeder() -> None:
+    global _CACHED_SESSION_SEEDER_INSTALLED
+    if _CACHED_SESSION_SEEDER_INSTALLED:
+        return
+    try:
+        from marimo._server.session_manager import SessionManager
+    except Exception as exc:
+        logger.warning("Failed to install cached session seeder: %s", exc)
+        return
+
+    original_create_session = SessionManager.create_session
+
+    @functools.wraps(original_create_session)
+    def create_session_with_cache(
+        self, session_id, session_consumer, query_params, file_key, auto_instantiate
+    ):
+        session = original_create_session(
+            self,
+            session_id=session_id,
+            session_consumer=session_consumer,
+            query_params=query_params,
+            file_key=file_key,
+            auto_instantiate=auto_instantiate,
+        )
+        try:
+            file_path = Path(file_key)
+        except TypeError:
+            return session
+        if file_path.is_file() and session.session_view.is_empty():
+            _seed_session_view_from_cached_export(session, file_path)
+        return session
+
+    SessionManager.create_session = create_session_with_cache
+    _CACHED_SESSION_SEEDER_INSTALLED = True
+
+
+class CachedSnapshotInjector:
     def __init__(
         self,
         app: ASGIApp,
         *,
         directory: str,
         base_url: str,
-        ready_path: str,
         include_code: bool,
+        auth_token: str | None,
     ) -> None:
         self.app = app
         self.directory = Path(directory)
         self.base_url = base_url
-        self.ready_path = ready_path
         self.include_code = include_code
-        self.skip_param = "__marimo_skip_cache"
+        self.auth_token = auth_token
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] != "http":
@@ -289,32 +438,65 @@ class CachedExportFallback:
         if scope["method"] != "GET":
             return await self.app(scope, receive, send)
 
-        query = QueryParams(scope.get("query_string", b"").decode())
-        if query.get(self.skip_param) is not None:
-            return await self.app(scope, receive, send)
-
+        request = Request(scope, receive)
         request_path = scope["path"]
-        file_path = _resolve_app_file(request_path, self.base_url, self.directory)
-        if file_path is None:
-            return await self.app(scope, receive, send)
+        file_path = _app_path(request_path, self.base_url, self.directory)
+        cached_config = None
+        if file_path is not None:
+            cache_path = _cached_export_path(file_path)
+            if cache_path.exists() and _is_cached_request_authorized(
+                request, self.auth_token
+            ):
+                cached_config = _load_cached_mount_config(cache_path)
+        show_code = request.query_params.get("show-code") == "true"
 
-        cache_path = _cached_export_path(file_path)
-        if not cache_path.exists():
-            return await self.app(scope, receive, send)
+        response_start: Message | None = None
+        body_chunks: list[bytes] = []
 
-        html = cache_path.read_text(encoding="utf-8")
-        if not self.include_code:
-            html = _strip_cached_code(html)
-        script = _load_autoswitch_script(
-            ready_path=self.ready_path,
-            skip_param=self.skip_param,
-            include_code=self.include_code,
-        )
-        if script:
-            html = _inject_auto_switch(html, script)
-        response = HTMLResponse(html)
-        response.headers["Cache-Control"] = "no-store"
-        await response(scope, receive, send)
+        async def send_wrapper(message: Message) -> None:
+            nonlocal response_start, body_chunks
+            if message["type"] == "http.response.start":
+                response_start = message
+                return
+            if message["type"] == "http.response.body":
+                body_chunks.append(message.get("body", b""))
+                if message.get("more_body", False):
+                    return
+                body = b"".join(body_chunks)
+                if response_start is None:
+                    await send(message)
+                    return
+                headers = MutableHeaders(scope=response_start)
+                content_type = headers.get("content-type", "")
+                if "text/html" in content_type and cached_config is not None:
+                    try:
+                        html = body.decode("utf-8")
+                    except UnicodeDecodeError:
+                        pass
+                    else:
+                        html = _apply_cached_html(
+                            html,
+                            cached_config=cached_config,
+                            file_path=file_path,
+                            include_code=self.include_code,
+                            show_code=show_code,
+                            include_session=True,
+                        )
+                        body = html.encode("utf-8")
+                        headers["content-length"] = str(len(body))
+                        headers["cache-control"] = "no-store"
+                await send(response_start)
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": body,
+                        "more_body": False,
+                    }
+                )
+                return
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
 async def connections(_):
@@ -333,8 +515,11 @@ def build_app(
     token: str | None = None,
     skew_protection: bool = False,
     allow_origins: list[str] = [],
+    debug_cached: bool = False,
 ):
-    _patch_run_mode_reconnect()
+    _install_cached_session_seeder()
+    auth_token = token or ""
+    auth_enabled = bool(auth_token)
 
     marimo_app = (
         marimo.create_asgi_app(
@@ -347,54 +532,63 @@ def build_app(
         .build()
     )
     root_url = base_url.rstrip("/")
-    ready_path = f"{root_url}/_marimo_ready" if root_url else "/_marimo_ready"
-    fallback_app = CachedExportFallback(
+    marimo_app_with_cache = CachedSnapshotInjector(
         marimo_app,
         directory=directory,
         base_url=base_url,
-        ready_path=ready_path,
         include_code=include_code,
+        auth_token=auth_token,
     )
 
-    async def marimo_ready(request):
-        request_path = request.query_params.get("path", "")
-        session_id = request.query_params.get("session_id")
-        file_path = _resolve_app_file(request_path, base_url, Path(directory))
-        if file_path is None:
-            return JSONResponse({"ready": False, "cell_statuses": {}})
-        session = _get_session(marimo_app, file_path, session_id=session_id)
-        if session is None:
-            return JSONResponse({"ready": False, "cell_statuses": {}})
-        ready = session.kernel_state() == KernelState.RUNNING and _is_run_complete(
-            session
-        )
-        return JSONResponse(
-            {
-                "ready": ready,
-                "cell_statuses": _session_cell_statuses(session),
-            }
-        )
+    async def cached_export(request):
+        if not _is_cached_request_authorized(request, auth_token):
+            return HTMLResponse("Unauthorized", status_code=401)
+        relative_path = request.path_params.get("path", "")
+        file_path = _app_path(relative_path, "/", Path(directory))
+        cache_path = _resolve_cached_html_path(relative_path, Path(directory))
+        if cache_path is None or not cache_path.exists():
+            return HTMLResponse("Cached export not found.", status_code=404)
+        html = cache_path.read_text(encoding="utf-8")
+        show_code = request.query_params.get("show-code") == "true"
+        if not include_code:
+            html = _strip_cached_code(html)
+        else:
+            html = _apply_cached_html(
+                html,
+                cached_config=None,
+                file_path=file_path,
+                include_code=include_code,
+                show_code=show_code,
+                include_session=False,
+            )
+        response = HTMLResponse(html)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
-    middleware = [
-        Middleware(ActiveConnectionsMiddleware),
+    middleware = []
+    if auth_enabled:
+        middleware.append(Middleware(CustomSessionMiddleware, secret_key=RANDOM_SECRET))
+    middleware.append(Middleware(ActiveConnectionsMiddleware))
+    routes = [
+        Route(f"{root_url}/_health", health),
+        Mount(
+            f"{root_url}/_api",
+            routes=[
+                Mount(
+                    "/status",
+                    routes=[
+                        Route("/connections", connections),
+                    ],
+                ),
+            ],
+        ),
+        Mount("/", marimo_app_with_cache),
     ]
+    if debug_cached:
+        routes.insert(-1, Route(root_url + "/_cached/{path:path}", cached_export))
+
     app = Starlette(
-        routes=[
-            Route(f"{root_url}/_health", health),
-            Route(f"{root_url}/_marimo_ready", marimo_ready),
-            Mount(
-                f"{root_url}/_api",
-                routes=[
-                    Mount(
-                        "/status",
-                        routes=[
-                            Route("/connections", connections),
-                        ],
-                    ),
-                ],
-            ),
-            Mount("/", fallback_app),
-        ],
+        routes=routes,
         middleware=middleware,
     )
     app.add_middleware(
@@ -414,6 +608,11 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", default=8000, type=int)
     parser.add_argument("--include-code", action="store_true")
+    parser.add_argument(
+        "--debug-cached",
+        action="store_true",
+        help="Expose the cached HTML route for debugging.",
+    )
     parser.add_argument("--token-password")
     parser.add_argument("--no-token", action="store_true")
     parser.add_argument("--skew-protection", action="store_true")
@@ -440,6 +639,7 @@ if __name__ == "__main__":
             token=args.token_password,
             skew_protection=args.skew_protection,
             allow_origins=args.allow_origins,
+            debug_cached=args.debug_cached,
         ),
         host=args.host,
         port=args.port,
