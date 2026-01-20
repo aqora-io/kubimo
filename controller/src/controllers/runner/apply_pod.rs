@@ -38,6 +38,9 @@ impl RunnerReconciler {
         {
             command.extend(cmd!["--token", token]);
         }
+        if let Some(log_level) = runner.spec.log_level.as_ref() {
+            command.extend(cmd!["--log-level", log_level]);
+        }
         command.push(
             match runner.spec.command {
                 RunnerCommand::Edit => "edit",
