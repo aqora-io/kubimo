@@ -15,6 +15,21 @@ use crate::{
     CpuQuantity, ResourceFactory, ResourceNameExt, ResourceOwnerRefExt, Result, StorageQuantity,
 };
 
+#[derive(Clone, Copy, Debug, Display, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum LogLevel {
+    #[strum(serialize = "debug")]
+    Debug,
+    #[strum(serialize = "info")]
+    Info,
+    #[strum(serialize = "warn")]
+    Warn,
+    #[strum(serialize = "error")]
+    Error,
+    #[strum(serialize = "critical")]
+    Critical,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Requirement<T> {
@@ -120,6 +135,7 @@ pub struct RunnerToken {
 pub struct RunnerSpec {
     pub workspace: String,
     pub command: RunnerCommand,
+    pub log_level: Option<LogLevel>,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,
     pub env: Option<Vec<EnvVar>>,
@@ -193,6 +209,7 @@ impl Workspace {
 #[serde(rename_all = "camelCase")]
 pub struct CacheJobSpec {
     pub workspace: String,
+    pub log_level: Option<LogLevel>,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,
     pub env: Option<Vec<EnvVar>>,

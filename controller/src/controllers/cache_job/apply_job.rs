@@ -22,6 +22,12 @@ impl CacheJobReconciler {
         let namespace = cache_job.require_namespace()?;
         let workspace_name = &cache_job.spec.workspace;
 
+        let mut command = cmd!["bash", "/setup/start.sh"];
+        if let Some(log_level) = cache_job.spec.log_level.as_ref() {
+            command.extend(cmd!["--log-level", log_level]);
+        }
+        command.push("cache".into());
+
         let job = Job {
             metadata: ObjectMeta {
                 name: Some(cache_job_name.to_string()),
@@ -47,7 +53,7 @@ impl CacheJobReconciler {
                             }]),
                             env: cache_job.spec.env.clone(),
                             env_from: cache_job.spec.env_from.clone(),
-                            command: Some(cmd!["bash", "/setup/start.sh", "cache"]),
+                            command: Some(command),
                             ..Default::default()
                         }],
                         security_context: Some(PodSecurityContext {
