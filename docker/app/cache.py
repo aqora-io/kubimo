@@ -15,6 +15,7 @@ from marimo._utils.marimo_path import MarimoPath
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+_LOG_LEVEL_CHOICES = ["debug", "info", "warning", "error", "critical"]
 
 
 async def _cache_app(path: Path, *, include_code: bool):
@@ -185,7 +186,8 @@ def _is_app(path: Path):
     return hasattr(module, "app") and isinstance(getattr(module, "app"), marimo.App)
 
 
-def _cache_app_sync(path: Path, include_code: bool):
+def _cache_app_sync(path: Path, include_code: bool, log_level: str):
+    logging.getLogger().setLevel(log_level.upper())
     try:
         if _is_app(path):
             asyncio.run(_cache_app(path, include_code=include_code))
@@ -272,13 +274,19 @@ def _cache_all_apps(
     *,
     include_gitignored: bool = False,
     include_code: bool = False,
+    log_level: str = "info",
 ):
     files = _get_python_files(directory, include_gitignored=include_gitignored)
 
     # Run _cache_app in parallel with process workers
     with ProcessPoolExecutor() as executor:
         results = list(
-            executor.map(_cache_app_sync, files, itertools.repeat(include_code))
+            executor.map(
+                _cache_app_sync,
+                files,
+                itertools.repeat(include_code),
+                itertools.repeat(log_level),
+            )
         )
 
     successful = sum(results)
@@ -300,10 +308,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Include code cells in cached HTML output.",
     )
+    parser.add_argument(
+        "--log-level",
+        default="info",
+        choices=_LOG_LEVEL_CHOICES,
+        help="Log level.",
+    )
     parser.add_argument("directory", nargs="?", default=".", help="Directory to cache")
     args = parser.parse_args()
+    logging.getLogger().setLevel(args.log_level.upper())
     _cache_all_apps(
         args.directory,
         include_gitignored=args.include_gitignored,
         include_code=args.include_code,
+        log_level=args.log_level,
     )
