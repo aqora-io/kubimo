@@ -33,6 +33,7 @@ _JSON_SCRIPT_ESCAPES = {
     ord("<"): "\\u003C",
     ord("&"): "\\u0026",
 }
+_LOG_LEVEL_CHOICES = ["debug", "info", "warning", "error", "critical"]
 
 
 class AtomicInteger:
@@ -618,6 +619,12 @@ if __name__ == "__main__":
     parser.add_argument("--skew-protection", action="store_true")
     parser.add_argument("--base-url", default="/")
     parser.add_argument(
+        "--log-level",
+        default="info",
+        choices=_LOG_LEVEL_CHOICES,
+        help="Log level.",
+    )
+    parser.add_argument(
         "--allow-origins",
         action="append",
         default=[],
@@ -625,6 +632,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("directory", nargs="?", default=".")
     args = parser.parse_args()
+
+    logging.getLogger().setLevel(args.log_level.upper())
 
     if args.token_password and args.no_token:
         raise ValueError("Cannot specify both --token and --no-token")
@@ -643,4 +652,5 @@ if __name__ == "__main__":
         ),
         host=args.host,
         port=args.port,
+        log_level=args.log_level,
     )
