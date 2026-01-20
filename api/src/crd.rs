@@ -120,6 +120,7 @@ pub struct RunnerToken {
 pub struct RunnerSpec {
     pub workspace: String,
     pub command: RunnerCommand,
+    pub log_level: Option<String>,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,
     pub env: Option<Vec<EnvVar>>,
@@ -193,6 +194,7 @@ impl Workspace {
 #[serde(rename_all = "camelCase")]
 pub struct CacheJobSpec {
     pub workspace: String,
+    pub log_level: Option<String>,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,
     pub env: Option<Vec<EnvVar>>,
