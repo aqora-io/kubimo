@@ -112,7 +112,7 @@ fi
 
 if [[ "$CMD" == "edit" ]]; then
   uv run --no-sync marimo \
-    "--log-level=$log_level" \
+    $log_level_flag \
     --yes \
     edit \
     --skip-update-check \
