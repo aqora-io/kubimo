@@ -108,13 +108,19 @@ impl Reconciler for RunnerStatusReconciler {
             .as_ref()
             .and_then(|l| l.delete_after_secs_inactive)
         {
-            let last_active = runner
+            let last_active_timestamp = runner
                 .status
                 .as_ref()
-                .and_then(|status| status.last_active)
-                .or_else(|| runner.metadata.creation_timestamp.as_ref().map(|t| t.0))
-                .unwrap_or(Utc::now());
-            if last_active + TimeDelta::seconds(delete_after_secs_inactive.into()) < now {
+                .and_then(|status| status.last_active.map(|dt| dt.timestamp()))
+                .or_else(|| {
+                    runner
+                        .metadata
+                        .creation_timestamp
+                        .as_ref()
+                        .map(|t| t.0.as_second())
+                })
+                .unwrap_or(Utc::now().timestamp());
+            if last_active_timestamp + (delete_after_secs_inactive as i64) < now.timestamp() {
                 bmors.delete(runner.name()?).await?;
             }
         }
