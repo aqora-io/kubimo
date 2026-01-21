@@ -25,7 +25,9 @@ pub use client::{Client, ClientBuilder};
 pub use crd::{
     CacheJob, CacheJobField, CacheJobSpec, LogLevel, Requirement, Runner, RunnerCommand,
     RunnerField, RunnerIngress, RunnerLifecycle, RunnerSpec, RunnerStatus, RunnerTls, RunnerToken,
-    Workspace, WorkspaceField, WorkspaceSpec, WorkspaceStatus, all_crds,
+    Workspace, WorkspaceDir, WorkspaceDirDirectory, WorkspaceDirEntry, WorkspaceDirField,
+    WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache, WorkspaceDirSpec,
+    WorkspaceDirSymlink, WorkspaceField, WorkspaceSpec, WorkspaceStatus, all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;
