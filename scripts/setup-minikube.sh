@@ -1,3 +1,5 @@
+#!/usr/bin/env sh
+
 set -x
 # stop minikube if running
 minikube stop

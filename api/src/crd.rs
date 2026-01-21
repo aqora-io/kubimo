@@ -256,6 +256,13 @@ pub struct WorkspaceDirSymlink {
     pub path: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirContentUrl {
+    pub url: Url,
+    pub e_tag: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDirMarimoCache {
@@ -263,7 +270,7 @@ pub struct WorkspaceDirMarimoCache {
     pub size: Option<u64>,
     pub created: Option<DateTime<Utc>>,
     pub modified: Option<DateTime<Utc>>,
-    pub s3: Option<Url>,
+    pub url: Option<WorkspaceDirContentUrl>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -298,6 +305,7 @@ pub struct WorkspaceDirEntry {
     root = "WorkspaceDir",
     shortname = "bmowd",
     selectable = ".spec.workspace",
+    selectable = ".spec.path",
     namespaced
 )]
 #[serde(rename_all = "camelCase")]
@@ -315,6 +323,8 @@ pub enum WorkspaceDirField {
     Namespace,
     #[strum(serialize = "spec.workspace")]
     Workspace,
+    #[strum(serialize = "spec.path")]
+    Path,
 }
 
 impl ResourceFactory for WorkspaceDir {
