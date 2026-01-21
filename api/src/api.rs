@@ -1,7 +1,6 @@
 use std::fmt::Debug;
 
 use futures::prelude::*;
-use futures::stream::{BoxStream, MapErr};
 use kube::core::object::HasStatus;
 use kube::{
     Resource,
@@ -16,7 +15,7 @@ use crate::{
     ApiListStreamExt, Error, FilterParams, ListStream, ObjectMetaExt, ResourceNameExt, Result,
 };
 
-pub type ApiListStream<T> = MapErr<ListStream<T>, fn(kube::Error) -> Error>;
+pub type ApiListStream<T> = futures::stream::MapErr<ListStream<T>, fn(kube::Error) -> Error>;
 
 #[derive(Clone, Debug)]
 pub struct Api<T> {
@@ -104,7 +103,10 @@ where
 
     #[cfg(feature = "runtime")]
     #[tracing::instrument(level = "debug", skip(self))]
-    pub fn watch(&self, params: &FilterParams) -> BoxStream<'static, Result<Event<T>>> {
+    pub fn watch(
+        &self,
+        params: &FilterParams,
+    ) -> futures::stream::BoxStream<'static, Result<Event<T>>> {
         watcher(self.inner.clone(), params.into())
             .map_err(Into::into)
             .boxed()
