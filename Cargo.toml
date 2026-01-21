@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["controller", "api", "json-patch-macros"]
+members = ["controller", "api", "json-patch-macros", "indexer", "notebook_meta"]
 default-members = ["controller"]
 
 [workspace.package]
