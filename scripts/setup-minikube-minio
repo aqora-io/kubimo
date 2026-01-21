@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+MINIKUBE_IP="$(minikube ip)"
+
+OP_RELEASE="minio-operator"
+OP_NS="minio-operator"
+
+TENANT_RELEASE="minio-tenant"
+TENANT_NS="minio-tenant"
+TENANT_NAME="minio-tenant"
+
+USER="minioadmin"
+PASS="minioadmin"
+
+S3_NODEPORT=30900
+CONSOLE_NODEPORT=30909
+
+helm repo add minio-operator https://operator.min.io
+helm repo update
+
+helm upgrade --install "${OP_RELEASE}" minio-operator/operator \
+  --namespace "${OP_NS}" --create-namespace
+
+VALUES_FILE="$(mktemp)"
+
+cat >"${VALUES_FILE}" <<YAML
+tenant:
+  name: ${TENANT_NAME}
+
+  # Credentials secret created by the chart
+  configSecret:
+    name: ${TENANT_NAME}-env-configuration
+    accessKey: ${USER}
+    secretKey: ${PASS}
+
+  # Try hard to keep it HTTP (disable auto TLS/certs).
+  # Different chart versions have used different paths for this setting, so we include both.
+  requestAutoCert: false
+  certificate:
+    requestAutoCert: false
+
+  pools:
+    - name: pool-0
+      servers: 1
+      volumesPerServer: 1
+      size: 5Gi
+YAML
+
+helm upgrade --install "${TENANT_RELEASE}" minio-operator/tenant \
+  --namespace "${TENANT_NS}" --create-namespace \
+  -f "${VALUES_FILE}"
+
+rm -f "${VALUES_FILE}"
+
+# Find the Tenant CR UID
+TENANT_UID="$(kubectl -n "$TENANT_NS" get tenants.minio.min.io "$TENANT_NAME" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+if [[ -z "$TENANT_UID" ]]; then
+  echo "Could not find Tenant CR '$TENANT_NAME' in ns/$TENANT_NS" >&2
+  exit 1
+fi
+
+KUBE_FILE="$(mktemp)"
+
+cat >"${KUBE_FILE}" <<YAML
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${TENANT_NAME}-s3-nodeport
+  namespace: ${TENANT_NS}
+  ownerReferences:
+    - apiVersion: minio.min.io/v2
+      kind: Tenant
+      name: ${TENANT_NAME}
+      uid: ${TENANT_UID}
+      controller: true
+      blockOwnerDeletion: true
+spec:
+  type: NodePort
+  selector:
+    v1.min.io/tenant: ${TENANT_NAME}
+  ports:
+    - name: s3
+      port: 80
+      targetPort: 9000
+      protocol: TCP
+      nodePort: ${S3_NODEPORT}
+    - name: console
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+      nodePort: ${CONSOLE_NODEPORT}
+YAML
+
+kubectl apply -f "${KUBE_FILE}"
+
+rm -f "${KUBE_FILE}"
+
+echo "Waiting for MinIO pods to exist..."
+deadline=$((SECONDS + 300))
+until kubectl -n "$TENANT_NS" get pods -l "v1.min.io/tenant=${TENANT_NAME}" -o name | grep -q .; do
+  if ((SECONDS >= deadline)); then
+    echo "Timed out waiting for MinIO pods to be created." >&2
+    exit 1
+  fi
+  sleep 1
+done
+
+echo "Waiting for MinIO pods to be ready..."
+kubectl -n "$TENANT_NS" wait --for=condition=ready pod -l "v1.min.io/tenant=${TENANT_NAME}" --timeout=300s
+
+MINIO_ENDPOINT="http://${MINIKUBE_IP}:${S3_NODEPORT}"
+MINIO_INTERNAL_ENDPOINT="http://${TENANT_NAME}-hl.${TENANT_NS}.svc.cluster.local:9000"
+
+POD_NAME="$(kubectl -n "$TENANT_NS" get pods -l "v1.min.io/tenant=${TENANT_NAME}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+if [[ -z "$POD_NAME" ]]; then
+  echo "Could not find a MinIO pod in ns/$TENANT_NS" >&2
+  exit 1
+fi
+
+echo "Waiting for MinIO S3 API to respond..."
+for _ in {1..30}; do
+  if kubectl -n "$TENANT_NS" exec "$POD_NAME" -- mc alias set local "${MINIO_INTERNAL_ENDPOINT}" "${USER}" "${PASS}" >/dev/null 2>&1 &&
+    kubectl -n "$TENANT_NS" exec "$POD_NAME" -- mc ls local >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
+if ! kubectl -n "$TENANT_NS" exec "$POD_NAME" -- mc ls local >/dev/null 2>&1; then
+  echo "MinIO S3 API did not become ready in time." >&2
+  exit 1
+fi
+
+kubectl -n "$TENANT_NS" exec "$POD_NAME" -- mc mb --ignore-existing local/bucket >/dev/null
+
+echo "MinIO deployed"
+echo "  S3 Endpoint:      ${MINIO_ENDPOINT}"
+echo "  Console Endpoint: http://${MINIKUBE_IP}:${CONSOLE_NODEPORT}"
+echo "  Bucket created:   bucket"

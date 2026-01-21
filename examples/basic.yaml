@@ -5,6 +5,22 @@ metadata:
 spec:
   storage:
     min: "10Gi"
+  indexer:
+    schedule: "* * * * *"
+    bucket: "bucket"
+    keyPrefix: "workspace/"
+    pod:
+      env:
+        - name: "AWS_ENDPOINT"
+          value: "http://minio-tenant-hl.minio-tenant.svc.cluster.local:9000"
+        - name: "AWS_REGION"
+          value: "us-east-1"
+        - name: "AWS_ALLOW_HTTP"
+          value: "true"
+        - name: "AWS_ACCESS_KEY_ID"
+          value: "minioadmin"
+        - name: "AWS_SECRET_ACCESS_KEY"
+          value: "minioadmin"
 ---
 apiVersion: kubimo.aqora.io/v1
 kind: Runner

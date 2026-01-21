@@ -27,7 +27,11 @@ impl CacheJobReconciler {
                 .api_namespaced::<Workspace>(namespace)
                 .get(cache_job.spec.workspace.as_ref())
                 .await?;
-            let mut owner_refs = cache_job.metadata.owner_references.clone().unwrap_or_default();
+            let mut owner_refs = cache_job
+                .metadata
+                .owner_references
+                .clone()
+                .unwrap_or_default();
             owner_refs.push(workspace.static_controller_owner_ref()?);
             ctx.api_namespaced::<CacheJob>(namespace)
                 .patch_json(
