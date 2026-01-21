@@ -1,5 +1,6 @@
 use kubimo::k8s_openapi::api::batch::v1::Job;
 use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
+use kubimo::k8s_openapi::jiff::Timestamp;
 use kubimo::{Workspace, WorkspaceStatus, prelude::*};
 
 use crate::context::Context;
@@ -32,7 +33,7 @@ impl WorkspaceReconciler {
             .max()
             .or(workspace.metadata.creation_timestamp.as_ref())
             .cloned()
-            .unwrap_or_else(|| Time(chrono::Utc::now()));
+            .unwrap_or_else(|| Time(Timestamp::now()));
         let observed_generation = workspace.metadata.generation;
         let ready = if job_failed.is_some_and(|cond| cond.status == "True") {
             Condition {
