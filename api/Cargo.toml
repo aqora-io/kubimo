@@ -28,8 +28,8 @@ hyper-util = { version = "0.1", optional = true, default-features = false, featu
   "tokio",
 ] }
 json-patch = { version = "4.0", default-features = false, optional = true }
-k8s-openapi = { version = "0.26", features = ["latest", "schemars"] }
-kube = { version = "2.0", default-features = false, features = ["derive"] }
+k8s-openapi = { version = "0.27", features = ["latest", "schemars"] }
+kube = { version = "3.0", default-features = false, features = ["derive"] }
 schemars = { version = "1.0", features = ["derive", "chrono04"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

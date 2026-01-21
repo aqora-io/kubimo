@@ -41,6 +41,9 @@ async fn main() -> ExitCode {
         .with(fmt::layer())
         .with(EnvFilter::from_default_env())
         .init();
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Could not install default crypto provider");
     let config = Config::load().unwrap();
 
     let mut builder = kubimo::Client::builder();
