@@ -53,8 +53,19 @@ pub struct Requirement<T> {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceIndexerPod {
+    pub env: Option<Vec<EnvVar>>,
+    pub env_from: Option<Vec<EnvFromSource>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceIndexer {
-    pub interval_secs: u32,
+    /// Schedule in Cron format
+    pub schedule: String,
+    pub bucket: Option<String>,
+    pub key_prefix: Option<String>,
+    pub pod: Option<WorkspaceIndexerPod>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -281,6 +292,14 @@ pub struct WorkspaceDirSymlink {
     pub path: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirContentUrl {
+    pub url: Url,
+    pub crc32: Option<u32>,
+    pub e_tag: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDirMarimoCache {
@@ -288,12 +307,13 @@ pub struct WorkspaceDirMarimoCache {
     pub size: Option<u64>,
     pub created: Option<DateTime<Utc>>,
     pub modified: Option<DateTime<Utc>>,
-    pub s3: Option<Url>,
+    pub url: Option<WorkspaceDirContentUrl>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDirMarimo {
+    pub meta_json: Option<WorkspaceDirContentUrl>,
     pub caches: Option<Vec<WorkspaceDirMarimoCache>>,
 }
 
@@ -323,6 +343,7 @@ pub struct WorkspaceDirEntry {
     root = "WorkspaceDir",
     shortname = "bmowd",
     selectable = ".spec.workspace",
+    selectable = ".spec.path",
     namespaced
 )]
 #[serde(rename_all = "camelCase")]
@@ -340,6 +361,8 @@ pub enum WorkspaceDirField {
     Namespace,
     #[strum(serialize = "spec.workspace")]
     Workspace,
+    #[strum(serialize = "spec.path")]
+    Path,
 }
 
 impl ResourceFactory for WorkspaceDir {
