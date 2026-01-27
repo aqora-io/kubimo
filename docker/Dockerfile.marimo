@@ -11,10 +11,27 @@ RUN apt-get update \
   && rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
 
 ENV NODE_VERSION=24.11.1
-RUN curl https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz > node.tar.xz \
-  && tar -xf node.tar.xz \
-  && rm node.tar.xz \
-  && mv node-v${NODE_VERSION}-linux-x64 /opt/node
+RUN <<EOF
+set -xeuo pipefail
+
+case `uname -m` in
+  x86_64)
+    arch="x64"
+    ;;
+  aarch64)
+    arch="arm64"
+    ;;
+  *)
+    echo "Unsupported arch"
+    exit 1
+    ;;
+esac
+
+curl -o node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${arch}.tar.xz"
+tar -xf node.tar.xz
+rm node.tar.xz
+mv "node-v${NODE_VERSION}-linux-${arch}" /opt/node
+EOF
 ENV PATH="/opt/node/bin:$PATH"
 
 COPY docker/setup/pyproject.toml /setup/pyproject.toml
