@@ -71,6 +71,7 @@ jobs:
             *.cache-to=type=inline
           files: |
             ./docker-bake.hcl
+            ./docker-bake.mac.hcl
             cwd://${{ steps.meta-controller.outputs.bake-file }}
             cwd://${{ steps.meta-marimo.outputs.bake-file }}
           push: ${{ github.event_name != 'pull_request' }}
