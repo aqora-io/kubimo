@@ -112,14 +112,13 @@ fi
 
 if [[ "$CMD" == "edit" ]]; then
   uv run --no-sync marimo \
-    "--log-level=$log_level" \
+    $log_level_flag \
     --yes \
     edit \
     --skip-update-check \
     --headless \
     --watch \
     --allow-origins='*' \
-    $log_level_flag \
     $host_flag \
     $port_flag \
     $base_url_flag \

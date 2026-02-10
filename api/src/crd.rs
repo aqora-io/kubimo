@@ -102,7 +102,7 @@ pub struct RunnerLifecycle {
     pub delete_after_secs_inactive: Option<u32>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default, Display)]
 pub enum RunnerCommand {
     #[default]
     Edit,
@@ -129,6 +129,7 @@ pub struct RunnerToken {
     kind = "Runner",
     shortname = "bmor",
     selectable = ".spec.workspace",
+    selectable = ".spec.command",
     namespaced,
     status = "RunnerStatus",
     validation = runner_immutable_fields(),
@@ -157,6 +158,8 @@ pub enum RunnerField {
     Namespace,
     #[strum(serialize = "spec.workspace")]
     Workspace,
+    #[strum(serialize = "spec.command")]
+    Command,
 }
 
 impl ResourceFactory for Runner {

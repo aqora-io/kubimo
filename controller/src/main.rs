@@ -62,6 +62,13 @@ async fn main() -> ExitCode {
                 .await
                 .unwrap()
                 .wait(),
+            controllers::workspace_directory::run(
+                ctx.clone(),
+                shutdown_signal("workspace_directory"),
+            )
+            .await
+            .unwrap()
+            .wait(),
             controllers::runner::run(ctx.clone(), shutdown_signal("runner"))
                 .await
                 .unwrap()
