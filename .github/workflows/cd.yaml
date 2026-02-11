@@ -16,6 +16,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
       - name: Set up Docker Buildx
         id: setup-buildx
         uses: docker/setup-buildx-action@v3
@@ -71,6 +75,7 @@ jobs:
             *.cache-to=type=inline
           files: |
             ./docker-bake.hcl
+            ./docker-bake.ci.hcl
             cwd://${{ steps.meta-controller.outputs.bake-file }}
             cwd://${{ steps.meta-marimo.outputs.bake-file }}
           push: ${{ github.event_name != 'pull_request' }}
