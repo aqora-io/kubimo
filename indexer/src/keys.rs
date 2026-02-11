@@ -16,9 +16,11 @@ pub struct WorkspaceDirNameSet {
 
 impl WorkspaceDirNameSet {
     pub fn new(name: String) -> Self {
+        let mut set = KeySet::new();
+        set.insert(PathBuf::new(), 0); // Reserve the base name for the root
         WorkspaceDirNameSet {
             key: WorkspaceDirKey::new(name),
-            set: KeySet::new(),
+            set,
         }
     }
 
@@ -48,22 +50,22 @@ impl WorkspaceFileUrlSet {
     }
 
     pub fn insert(&mut self, item: PathBuf, url: &Url) -> Result<(), InvalidKey> {
-        let (parsed_key, format) = self.key.parse(url)?;
-        if Some(OsStr::new(&format)) != item.extension() {
-            return Err(InvalidKey::BadFormat);
+        let (parsed_key, ext) = self.key.parse(url)?;
+        if ext.as_ref().map(OsStr::new) != item.extension() {
+            return Err(InvalidKey::BadExt);
         }
         self.set.insert(item, parsed_key);
         Ok(())
     }
 
     pub fn get_or_insert(&mut self, item: PathBuf) -> Result<Url, UrlParseError> {
-        let format = item
+        let ext = item
             .extension()
-            .and_then(OsStr::to_str)
-            .ok_or(UrlParseError::IdnaError)?
-            .to_string();
+            .map(|ext| OsStr::to_str(ext).ok_or(UrlParseError::IdnaError))
+            .transpose()?
+            .map(str::to_string);
         let key = self.set.get_or_insert(item);
-        self.key.format(key, &format)
+        self.key.format(key, ext.as_deref())
     }
 }
 
@@ -111,9 +113,11 @@ where
 #[derive(Error, Debug)]
 pub enum InvalidKey {
     #[error("Invalid workspace directory key format")]
-    BadFormat,
+    BadExt,
     #[error("Invalid base32 encoding in workspace directory key")]
     BadBase32,
+    #[error("base32 encoding equals 0 in workspace directory key")]
+    ZeroBase32,
     #[error("Invalid key length in workspace directory key")]
     BadLength,
     #[error("Invalid workspace name")]
@@ -130,6 +134,9 @@ impl WorkspaceDirKey {
     }
 
     fn format(&self, key: u32) -> String {
+        if key == 0 {
+            return self.name.clone();
+        }
         format!(
             "{}-{}",
             self.name,
@@ -138,12 +145,18 @@ impl WorkspaceDirKey {
     }
 
     fn parse(&self, key: &str) -> Result<u32, InvalidKey> {
-        let (name_part, key_part) = key.rsplit_once('-').ok_or(InvalidKey::BadFormat)?;
+        if key == self.name {
+            return Ok(0);
+        }
+        let (name_part, key_part) = key.rsplit_once('-').ok_or(InvalidKey::BadExt)?;
         if name_part != self.name {
             return Err(InvalidKey::BadWorkspaceName);
         }
         let key_bytes = base32::decode(BASE32_ALPHABET, key_part).ok_or(InvalidKey::BadBase32)?;
         let key_array: [u8; 4] = key_bytes.try_into().map_err(|_| InvalidKey::BadLength)?;
+        if key_array == [0, 0, 0, 0] {
+            return Err(InvalidKey::ZeroBase32);
+        }
         Ok(u32::from_be_bytes(key_array))
     }
 }
@@ -162,25 +175,30 @@ impl WorkspaceFileKey {
         Ok(WorkspaceFileKey { base, prefix })
     }
 
-    fn format(&self, key: u64, format: &str) -> Result<Url, UrlParseError> {
+    fn format(&self, key: u64, ext: Option<&str>) -> Result<Url, UrlParseError> {
         let full_path = format!(
-            "{prefix}{name}.{format}",
+            "{prefix}{name}{ext}",
             prefix = self.prefix.as_deref().unwrap_or(""),
             name = base32::encode(BASE32_ALPHABET, &key.to_be_bytes()).to_lowercase(),
+            ext = ext.map(|ext| format!(".{ext}")).unwrap_or_default()
         );
         self.base.join(&full_path)
     }
 
-    fn parse(&self, url: &Url) -> Result<(u64, String), InvalidKey> {
+    fn parse(&self, url: &Url) -> Result<(u64, Option<String>), InvalidKey> {
         let relative_path = url
             .path()
             .strip_prefix(&format!("/{}", self.prefix.as_deref().unwrap_or("")))
-            .ok_or(InvalidKey::BadFormat)?;
+            .ok_or(InvalidKey::BadExt)?;
         let (name_part, format_part) = relative_path
             .rsplit_once('.')
-            .ok_or(InvalidKey::BadFormat)?;
+            .map(|(name, ext)| (name, Some(ext)))
+            .unwrap_or((relative_path, None));
         let key_bytes = base32::decode(BASE32_ALPHABET, name_part).ok_or(InvalidKey::BadBase32)?;
         let key_array: [u8; 8] = key_bytes.try_into().map_err(|_| InvalidKey::BadLength)?;
-        Ok((u64::from_be_bytes(key_array), format_part.to_string()))
+        Ok((
+            u64::from_be_bytes(key_array),
+            format_part.map(str::to_string),
+        ))
     }
 }
