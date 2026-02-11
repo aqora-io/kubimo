@@ -41,6 +41,11 @@ pub(crate) fn args(workspace: &Workspace, watch: bool) -> Result<Vec<String>, ku
         if let Some(key_prefix) = indexer.key_prefix.as_ref() {
             args.extend(cmd!["--key-prefix", key_prefix]);
         }
+        if let Some(upload_content) = indexer.upload_content
+            && upload_content
+        {
+            args.extend(cmd!["--upload-content"]);
+        }
     }
     args.push(workspace_name.to_string());
     args.push(WORKSPACE_DIR.to_string());
@@ -51,12 +56,11 @@ pub(crate) fn env(workspace: &Workspace) -> Option<Vec<EnvVar>> {
     let mut env = workspace
         .spec
         .indexer
-        .as_ref()?
-        .pod
-        .as_ref()?
-        .env
-        .as_ref()?
-        .clone();
+        .as_ref()
+        .and_then(|indexer| indexer.pod.as_ref())
+        .and_then(|pod| pod.env.as_ref())
+        .cloned()
+        .unwrap_or_default();
     if !env.iter().any(|env_var| env_var.name == "RUST_LOG") {
         env.push(EnvVar {
             name: "RUST_LOG".to_string(),

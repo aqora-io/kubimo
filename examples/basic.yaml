@@ -6,9 +6,9 @@ spec:
   storage:
     min: "10Gi"
   indexer:
-    schedule: "* * * * *"
     bucket: "bucket"
     keyPrefix: "workspace/"
+    uploadContent: true
     pod:
       env:
         - name: "AWS_ENDPOINT"

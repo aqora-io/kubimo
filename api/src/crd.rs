@@ -33,10 +33,9 @@ pub struct WorkspaceIndexerPod {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceIndexer {
-    /// Schedule in Cron format
-    pub schedule: String,
     pub bucket: Option<String>,
     pub key_prefix: Option<String>,
+    pub upload_content: Option<bool>,
     pub pod: Option<WorkspaceIndexerPod>,
 }
 
@@ -299,6 +298,7 @@ pub struct WorkspaceDirMarimo {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDirFile {
     pub size: Option<u64>,
+    pub content: Option<WorkspaceDirContentUrl>,
     pub marimo: Option<WorkspaceDirMarimo>,
 }
 

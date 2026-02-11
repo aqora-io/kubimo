@@ -53,6 +53,8 @@ struct Args {
     key_prefix: Option<String>,
     #[arg(long, short)]
     watch: bool,
+    #[arg(long, short)]
+    upload_content: bool,
     #[arg(long, default_value_t = 500)]
     watch_debounce_millis: u64,
     #[arg(long, default_value_t = 60 * 1000)]
@@ -106,6 +108,7 @@ pub struct WorkerOptions {
     s3: S3Client,
     directory: Arc<PathBuf>,
     max_file_size: u64,
+    upload_content: bool,
     upload_permits: Arc<Semaphore>,
     keys: WorkspaceKeys,
 }
@@ -312,6 +315,61 @@ impl EntryWorker {
         }))
     }
 
+    async fn process_content(
+        &self,
+        path: impl AsRef<Path>,
+        size: u64,
+    ) -> Result<Option<WorkspaceDirContentUrl>, WorkerError> {
+        if !self.opts.upload_content {
+            return Ok(None);
+        }
+        let path = path.as_ref();
+        if size > self.opts.max_file_size {
+            return Ok(None);
+        }
+        let full_path = self.opts.directory.join(path);
+        if !tokio::fs::try_exists(&full_path).await? {
+            return Ok(None);
+        }
+        let metadata = tokio::fs::metadata(&full_path).await?;
+        if !metadata.is_file() {
+            return Ok(None);
+        }
+        self.upload(path, size, tokio::fs::File::open(full_path).await?)
+            .await
+            .map(Some)
+    }
+
+    async fn process_file(
+        &self,
+        path: impl AsRef<Path>,
+        size: u64,
+    ) -> Result<WorkspaceDirFile, WorkerError> {
+        let path = path.as_ref();
+        let (marimo, content) = futures::future::join(
+            self.process_marimo(&path, size),
+            self.process_content(&path, size),
+        )
+        .await;
+        let marimo = marimo
+            .inspect_err(|err| {
+                tracing::error!("Error reading marimo for {}: {}", path.display(), err)
+            })
+            .ok()
+            .flatten();
+        let content = content
+            .inspect_err(|err| {
+                tracing::error!("Error uploading content for {}: {}", path.display(), err)
+            })
+            .ok()
+            .flatten();
+        Ok(WorkspaceDirFile {
+            marimo,
+            content,
+            size: Some(size),
+        })
+    }
+
     async fn process(&self, path: impl AsRef<Path>) -> Result<WorkspaceDirEntry, WorkerError> {
         let path = path.as_ref();
         let file_name = if let Some(name) = path.file_name() {
@@ -346,18 +404,7 @@ impl EntryWorker {
         }
         if metadata.is_file() {
             let size = metadata.len();
-            let marimo = self
-                .process_marimo(&path, size)
-                .await
-                .inspect_err(|err| {
-                    tracing::error!("Error reading marimo for {}: {}", path.display(), err)
-                })
-                .ok()
-                .flatten();
-            out.file = Some(WorkspaceDirFile {
-                marimo,
-                size: Some(size),
-            });
+            out.file = Some(self.process_file(path, size).await?);
         }
         Ok(out)
     }
@@ -645,6 +692,7 @@ async fn run(
             s3: s3.clone(),
             directory: Arc::new(args.directory.clone()),
             max_file_size: args.max_file_size,
+            upload_content: args.upload_content,
             upload_permits: Arc::new(Semaphore::new(args.max_upload_concurrency)),
             keys: keys.clone(),
         },
@@ -705,9 +753,10 @@ async fn run(
                 entries.sort_by_key(|entry| entry.name.clone())
             }
             let path = &dir.spec.path;
+            let name = dir.name().unwrap_or_default();
             match bmowds.patch(&dir).await {
-                Ok(_) => tracing::info!("Patched workspace dir '{path}'"),
-                Err(err) => tracing::error!("Error creating workspace dir '{path}': {err}"),
+                Ok(_) => tracing::info!("Patched workspace dir {name} [{path}]"),
+                Err(err) => tracing::error!("Error creating workspace dir {name} [{path}]: {err}"),
             }
         }));
     }
@@ -715,8 +764,8 @@ async fn run(
         let bmowds = client.api::<WorkspaceDir>();
         futs.push(tokio::spawn(async move {
             match bmowds.delete(&name).await {
-                Ok(_) => tracing::info!("Deleted workspace dir '{name}'"),
-                Err(err) => tracing::error!("Error deleting workspace dir '{name}': {err}"),
+                Ok(_) => tracing::info!("Deleted workspace dir {name}"),
+                Err(err) => tracing::error!("Error deleting workspace dir {name}: {err}"),
             }
         }));
     }
@@ -724,8 +773,8 @@ async fn run(
         let cloned_s3 = s3.clone();
         futs.push(tokio::spawn(async move {
             match cloned_s3.delete(&url).await {
-                Ok(_) => tracing::info!("Deleted object at '{}'", url),
-                Err(err) => tracing::error!("Error deleting object at '{}': {err}", url),
+                Ok(_) => tracing::info!("Deleted object at {}", url),
+                Err(err) => tracing::error!("Error deleting object at {}: {err}", url),
             }
         }));
     }
