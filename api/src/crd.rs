@@ -6,6 +6,7 @@ use kube::{CustomResource, CustomResourceExt, Resource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strum::Display;
+use url::Url;
 
 use crate::validation::{
     runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
@@ -20,6 +21,22 @@ use crate::{
 pub struct Requirement<T> {
     pub min: Option<T>,
     pub max: Option<T>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceIndexerPod {
+    pub env: Option<Vec<EnvVar>>,
+    pub env_from: Option<Vec<EnvFromSource>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceIndexer {
+    pub bucket: Option<String>,
+    pub key_prefix: Option<String>,
+    pub upload_content: Option<bool>,
+    pub pod: Option<WorkspaceIndexerPod>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -45,6 +62,7 @@ pub struct WorkspaceSpec {
     pub init_containers: Option<Vec<Container>>,
     #[schemars(length(max = 25))]
     pub volumes: Option<Vec<Volume>>,
+    pub indexer: Option<WorkspaceIndexer>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]
@@ -83,7 +101,7 @@ pub struct RunnerLifecycle {
     pub delete_after_secs_inactive: Option<u32>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default, Display)]
 pub enum RunnerCommand {
     #[default]
     Edit,
@@ -110,6 +128,7 @@ pub struct RunnerToken {
     kind = "Runner",
     shortname = "bmor",
     selectable = ".spec.workspace",
+    selectable = ".spec.command",
     namespaced,
     status = "RunnerStatus",
     validation = runner_immutable_fields(),
@@ -120,6 +139,7 @@ pub struct RunnerToken {
 pub struct RunnerSpec {
     pub workspace: String,
     pub command: RunnerCommand,
+    pub log_level: Option<String>,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,
     pub env: Option<Vec<EnvVar>>,
@@ -137,6 +157,8 @@ pub enum RunnerField {
     Namespace,
     #[strum(serialize = "spec.workspace")]
     Workspace,
+    #[strum(serialize = "spec.command")]
+    Command,
 }
 
 impl ResourceFactory for Runner {
@@ -193,6 +215,7 @@ impl Workspace {
 #[serde(rename_all = "camelCase")]
 pub struct CacheJobSpec {
     pub workspace: String,
+    pub log_level: Option<String>,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,
     pub env: Option<Vec<EnvVar>>,
@@ -234,6 +257,125 @@ impl Workspace {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirDirectory {
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirSymlink {
+    pub path: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirContentUrl {
+    pub url: Url,
+    pub crc32: Option<u32>,
+    pub e_tag: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirMarimoCache {
+    pub format: String,
+    pub size: Option<u64>,
+    pub created: Option<DateTime<Utc>>,
+    pub modified: Option<DateTime<Utc>>,
+    pub url: Option<WorkspaceDirContentUrl>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirMarimo {
+    pub meta_json: Option<WorkspaceDirContentUrl>,
+    pub caches: Option<Vec<WorkspaceDirMarimoCache>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirFile {
+    pub size: Option<u64>,
+    pub content: Option<WorkspaceDirContentUrl>,
+    pub marimo: Option<WorkspaceDirMarimo>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirEntry {
+    pub name: String,
+    pub created: Option<DateTime<Utc>>,
+    pub modified: Option<DateTime<Utc>>,
+    pub directory: Option<WorkspaceDirDirectory>,
+    pub symlink: Option<WorkspaceDirSymlink>,
+    pub file: Option<WorkspaceDirFile>,
+}
+
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[kube(
+    group = "kubimo.aqora.io",
+    version = "v1",
+    kind = "WorkspaceDirectory",
+    root = "WorkspaceDir",
+    shortname = "bmowd",
+    selectable = ".spec.workspace",
+    selectable = ".spec.path",
+    namespaced
+)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirSpec {
+    pub workspace: String,
+    pub path: String,
+    pub entries: Option<Vec<WorkspaceDirEntry>>,
+}
+
+#[derive(Clone, Copy, Debug, Display)]
+pub enum WorkspaceDirField {
+    #[strum(serialize = "metadata.name")]
+    Name,
+    #[strum(serialize = "metadata.namespace")]
+    Namespace,
+    #[strum(serialize = "spec.workspace")]
+    Workspace,
+    #[strum(serialize = "spec.path")]
+    Path,
+}
+
+impl ResourceFactory for WorkspaceDir {
+    fn new(name: &str, spec: Self::Spec) -> Self {
+        Self::new(name, spec)
+    }
+}
+
+impl Workspace {
+    pub fn new_workspace_directory(
+        &self,
+        name: &str,
+        spec: WorkspaceDirSpec,
+    ) -> Result<WorkspaceDir> {
+        let mut workspace_directory = WorkspaceDir::new(
+            name,
+            WorkspaceDirSpec {
+                workspace: self.name()?.to_string(),
+                ..spec
+            },
+        );
+        workspace_directory
+            .meta_mut()
+            .owner_references
+            .get_or_insert_default()
+            .push(self.static_controller_owner_ref()?);
+        Ok(workspace_directory)
+    }
+}
+
 pub fn all_crds() -> Vec<CustomResourceDefinition> {
-    vec![Workspace::crd(), Runner::crd(), CacheJob::crd()]
+    vec![
+        Workspace::crd(),
+        Runner::crd(),
+        CacheJob::crd(),
+        WorkspaceDir::crd(),
+    ]
 }

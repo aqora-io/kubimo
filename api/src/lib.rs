@@ -17,6 +17,7 @@ mod validation;
 pub use json_patch_macros;
 pub use k8s_openapi;
 pub use kube;
+pub use url;
 
 #[cfg(feature = "client")]
 pub use api::{Api, ApiListStream};
@@ -25,7 +26,10 @@ pub use client::{Client, ClientBuilder};
 pub use crd::{
     CacheJob, CacheJobField, CacheJobSpec, Requirement, Runner, RunnerCommand, RunnerField,
     RunnerIngress, RunnerLifecycle, RunnerSpec, RunnerStatus, RunnerTls, RunnerToken, Workspace,
-    WorkspaceField, WorkspaceSpec, WorkspaceStatus, all_crds,
+    WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory, WorkspaceDirEntry,
+    WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache,
+    WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField, WorkspaceIndexer, WorkspaceIndexerPod,
+    WorkspaceSpec, WorkspaceStatus, all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;

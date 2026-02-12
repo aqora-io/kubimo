@@ -1,17 +1,17 @@
-use kubimo::{CacheJob, Workspace, json_patch_macros::*, prelude::*};
+use kubimo::{Workspace, WorkspaceDir, json_patch_macros::*, prelude::*};
 
 use crate::context::Context;
 
-use super::CacheJobReconciler;
+use super::WorkspaceDirectoryReconciler;
 
-impl CacheJobReconciler {
+impl WorkspaceDirectoryReconciler {
     pub(crate) async fn apply_owner_reference(
         &self,
         ctx: &Context,
-        cache_job: &CacheJob,
+        workspace_dir: &WorkspaceDir,
     ) -> Result<(), kubimo::Error> {
-        let namespace = cache_job.require_namespace()?;
-        if !cache_job
+        let namespace = workspace_dir.require_namespace()?;
+        if !workspace_dir
             .metadata
             .owner_references
             .as_ref()
@@ -19,23 +19,23 @@ impl CacheJobReconciler {
                 orefs.iter().any(|oref| {
                     oref.controller.is_some_and(|yes| yes)
                         && oref.kind == Workspace::kind(&())
-                        && oref.name == cache_job.spec.workspace
+                        && oref.name == workspace_dir.spec.workspace
                 })
             })
         {
             let workspace = ctx
                 .api_namespaced::<Workspace>(namespace)
-                .get(cache_job.spec.workspace.as_ref())
+                .get(workspace_dir.spec.workspace.as_ref())
                 .await?;
-            let mut owner_refs = cache_job
+            let mut owner_refs = workspace_dir
                 .metadata
                 .owner_references
                 .clone()
                 .unwrap_or_default();
             owner_refs.push(workspace.static_controller_owner_ref()?);
-            ctx.api_namespaced::<CacheJob>(namespace)
+            ctx.api_namespaced::<WorkspaceDir>(namespace)
                 .patch_json(
-                    cache_job.name()?,
+                    workspace_dir.name()?,
                     patch![add!(["metadata", "ownerReferences"] => owner_refs)],
                 )
                 .await?;

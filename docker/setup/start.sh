@@ -33,6 +33,21 @@ while [[ $# -gt 0 ]]; do
     shift
     shift
     ;;
+  --log-level)
+    LOG_LEVEL="$2"
+    shift
+    shift
+    ;;
+  --host)
+    HOST="$2"
+    shift
+    shift
+    ;;
+  --port)
+    PORT="$2"
+    shift
+    shift
+    ;;
   -* | --*)
     echo "Unknown option $1"
     exit 1
@@ -75,8 +90,13 @@ fi
 uv sync &
 sync_pid=$!
 
-host="0.0.0.0"
-port="80"
+host="${HOST:-0.0.0.0}"
+port="${PORT:-80}"
+log_level="${LOG_LEVEL:-info}"
+
+host_flag="--host=$host"
+port_flag="--port=$port"
+log_level_flag="--log-level=$log_level"
 
 if [ -z "$BASE_URL" ]; then
   base_url_flag=""
@@ -92,27 +112,28 @@ fi
 
 if [[ "$CMD" == "edit" ]]; then
   uv run --no-sync marimo \
-    --log-level=info \
+    $log_level_flag \
     --yes \
     edit \
     --skip-update-check \
     --headless \
     --watch \
-    "--host=$host" \
-    "--port=$port" \
     --allow-origins='*' \
+    $host_flag \
+    $port_flag \
     $base_url_flag \
     $token_flag
 elif [[ "$CMD" == "run" ]]; then
   uv run --no-sync /app/server.py \
     --include-code \
-    "--host=$host" \
-    "--port=$port" \
     --allow-origins='*' \
+    $log_level_flag \
+    $host_flag \
+    $port_flag \
     $base_url_flag \
     $token_flag
 elif [[ "$CMD" == "cache" ]]; then
-  uv run --no-sync /app/cache.py --include-code
+  uv run --no-sync /app/cache.py --include-code $log_level_flag
   kill $sync_pid || echo "No sync process to kill"
   exit 0
 else

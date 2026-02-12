@@ -41,6 +41,9 @@ async fn main() -> ExitCode {
         .with(fmt::layer())
         .with(EnvFilter::from_default_env())
         .init();
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Could not install default crypto provider");
     let config = Config::load().unwrap();
 
     let mut builder = kubimo::Client::builder();
@@ -59,6 +62,13 @@ async fn main() -> ExitCode {
                 .await
                 .unwrap()
                 .wait(),
+            controllers::workspace_directory::run(
+                ctx.clone(),
+                shutdown_signal("workspace_directory"),
+            )
+            .await
+            .unwrap()
+            .wait(),
             controllers::runner::run(ctx.clone(), shutdown_signal("runner"))
                 .await
                 .unwrap()
