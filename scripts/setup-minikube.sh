@@ -1,10 +1,6 @@
-set -x
-# stop minikube if running
-minikube stop
-# start minikube with containerd
+#!/usr/bin/env sh
+
 minikube start --container-runtime=containerd \
-  --docker-opt containerd=/var/run/containerd/containerd.sock
-# enable ingress addon
-minikube addons enable ingress
-# enable gvisor addon
-minikube addons enable gvisor
+  --network=minikube \
+  --docker-opt containerd=/var/run/containerd/containerd.sock \
+  --addons=ingress,gvisor,metrics-server,dashboard
