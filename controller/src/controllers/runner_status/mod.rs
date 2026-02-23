@@ -4,7 +4,7 @@ use std::time::Duration;
 use chrono::{TimeDelta, Utc};
 use futures::prelude::*;
 use kubimo::kube::runtime::controller::Action;
-use kubimo::{Runner, RunnerCommand, prelude::*};
+use kubimo::{Runner, prelude::*};
 use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
@@ -12,6 +12,7 @@ use url::Url;
 use crate::backoff::default_error_policy;
 use crate::config::StatusCheckResolution;
 use crate::context::Context;
+use crate::controllers::ingress::ingress_path;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 
@@ -35,12 +36,11 @@ fn runner_api_endpoint(
             name = runner.name()?,
             namespace = runner.require_namespace()?
         ))?,
-        StatusCheckResolution::Ingress { host } => host.join(&format!("{}/", runner.name()?))?,
+        StatusCheckResolution::Ingress { host } => {
+            host.join(&format!("{}/", ingress_path(runner)?))?
+        }
     }
-    .join(match runner.spec.command {
-        RunnerCommand::Edit => "api/",
-        RunnerCommand::Run => "_api/",
-    })?)
+    .join("api/")?)
 }
 
 #[derive(Debug, Deserialize)]
