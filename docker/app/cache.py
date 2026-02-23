@@ -29,7 +29,10 @@ async def _cache_app(path: Path, *, include_code: bool):
     export_dir = path.parent / "__marimo__"
     export_dir.mkdir(parents=True, exist_ok=True)
     export_path = export_dir / export_result.download_filename
-    export_path.write_text(export_result.contents, encoding="utf-8")
+    contents = export_result.contents
+    if isinstance(contents, str):
+        contents = contents.encode("utf-8")
+    export_path.write_bytes(contents)
 
 
 def _is_gitignored(path: Path, git_root: Path) -> bool:

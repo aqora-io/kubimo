@@ -8,6 +8,7 @@ use kubimo::{Runner, RunnerCommand, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
+use crate::controllers::ingress::ingress_path;
 use crate::resources::Resources;
 
 use super::RunnerReconciler;
@@ -19,13 +20,10 @@ impl RunnerReconciler {
         runner: &Runner,
     ) -> Result<Pod, kubimo::Error> {
         let namespace = runner.require_namespace()?;
-        let ingress_path = self.ingress_path(runner)?;
+        let ingress_path = ingress_path(runner)?;
         let path_prefix = ingress_path.strip_suffix('/').unwrap_or(&ingress_path);
         let probe_action = HTTPGetAction {
-            path: Some(match runner.spec.command {
-                RunnerCommand::Edit => format!("{path_prefix}/health"),
-                RunnerCommand::Run => format!("{path_prefix}/_health"),
-            }),
+            path: Some(format!("{path_prefix}/health")),
             port: IntOrString::Int(80),
             ..Default::default()
         };

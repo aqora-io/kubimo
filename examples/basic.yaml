@@ -11,7 +11,7 @@ kind: Runner
 metadata:
   name: "editor"
 spec:
-  logLevel: "Debug"
+  # logLevel: "Debug"
   command: "Edit"
   workspace: "workspace"
   # token:
@@ -30,7 +30,7 @@ kind: Runner
 metadata:
   name: "runner"
 spec:
-  logLevel: "Debug"
+  # logLevel: "Debug"
   command: "Run"
   workspace: "workspace"
   # token:
@@ -43,11 +43,11 @@ spec:
     #   hosts:
     #     - "example.com"
     #   clusterIssuer: "letsencrypt-prod"
----
-apiVersion: kubimo.aqora.io/v1
-kind: CacheJob
-metadata:
-  name: "cache"
-spec:
-  workspace: "workspace"
-  backoffLimit: 0
+# ---
+# apiVersion: kubimo.aqora.io/v1
+# kind: CacheJob
+# metadata:
+#   name: "cache"
+# spec:
+#   workspace: "workspace"
+#   backoffLimit: 0

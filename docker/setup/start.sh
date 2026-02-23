@@ -93,6 +93,7 @@ sync_pid=$!
 host="${HOST:-0.0.0.0}"
 port="${PORT:-80}"
 log_level="${LOG_LEVEL:-info}"
+directory="."
 
 host_flag="--host=$host"
 port_flag="--port=$port"
@@ -122,16 +123,22 @@ if [[ "$CMD" == "edit" ]]; then
     $host_flag \
     $port_flag \
     $base_url_flag \
-    $token_flag
+    $token_flag \
+    $directory
 elif [[ "$CMD" == "run" ]]; then
-  uv run --no-sync /app/server.py \
-    --include-code \
-    --allow-origins='*' \
+  uv run --no-sync marimo \
     $log_level_flag \
+    --yes \
+    run \
+    --headless \
+    --watch \
+    --allow-origins='*' \
     $host_flag \
     $port_flag \
     $base_url_flag \
-    $token_flag
+    $token_flag \
+    --include-code \
+    $directory
 elif [[ "$CMD" == "cache" ]]; then
   uv run --no-sync /app/cache.py --include-code $log_level_flag
   kill $sync_pid || echo "No sync process to kill"

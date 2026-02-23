@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::core::v1::{Container, EnvFromSource, EnvVar, Volume};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
@@ -13,14 +15,11 @@ use crate::validation::{
     workspace_no_volume_with_name,
 };
 
-fn nullable_string(_: &mut SchemaGenerator) -> Schema {
-    schemars::json_schema!({"type": "string", "nullable": true})
-}
 use crate::{
     CpuQuantity, ResourceFactory, ResourceNameExt, ResourceOwnerRefExt, Result, StorageQuantity,
 };
 
-#[derive(Clone, Copy, Debug, Display, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Display, Eq, PartialEq, Serialize, Deserialize)]
 pub enum LogLevel {
     #[strum(serialize = "debug")]
     Debug,
@@ -32,6 +31,16 @@ pub enum LogLevel {
     Error,
     #[strum(serialize = "critical")]
     Critical,
+}
+
+impl JsonSchema for LogLevel {
+    fn schema_name() -> Cow<'static, str> {
+        "LogLevel".into()
+    }
+
+    fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
+        schemars::json_schema!({"type": "string"})
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
@@ -140,7 +149,6 @@ pub struct RunnerToken {
 pub struct RunnerSpec {
     pub workspace: String,
     pub command: RunnerCommand,
-    #[schemars(schema_with = "nullable_string")]
     pub log_level: Option<LogLevel>,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,
@@ -216,7 +224,6 @@ impl Workspace {
 #[serde(rename_all = "camelCase")]
 pub struct CacheJobSpec {
     pub workspace: String,
-    #[schemars(schema_with = "nullable_string")]
     pub log_level: Option<LogLevel>,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,

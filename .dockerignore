@@ -13,6 +13,8 @@
 # docker
 docker-bake.hcl
 docker/Dockerfile.*
+docker/app
+!docker/app/*.py
 
 # non-project
 scripts/

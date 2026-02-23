@@ -1,6 +1,6 @@
-FROM rust:1.93-alpine3.22 AS build
+FROM rust:1.94-trixie AS build
 
-RUN apk update && apk add --no-cache wget musl-dev
+RUN apt-get update && apt-get install -y wget pkg-config
 
 ARG SCCACHE_VERSION=0.9.1
 RUN ARCH="$(uname -m)-unknown-linux-musl" && \
@@ -26,7 +26,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
   cargo build --release -p kubimo-controller && \
   cp target/release/kubimo-controller /bin/kubimo-controller
 
-FROM alpine:3.22
+FROM debian:trixie-slim
 COPY --from=build /bin/kubimo-controller /bin/kubimo-controller
 ENV RUST_LOG=info
 CMD ["kubimo-controller"]
