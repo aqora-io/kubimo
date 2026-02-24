@@ -3,6 +3,7 @@ mod apply_indexer_rbac;
 mod apply_job;
 mod apply_pvc;
 mod apply_status;
+mod cleanup_indexer;
 
 use std::sync::Arc;
 
@@ -36,6 +37,11 @@ impl Reconciler for WorkspaceReconciler {
             self.apply_status(ctx, workspace).boxed(),
         ])
         .await?;
+        Ok(Action::await_change())
+    }
+
+    async fn cleanup(&self, ctx: &Context, workspace: &Workspace) -> Result<Action, Self::Error> {
+        self.cleanup_indexer(ctx, workspace).await?;
         Ok(Action::await_change())
     }
 }

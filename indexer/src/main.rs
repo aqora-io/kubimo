@@ -14,8 +14,11 @@ use kubimo::FilterParams;
 use s3::{CacheMarkers, S3Client, UploadError};
 use watcher::{WaitError, Watcher};
 
-use clap::Parser;
-use futures::stream::{StreamExt, TryStreamExt, futures_unordered::FuturesUnordered};
+use clap::{Args, Parser, Subcommand};
+use futures::{
+    future::FutureExt,
+    stream::{StreamExt, TryStreamExt, futures_unordered::FuturesUnordered},
+};
 use kubimo::{
     WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory, WorkspaceDirEntry,
     WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache,
@@ -25,7 +28,7 @@ use python::{Notebook, get_marimo_notebook};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncSeek},
-    process::Command,
+    process::Command as Cmd,
     sync::{
         Mutex, Semaphore,
         mpsc::{Receiver, Sender, channel},
@@ -38,7 +41,19 @@ const CACHE_FORMATS: &[&str] = &["md", "html", "ipynb"];
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    Upload(UploadArgs),
+    Clean(CleanArgs),
+}
+
+#[derive(Args, Debug)]
+struct UploadArgs {
     #[arg(long, short = 'i')]
     include_gitignored: bool,
     #[arg(long, short = 'k')]
@@ -62,6 +77,11 @@ struct Args {
     name: String,
     #[arg(default_value = ".")]
     directory: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct CleanArgs {
+    name: String,
 }
 
 #[derive(Clone)]
@@ -594,6 +614,66 @@ async fn process_existing_dirs(
     }
 }
 
+async fn clean_url(client: &S3Client, url: Url) {
+    if let Err(err) = client.delete(&url).await {
+        tracing::error!("Error deleting object at {}: {}", url, err);
+    } else {
+        tracing::info!("Deleted object at {}", url);
+    }
+}
+
+async fn clean_workspace_dir(client: &kubimo::Client, name: String) {
+    if let Err(err) = client.api::<WorkspaceDir>().delete(&name).await {
+        tracing::error!("Error deleting workspace dir {}: {}", name, err);
+    } else {
+        tracing::info!("Deleted workspace dir {}", name);
+    }
+}
+
+async fn clean(client: &kubimo::Client, s3: &S3Client, name: &str) {
+    let mut workspace_dirs = client
+        .api::<WorkspaceDir>()
+        .list(&FilterParams::new().with_fields((WorkspaceDirField::Workspace, name)));
+    let futs = FuturesUnordered::new();
+    while let Some(workspace_dir) = workspace_dirs.next().await {
+        let workspace_dir = match workspace_dir {
+            Ok(dir) => dir.item,
+            Err(err) => {
+                tracing::error!("Error listing workspace dirs: {}", err);
+                continue;
+            }
+        };
+        match workspace_dir.name() {
+            Ok(name) => {
+                futs.push(clean_workspace_dir(client, name.to_owned()).boxed());
+            }
+            Err(err) => {
+                tracing::error!("Error getting workspace dir name: {}", err);
+            }
+        }
+        for entry in workspace_dir.spec.entries.unwrap_or_default().as_slice() {
+            let Some(file) = &entry.file else {
+                continue;
+            };
+            let Some(marimo) = &file.marimo else {
+                continue;
+            };
+            if let Some(url) = &marimo.meta_json {
+                futs.push(clean_url(s3, url.url.clone()).boxed());
+            }
+            let Some(caches) = &marimo.caches else {
+                continue;
+            };
+            for cache in caches {
+                if let Some(url) = &cache.url {
+                    futs.push(clean_url(s3, url.url.clone()).boxed());
+                }
+            }
+        }
+    }
+    futs.collect::<()>().await;
+}
+
 #[derive(Debug, Error)]
 enum GitDirError {
     #[error("git command could not run: {0}")]
@@ -615,7 +695,7 @@ async fn get_relative_git_dir(dir: impl AsRef<Path>) -> Result<PathBuf, GitDirEr
         .as_ref()
         .canonicalize()
         .map_err(|err| GitDirError::Canonicalize(dir.as_ref().to_path_buf(), err))?;
-    let git_dir = match Command::new("git")
+    let git_dir = match Cmd::new("git")
         .args(["rev-parse", "--absolute-git-dir"])
         .current_dir(&abs_dir)
         .output()
@@ -658,7 +738,7 @@ struct RunResult {
 }
 
 async fn run(
-    args: &Args,
+    args: &UploadArgs,
     client: &kubimo::Client,
     s3: &S3Client,
     keys: &WorkspaceKeys,
@@ -792,7 +872,7 @@ async fn run(
 }
 
 async fn watch(
-    args: &Args,
+    args: &UploadArgs,
     client: &kubimo::Client,
     s3: &S3Client,
     keys: &WorkspaceKeys,
@@ -838,37 +918,44 @@ async fn main() {
         .with(EnvFilter::from_default_env())
         .init();
 
-    let args = Args::parse();
+    let cli = Cli::parse();
     let client = kubimo::Client::infer()
         .await
         .expect("Could not create client");
     let s3 = S3Client::from_env();
 
-    let mut previous_names = BTreeSet::new();
-    let mut previous_urls = BTreeSet::new();
-    let mut names = WorkspaceDirNameSet::new(args.name.clone());
-    let mut urls = WorkspaceFileUrlSet::new(
-        args.bucket.clone().unwrap_or_default(),
-        args.key_prefix.clone(),
-    )
-    .expect("Could not create WorkspaceFileUrlSet");
-    let mut cache_markers = CacheMarkers::new();
-    process_existing_dirs(
-        &client,
-        &args.name,
-        &mut names,
-        &mut urls,
-        &mut cache_markers,
-        &mut previous_names,
-        &mut previous_urls,
-    )
-    .await;
-    let keys = WorkspaceKeys::new(names, urls);
-    s3.set_cache(cache_markers).await;
+    match cli.command {
+        Command::Upload(args) => {
+            let mut previous_names = BTreeSet::new();
+            let mut previous_urls = BTreeSet::new();
+            let mut names = WorkspaceDirNameSet::new(args.name.clone());
+            let mut urls = WorkspaceFileUrlSet::new(
+                args.bucket.clone().unwrap_or_default(),
+                args.key_prefix.clone(),
+            )
+            .expect("Could not create WorkspaceFileUrlSet");
+            let mut cache_markers = CacheMarkers::new();
+            process_existing_dirs(
+                &client,
+                &args.name,
+                &mut names,
+                &mut urls,
+                &mut cache_markers,
+                &mut previous_names,
+                &mut previous_urls,
+            )
+            .await;
+            let keys = WorkspaceKeys::new(names, urls);
+            s3.set_cache(cache_markers).await;
 
-    if args.watch {
-        watch(&args, &client, &s3, &keys, previous_names, previous_urls).await;
-    } else {
-        let _ = run(&args, &client, &s3, &keys, &previous_names, &previous_urls).await;
+            if args.watch {
+                watch(&args, &client, &s3, &keys, previous_names, previous_urls).await;
+            } else {
+                let _ = run(&args, &client, &s3, &keys, &previous_names, &previous_urls).await;
+            }
+        }
+        Command::Clean(args) => {
+            clean(&client, &s3, &args.name).await;
+        }
     }
 }
