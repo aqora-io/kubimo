@@ -19,6 +19,8 @@ pub enum Error {
     #[cfg(feature = "client")]
     #[error(transparent)]
     ClientBuildError(#[from] ClientBuildError),
+    #[error("{0}")]
+    Custom(String),
 }
 
 impl Error {
