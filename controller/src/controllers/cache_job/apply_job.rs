@@ -49,7 +49,7 @@ impl CacheJobReconciler {
             name: "indexer".to_string(),
             image: Some(ctx.config.marimo_image.clone()),
             command: Some(cmd!["/app/indexer"]),
-            args: Some(indexer::args(workspace, false)?),
+            args: Some(indexer::upload_args(workspace, false)?),
             env: indexer::env(workspace),
             env_from: indexer::env_from(workspace),
             volume_mounts: Some(vec![VolumeMount {
