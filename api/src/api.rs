@@ -119,6 +119,21 @@ where
     }
 
     #[tracing::instrument(level = "debug", skip(self), ret, err)]
+    pub async fn delete_opt(&self, name: &str) -> Result<Option<T>> {
+        match self.delete(name).await {
+            Ok(res) => Ok(res),
+            Err(Error::Kube(kube::Error::Api(status))) => {
+                if status.code == 404 {
+                    Ok(None)
+                } else {
+                    Err(kube::Error::Api(status).into())
+                }
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), ret, err)]
     pub async fn delete_collection(&self, params: &FilterParams) -> Result<Option<ObjectList<T>>> {
         Ok(self
             .inner

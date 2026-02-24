@@ -1,5 +1,4 @@
 use kubimo::k8s_openapi::api::core::v1::{EnvFromSource, EnvVar, Pod};
-use kubimo::kube::Error as KubeError;
 use kubimo::{Workspace, prelude::*};
 
 use crate::command::cmd;
@@ -28,9 +27,12 @@ pub(crate) fn role_binding_name(workspace_name: &str) -> String {
     format!("{workspace_name}-indexer")
 }
 
-pub(crate) fn args(workspace: &Workspace, watch: bool) -> Result<Vec<String>, kubimo::Error> {
+pub(crate) fn upload_args(
+    workspace: &Workspace,
+    watch: bool,
+) -> Result<Vec<String>, kubimo::Error> {
     let workspace_name = workspace.name()?;
-    let mut args = vec![];
+    let mut args = vec!["upload".to_string()];
     if watch {
         args.extend(cmd!["--watch"]);
     }
@@ -80,27 +82,18 @@ pub(crate) fn env_from(workspace: &Workspace) -> Option<Vec<EnvFromSource>> {
         .and_then(|pod| pod.env_from.clone())
 }
 
-pub(crate) fn is_not_found_error(err: &kubimo::Error) -> bool {
-    matches!(
-        err,
-        kubimo::Error::Kube(KubeError::Api(response)) if response.code == 404
-    )
-}
-
 pub(crate) async fn is_pod_running(
     ctx: &Context,
     workspace: &Workspace,
 ) -> Result<bool, kubimo::Error> {
     let workspace_name = workspace.name()?;
     let namespace = workspace.require_namespace()?;
-    let pod = match ctx
+    let Some(pod) = ctx
         .api_namespaced::<Pod>(namespace)
-        .get(pod_name(workspace_name).as_ref())
-        .await
-    {
-        Ok(pod) => pod,
-        Err(err) if is_not_found_error(&err) => return Ok(false),
-        Err(err) => return Err(err),
+        .get_opt(pod_name(workspace_name).as_ref())
+        .await?
+    else {
+        return Ok(false);
     };
     Ok(matches!(
         pod.status

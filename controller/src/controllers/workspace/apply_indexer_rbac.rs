@@ -113,9 +113,6 @@ impl WorkspaceReconciler {
         ctx: &Context,
         workspace: &Workspace,
     ) -> Result<(), kubimo::Error> {
-        if workspace.metadata.deletion_timestamp.is_some() {
-            return Ok(());
-        }
         futures::future::try_join_all(vec![
             self.apply_indexer_service_account(ctx, workspace).boxed(),
             self.apply_indexer_role(ctx, workspace).boxed(),
