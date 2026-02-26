@@ -16,7 +16,6 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, Display, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub enum LogLevel {
     #[strum(serialize = "debug")]
     Debug,

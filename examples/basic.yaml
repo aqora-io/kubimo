@@ -11,6 +11,7 @@ kind: Runner
 metadata:
   name: "editor"
 spec:
+  logLevel: "Debug"
   command: "Edit"
   workspace: "workspace"
   # token:
@@ -29,6 +30,7 @@ kind: Runner
 metadata:
   name: "runner"
 spec:
+  logLevel: "Debug"
   command: "Run"
   workspace: "workspace"
   # token:

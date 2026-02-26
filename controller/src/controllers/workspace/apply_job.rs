@@ -19,6 +19,15 @@ impl WorkspaceReconciler {
     ) -> Result<Job, kubimo::Error> {
         let workspace_name = workspace.name()?;
         let namespace = workspace.require_namespace()?;
+
+        if let Some(job) = ctx
+            .api_namespaced::<Job>(namespace)
+            .get_opt(workspace_name)
+            .await?
+        {
+            return Ok(job);
+        }
+
         let mut volumes = workspace.spec.volumes.clone().unwrap_or_default();
         volumes.push(Volume {
             name: workspace_name.into(),
