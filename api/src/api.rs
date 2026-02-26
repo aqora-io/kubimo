@@ -2,6 +2,7 @@ use std::fmt::Debug;
 
 use futures::prelude::*;
 use futures::stream::{BoxStream, MapErr};
+use kube::api::ObjectList;
 use kube::core::object::HasStatus;
 use kube::{
     Resource,
@@ -113,6 +114,15 @@ where
     #[tracing::instrument(level = "debug", skip(self), ret, err)]
     pub async fn delete(&self, name: &str) -> Result<Option<T>> {
         Ok(self.inner.delete(name, &Default::default()).await?.left())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), ret, err)]
+    pub async fn delete_collection(&self, params: &FilterParams) -> Result<Option<ObjectList<T>>> {
+        Ok(self
+            .inner
+            .delete_collection(&Default::default(), &params.into())
+            .await?
+            .left())
     }
 
     #[tracing::instrument(level = "debug", skip(self), ret, err)]
