@@ -19,9 +19,9 @@ use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 pub enum RunnerStatusError {
     #[error(transparent)]
     Kubimo(#[from] kubimo::Error),
-    #[error("Bad url: {0}")]
+    #[error(transparent)]
     Url(#[from] url::ParseError),
-    #[error("Could not request status: {0}")]
+    #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
 }
 
@@ -63,6 +63,7 @@ async fn runner_status(
         .get(api_endpoint.join("status/connections")?)
         .send()
         .await?
+        .error_for_status()?
         .json::<Connections>()
         .await?)
 }
@@ -93,7 +94,7 @@ impl Reconciler for RunnerStatusReconciler {
         {
             Ok(connections) => connections,
             Err(err) => {
-                tracing::warn!("Could not get runner status: {:?}", err);
+                tracing::warn!(err = ?err, "Could not get runner status: {}", err);
                 return Ok(Action::requeue(interval));
             }
         };
