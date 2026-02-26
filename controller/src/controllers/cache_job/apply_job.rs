@@ -20,6 +20,15 @@ impl CacheJobReconciler {
     ) -> Result<Job, kubimo::Error> {
         let cache_job_name = cache_job.name()?;
         let namespace = cache_job.require_namespace()?;
+
+        if let Some(job) = ctx
+            .api_namespaced::<Job>(namespace)
+            .get_opt(cache_job_name)
+            .await?
+        {
+            return Ok(job);
+        }
+
         let workspace_name = &cache_job.spec.workspace;
 
         let mut command = cmd!["bash", "/setup/start.sh"];
