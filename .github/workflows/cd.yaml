@@ -68,6 +68,12 @@ jobs:
           skip-extraction: ${{ steps.cache.outputs.cache-hit }}
       - name: Build and push
         uses: docker/bake-action@v6
+        env:
+          SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_ENDPOINT }}
+          SCCACHE_BUCKET: ${{ secrets.SCCACHE_BUCKET }}
+          SCCACHE_REGION: ${{ secrets.SCCACHE_REGION }}
+          SCCACHE_AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+          SCCACHE_AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
         with:
           set: |
             marimo*.cache-from=type=registry,ref=ghcr.io/aqora-io/kubimo-marimo:main
