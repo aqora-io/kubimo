@@ -1,3 +1,15 @@
+variable "SCCACHE_ENDPOINT" {
+  default = ""
+}
+
+variable "SCCACHE_BUCKET" {
+  default = ""
+}
+
+variable "SCCACHE_REGION" {
+  default = "auto"
+}
+
 group "default" {
   targets = ["marimo", "controller"]
 }
@@ -9,6 +21,15 @@ target "controller" {
   dockerfile = "docker/Dockerfile.controller"
   context = "."
   platforms = [BAKE_LOCAL_PLATFORM]
+  args = {
+    SCCACHE_ENDPOINT = SCCACHE_ENDPOINT
+    SCCACHE_BUCKET   = SCCACHE_BUCKET
+    SCCACHE_REGION   = SCCACHE_REGION
+  }
+  secret = [
+    "id=SCCACHE_AWS_ACCESS_KEY_ID,env=SCCACHE_AWS_ACCESS_KEY_ID",
+    "id=SCCACHE_AWS_SECRET_ACCESS_KEY,env=SCCACHE_AWS_SECRET_ACCESS_KEY",
+  ]
 }
 
 target "docker-metadata-marimo" {}
