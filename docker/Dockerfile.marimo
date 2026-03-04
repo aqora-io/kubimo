@@ -39,6 +39,8 @@ RUN cp /setup/pyproject.toml /home/${USER}/workspace/pyproject.toml \
   && su - me -c "cd /home/${USER}/workspace && uv sync" \
   && mv /home/${USER}/workspace/.venv /setup/venv \
   && mv /home/${USER}/workspace/uv.lock /setup/uv.lock \
+  && rm -rf /home/${USER}/.cache \
+  && rm -rf /home/${USER}/.rustup \
   && find /home/${USER}/workspace -mindepth 1 -maxdepth 1 -print0 | xargs -r0 rm -R
 COPY docker/setup /setup
 COPY docker/app /app
