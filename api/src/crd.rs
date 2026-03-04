@@ -3,14 +3,19 @@ use k8s_openapi::api::core::v1::{Container, EnvFromSource, EnvVar, Volume};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{CustomResource, CustomResourceExt, Resource};
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use strum::Display;
 
 use crate::validation::{
-    runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
-    workspace_max_storage_greater_than_min, workspace_no_volume_with_name,
+    log_level, runner_immutable_fields, runner_max_cpu_greater_than_min,
+    runner_max_memory_greater_than_min, workspace_max_storage_greater_than_min,
+    workspace_no_volume_with_name,
 };
+
+fn nullable_string(_: &mut SchemaGenerator) -> Schema {
+    schemars::json_schema!({"type": "string", "nullable": true})
+}
 use crate::{
     CpuQuantity, ResourceFactory, ResourceNameExt, ResourceOwnerRefExt, Result, StorageQuantity,
 };
@@ -129,11 +134,13 @@ pub struct RunnerToken {
     validation = runner_immutable_fields(),
     validation = runner_max_memory_greater_than_min(),
     validation = runner_max_cpu_greater_than_min(),
+    validation = log_level(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerSpec {
     pub workspace: String,
     pub command: RunnerCommand,
+    #[schemars(schema_with = "nullable_string")]
     pub log_level: Option<LogLevel>,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,
@@ -203,11 +210,13 @@ impl Workspace {
     kind = "CacheJob",
     shortname = "bmocj",
     selectable = ".spec.workspace",
-    namespaced
+    namespaced,
+    validation = log_level(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct CacheJobSpec {
     pub workspace: String,
+    #[schemars(schema_with = "nullable_string")]
     pub log_level: Option<LogLevel>,
     pub memory: Option<Requirement<StorageQuantity>>,
     pub cpu: Option<Requirement<CpuQuantity>>,

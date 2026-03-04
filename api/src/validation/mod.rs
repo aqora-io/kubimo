@@ -30,6 +30,12 @@ pub fn runner_max_cpu_greater_than_min() -> Rule {
         .field_path(".spec.cpu.max")
 }
 
+pub fn log_level() -> Rule {
+    Rule::new(include_str!("./log_level.cel"))
+        .message("logLevel must be one of: Debug, Info, Warn, Error, Critical")
+        .field_path(".spec.logLevel")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,5 +54,6 @@ mod tests {
         test_compiles(runner_immutable_fields());
         test_compiles(runner_max_memory_greater_than_min());
         test_compiles(runner_max_cpu_greater_than_min());
+        test_compiles(log_level());
     }
 }
