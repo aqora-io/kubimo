@@ -1,0 +1,1 @@
+!has(self.spec.logLevel) || self.spec.logLevel in ["Debug", "Info", "Warn", "Error", "Critical"]
