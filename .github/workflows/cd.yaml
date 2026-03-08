@@ -11,17 +11,29 @@ on:
   workflow_dispatch:
 
 jobs:
-  bake:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: controller
+            dockerfile: docker/Dockerfile.controller
+            registry: ghcr.io/aqora-io/kubimo-controller
+          - name: marimo
+            dockerfile: docker/Dockerfile.marimo
+            registry: ghcr.io/aqora-io/kubimo-marimo
+        platform:
+          - runner: ubuntu-latest
+            pair: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            pair: linux/arm64
+            arch: arm64
+    runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
       - name: Set up Docker Buildx
-        id: setup-buildx
         uses: docker/setup-buildx-action@v3
       - name: Docker login
         uses: docker/login-action@v3
@@ -29,62 +41,95 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Cache
-        uses: actions/cache@v4
-        id: cache
-        with:
-          path: cargo-cache-mount
-          key: ${{ runner.os }}-cargo-cache-mount-${{ hashFiles('**/Cargo.lock') }}
-      - name: Docker meta controller
-        id: meta-controller
+      - name: Docker meta
+        id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/aqora-io/kubimo-controller
-          bake-target: docker-metadata-controller
+          images: ${{ matrix.image.registry }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-      - name: Docker meta marimo
-        id: meta-marimo
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: ${{ matrix.platform.pair }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: ${{ github.event_name == 'push' && format('type=image,"name={0}",push-by-digest=true,name-canonical=true,push=true', matrix.image.registry) || '' }}
+          cache-from: type=registry,ref=${{ matrix.image.registry }}:cache-${{ matrix.platform.arch }}
+          cache-to: ${{ github.event_name == 'push' && format('type=registry,ref={0}:cache-{1},mode=max', matrix.image.registry, matrix.platform.arch) || '' }}
+          build-args: |
+            SCCACHE_ENDPOINT=${{ secrets.SCCACHE_ENDPOINT }}
+            SCCACHE_BUCKET=${{ secrets.SCCACHE_BUCKET }}
+            SCCACHE_REGION=${{ secrets.SCCACHE_REGION }}
+          secrets: |
+            SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+            SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
+      - name: Export digest
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - name: Upload digest
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image:
+          - name: controller
+            registry: ghcr.io/aqora-io/kubimo-controller
+          - name: marimo
+            registry: ghcr.io/aqora-io/kubimo-marimo
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.image.name }}-*
+          merge-multiple: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Docker login
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker meta
+        id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/aqora-io/kubimo-marimo
-          bake-target: docker-metadata-marimo
+          images: ${{ matrix.image.registry }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-      - name: Restore Docker cache mounts
-        uses: reproducible-containers/buildkit-cache-dance@v3
-        with:
-          builder: ${{ steps.setup-buildx.outputs.name }}
-          cache-dir: cargo-cache-mount
-          dockerfile: docker/Dockerfile.controller
-          skip-extraction: ${{ steps.cache.outputs.cache-hit }}
-      - name: Build and push
-        uses: docker/bake-action@v6
-        env:
-          SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_ENDPOINT }}
-          SCCACHE_BUCKET: ${{ secrets.SCCACHE_BUCKET }}
-          SCCACHE_REGION: ${{ secrets.SCCACHE_REGION }}
-          SCCACHE_AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
-          SCCACHE_AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
-        with:
-          set: |
-            marimo*.cache-from=type=registry,ref=ghcr.io/aqora-io/kubimo-marimo:main
-            controller*.cache-from=type=registry,ref=ghcr.io/aqora-io/kubimo-controller:main
-            *.cache-to=type=inline
-          files: |
-            ./docker-bake.hcl
-            ./docker-bake.ci.hcl
-            cwd://${{ steps.meta-controller.outputs.bake-file }}
-            cwd://${{ steps.meta-marimo.outputs.bake-file }}
-          push: ${{ github.event_name != 'pull_request' }}
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ matrix.image.registry }}@sha256:%s ' *)
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ matrix.image.registry }}:${{ steps.meta.outputs.version }}
 
   charts:
     permissions:
