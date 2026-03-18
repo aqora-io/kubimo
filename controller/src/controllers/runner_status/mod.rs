@@ -43,6 +43,46 @@ fn runner_api_endpoint(
     .join("api/")?)
 }
 
+pub struct RunnerApi {
+    client: reqwest::Client,
+    api_endpoint: Url,
+}
+
+impl RunnerApi {
+    pub fn build(
+        client: &reqwest::Client,
+        runner: &Runner,
+        resolution: &StatusCheckResolution,
+    ) -> Result<Self, RunnerStatusError> {
+        Ok(Self {
+            client: client.clone(),
+            api_endpoint: runner_api_endpoint(resolution, runner)?,
+        })
+    }
+
+    pub async fn connections(&self) -> Result<Connections, RunnerStatusError> {
+        Ok(self
+            .client
+            .get(self.api_endpoint.join("status/connections")?)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Connections>()
+            .await?)
+    }
+
+    pub async fn marimo_version(&self) -> Result<String, RunnerStatusError> {
+        Ok(self
+            .client
+            .get(self.api_endpoint.join("version")?)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Connections {
     active: usize,
@@ -53,19 +93,6 @@ impl Connections {
     pub fn is_active(&self) -> bool {
         self.active > 0
     }
-}
-
-async fn runner_status(
-    client: &reqwest::Client,
-    api_endpoint: &Url,
-) -> Result<Connections, RunnerStatusError> {
-    Ok(client
-        .get(api_endpoint.join("status/connections")?)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Connections>()
-        .await?)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -86,28 +113,46 @@ impl Reconciler for RunnerStatusReconciler {
         {
             return Ok(Action::requeue(interval));
         }
-        let connections = match runner_status(
-            &self.client,
-            &runner_api_endpoint(&ctx.config.runner_status.resolution, runner)?,
-        )
-        .await
-        {
+        let api = RunnerApi::build(&self.client, runner, &ctx.config.runner_status.resolution)?;
+        let connections = match api.connections().await {
             Ok(connections) => connections,
             Err(err) => {
                 tracing::warn!(err = ?err, "Could not get runner status: {}", err);
                 return Ok(Action::requeue(interval));
             }
         };
-        let bmors = ctx.api_for(runner)?;
-        if connections.is_active() {
-            let mut patched = runner.clone();
-            patched.status.get_or_insert_default().last_active = Some(now);
-            bmors.patch_status(&patched).await?;
-        } else if let Some(delete_after_secs_inactive) = runner
-            .spec
-            .lifecycle
+        let marimo_version = if runner
+            .status
             .as_ref()
-            .and_then(|l| l.delete_after_secs_inactive)
+            .is_none_or(|status| status.marimo_version.is_none())
+        {
+            match api.marimo_version().await {
+                Ok(version) => Some(version),
+                Err(err) => {
+                    tracing::warn!(err = ?err, "Could not get runner version: {}", err);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let bmors = ctx.api_for(runner)?;
+        if connections.is_active() || marimo_version.is_some() {
+            let mut patched = runner.clone();
+            if connections.is_active() {
+                patched.status.get_or_insert_default().last_active = Some(now);
+            }
+            if let Some(version) = marimo_version {
+                patched.status.get_or_insert_default().marimo_version = Some(version)
+            }
+            bmors.patch_status(&patched).await?;
+        }
+        if !connections.is_active()
+            && let Some(delete_after_secs_inactive) = runner
+                .spec
+                .lifecycle
+                .as_ref()
+                .and_then(|l| l.delete_after_secs_inactive)
         {
             let last_active_timestamp = runner
                 .status

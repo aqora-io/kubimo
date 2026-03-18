@@ -123,6 +123,7 @@ pub enum RunnerCommand {
 pub struct RunnerStatus {
     pub conditions: Option<Vec<Condition>>,
     pub last_active: Option<DateTime<Utc>>,
+    pub marimo_version: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
