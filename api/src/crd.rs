@@ -118,7 +118,7 @@ pub enum RunnerCommand {
     Run,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerStatus {
     pub conditions: Option<Vec<Condition>>,
