@@ -3,8 +3,13 @@ use std::time::Duration;
 
 use chrono::{TimeDelta, Utc};
 use futures::prelude::*;
+use kubimo::k8s_openapi::{
+    api::core::v1::Pod,
+    apimachinery::pkg::apis::meta::v1::{Condition, Time},
+    jiff::Timestamp,
+};
 use kubimo::kube::runtime::controller::Action;
-use kubimo::{Runner, prelude::*};
+use kubimo::{Runner, RunnerStatus, prelude::*};
 use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
@@ -100,25 +105,26 @@ struct RunnerStatusReconciler {
     client: reqwest::Client,
 }
 
-#[async_trait::async_trait]
-impl Reconciler for RunnerStatusReconciler {
-    type Resource = Runner;
-    type Error = RunnerStatusError;
-
-    async fn apply(&self, ctx: &Context, runner: &Runner) -> Result<Action, Self::Error> {
+impl RunnerStatusReconciler {
+    async fn poll_api_status(
+        &self,
+        ctx: &Context,
+        runner: &Runner,
+        status: &mut RunnerStatus,
+    ) -> Result<Option<Action>, RunnerStatusError> {
         let interval = Duration::from_secs(ctx.config.runner_status.interval_secs);
         let now = Utc::now();
         if let Some(last_active) = runner.status.as_ref().and_then(|s| s.last_active)
             && (now - last_active) < TimeDelta::from_std(interval).unwrap_or(TimeDelta::MAX)
         {
-            return Ok(Action::requeue(interval));
+            return Ok(Some(Action::requeue(interval)));
         }
         let api = RunnerApi::build(&self.client, runner, &ctx.config.runner_status.resolution)?;
         let connections = match api.connections().await {
             Ok(connections) => connections,
             Err(err) => {
                 tracing::warn!(err = ?err, "Could not get runner status: {}", err);
-                return Ok(Action::requeue(interval));
+                return Ok(Some(Action::requeue(interval)));
             }
         };
         let marimo_version = if runner
@@ -136,16 +142,13 @@ impl Reconciler for RunnerStatusReconciler {
         } else {
             None
         };
-        let bmors = ctx.api_for(runner)?;
         if connections.is_active() || marimo_version.is_some() {
-            let mut patched = runner.clone();
             if connections.is_active() {
-                patched.status.get_or_insert_default().last_active = Some(now);
+                status.last_active = Some(now);
             }
             if let Some(version) = marimo_version {
-                patched.status.get_or_insert_default().marimo_version = Some(version)
+                status.marimo_version = Some(version)
             }
-            bmors.patch_status(&patched).await?;
         }
         if !connections.is_active()
             && let Some(delete_after_secs_inactive) = runner
@@ -167,10 +170,96 @@ impl Reconciler for RunnerStatusReconciler {
                 })
                 .unwrap_or(Utc::now().timestamp());
             if last_active_timestamp + (delete_after_secs_inactive as i64) < now.timestamp() {
-                bmors.delete(runner.name()?).await?;
+                ctx.api_for(runner)?.delete(runner.name()?).await?;
+                return Ok(None);
             }
         }
-        Ok(Action::requeue(interval))
+        Ok(Some(Action::requeue(interval)))
+    }
+
+    async fn apply_pod_ready_condition(
+        &self,
+        ctx: &Context,
+        runner: &Runner,
+        status: &mut RunnerStatus,
+    ) -> kubimo::Result<()> {
+        const STATUS_TYPE: &str = "PodReady";
+        let pod = ctx
+            .api_namespaced::<Pod>(runner.require_namespace()?)
+            .get_opt(runner.name()?)
+            .await?;
+        let (reason_str, message_str) = if let Some(pod) = pod {
+            if let Some(condition) = pod
+                .status
+                .as_ref()
+                .and_then(|s| s.conditions.as_ref())
+                .and_then(|conditions| conditions.iter().find(|c| c.type_ == "Ready"))
+            {
+                if condition.status == "True" {
+                    ("Ready", "Ready")
+                } else {
+                    ("NotReady", "Not ready")
+                }
+            } else {
+                ("NotStarted", "Not started")
+            }
+        } else {
+            ("NotPresent", "Not present")
+        };
+        let status_str = if reason_str == "Ready" {
+            "True"
+        } else {
+            "False"
+        };
+        if let Some(condition) = status
+            .conditions
+            .as_mut()
+            .and_then(|c| c.iter_mut().find(|c| c.type_ == STATUS_TYPE))
+        {
+            if condition.reason != reason_str {
+                condition.status = status_str.to_string();
+                condition.reason = reason_str.to_string();
+                condition.message = message_str.to_string();
+                condition.observed_generation = runner.metadata.generation;
+                condition.last_transition_time = Time(Timestamp::now());
+            }
+        } else {
+            status
+                .conditions
+                .get_or_insert_with(Vec::new)
+                .push(Condition {
+                    type_: STATUS_TYPE.to_string(),
+                    reason: reason_str.to_string(),
+                    status: status_str.to_string(),
+                    message: message_str.to_string(),
+                    observed_generation: runner.metadata.generation,
+                    last_transition_time: Time(Timestamp::now()),
+                });
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Reconciler for RunnerStatusReconciler {
+    type Resource = Runner;
+    type Error = RunnerStatusError;
+
+    async fn apply(&self, ctx: &Context, runner: &Runner) -> Result<Action, Self::Error> {
+        let mut status = runner.status.clone().unwrap_or_default();
+        let action = self.poll_api_status(ctx, runner, &mut status).await?;
+        if let Some(action) = action {
+            self.apply_pod_ready_condition(ctx, runner, &mut status)
+                .await?;
+            if Some(&status) != runner.status.as_ref() {
+                let mut patched = runner.clone();
+                patched.status = Some(status);
+                ctx.api_for(runner)?.patch_status(&patched).await?;
+            }
+            Ok(action)
+        } else {
+            Ok(Action::await_change())
+        }
     }
 }
 
