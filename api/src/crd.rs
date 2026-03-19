@@ -168,20 +168,14 @@ impl ResourceFactory for Runner {
 }
 
 impl Runner {
-    pub fn ingress_tls_secret_name(&self) -> Result<String> {
-        Ok(
-            if let Some(secret_name) = self
-                .spec
-                .ingress
-                .as_ref()
-                .and_then(|ingress| ingress.tls.as_ref())
-                .and_then(|tls| tls.secret_name.as_ref())
-            {
-                secret_name.clone()
-            } else {
-                format!("{}-tls", self.name()?)
-            },
-        )
+    pub fn ingress_tls_secret_name(&self) -> Option<&str> {
+        self.spec
+            .ingress
+            .as_ref()?
+            .tls
+            .as_ref()?
+            .secret_name
+            .as_deref()
     }
 }
 

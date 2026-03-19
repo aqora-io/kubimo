@@ -60,7 +60,20 @@ impl RunnerReconciler {
             (
                 Some(vec![IngressTLS {
                     hosts: Some(hosts.iter().cloned().collect()),
-                    secret_name: Some(runner.ingress_tls_secret_name()?),
+                    secret_name: Some(
+                        runner
+                            .ingress_tls_secret_name()
+                            .map(ToOwned::to_owned)
+                            .unwrap_or_else(|| {
+                                let mut tls_secret_name = String::new();
+                                for hostname in &hosts {
+                                    tls_secret_name.push_str(hostname);
+                                    tls_secret_name.push('-');
+                                }
+                                tls_secret_name.push_str("tls");
+                                tls_secret_name
+                            }),
+                    ),
                 }]),
                 hosts.into_iter().map(Some).collect(),
             )
