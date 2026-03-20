@@ -67,7 +67,12 @@ impl RunnerReconciler {
                             .unwrap_or_else(|| {
                                 let mut tls_secret_name = String::new();
                                 for hostname in &hosts {
-                                    tls_secret_name.push_str(hostname);
+                                    tls_secret_name.push_str(
+                                        hostname
+                                            .to_lowercase()
+                                            .replace(|ch: char| !ch.is_ascii_alphanumeric(), "-")
+                                            .trim_start_matches('-'),
+                                    );
                                     tls_secret_name.push('-');
                                 }
                                 tls_secret_name.push_str("tls");
