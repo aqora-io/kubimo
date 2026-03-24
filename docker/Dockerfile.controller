@@ -27,6 +27,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
   cp target/release/kubimo-controller /bin/kubimo-controller
 
 FROM debian:trixie-slim
+RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  apt-get update && apt-get install -y ca-certificates
 COPY --from=build /bin/kubimo-controller /bin/kubimo-controller
 ENV RUST_LOG=info
 CMD ["kubimo-controller"]
