@@ -37,14 +37,13 @@ fn runner_api_endpoint(
 ) -> Result<Url, RunnerStatusError> {
     Ok(match resolution {
         StatusCheckResolution::ServiceDns => Url::parse(&format!(
-            "http://{name}.{namespace}.svc.cluster.local/{name}/",
+            "http://{name}.{namespace}.svc.cluster.local/",
             name = runner.name()?,
-            namespace = runner.require_namespace()?
+            namespace = runner.require_namespace()?,
         ))?,
-        StatusCheckResolution::Ingress { host } => {
-            host.join(&format!("{}/", ingress_path(runner)?))?
-        }
+        StatusCheckResolution::Ingress { host } => host.clone(),
     }
+    .join(&format!("{}/", ingress_path(runner)?))?
     .join("api/")?)
 }
 
