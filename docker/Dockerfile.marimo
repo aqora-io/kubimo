@@ -1,12 +1,30 @@
-FROM rust:1.90-alpine3.22 AS build-indexer
-RUN apk update && apk add musl-dev
+FROM rust:1.94-trixie AS build-indexer
+
+RUN apt-get update && apt-get install -y wget pkg-config
+
+ARG SCCACHE_VERSION=0.9.1
+RUN ARCH="$(uname -m)-unknown-linux-musl" && \
+  wget -qO- "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${ARCH}.tar.gz" \
+  | tar xz -C /usr/local/bin --strip-components=1 "sccache-v${SCCACHE_VERSION}-${ARCH}/sccache"
+
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET
+ARG SCCACHE_REGION=auto
+
 WORKDIR /build
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
   --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
   --mount=type=cache,target=target,sharing=locked \
-  cargo build --release -p indexer \
-  && cp target/release/indexer /bin/indexer
+  --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
+  --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
+  if [ -n "${SCCACHE_ENDPOINT:-}" ] && [ -n "${SCCACHE_BUCKET:-}" ] && [ -s /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID ]; then \
+  export RUSTC_WRAPPER=sccache; \
+  export AWS_ACCESS_KEY_ID=$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID); \
+  export AWS_SECRET_ACCESS_KEY=$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY); \
+  fi && \
+  cargo build --release -p indexer && \
+  cp target/release/indexer /bin/indexer
 
 FROM ghcr.io/astral-sh/uv:0.10.11-python3.12-trixie-slim
 
