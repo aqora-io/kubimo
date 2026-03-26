@@ -91,6 +91,7 @@ pub struct WorkspaceSpec {
     #[schemars(length(max = 25))]
     pub volumes: Option<Vec<Volume>>,
     pub indexer: Option<WorkspaceIndexer>,
+    pub clone_workspace_name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]

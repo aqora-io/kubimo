@@ -1,4 +1,6 @@
-use kubimo::k8s_openapi::api::core::v1::{PersistentVolumeClaim, PersistentVolumeClaimSpec};
+use kubimo::k8s_openapi::api::core::v1::{
+    PersistentVolumeClaim, PersistentVolumeClaimSpec, TypedLocalObjectReference,
+};
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{Workspace, prelude::*};
 
@@ -26,6 +28,13 @@ impl WorkspaceReconciler {
                 resources: Resources::default()
                     .storage(workspace.spec.storage.clone())
                     .into(),
+                data_source: workspace.spec.clone_workspace_name.as_ref().map(
+                    |from_workspace_name| TypedLocalObjectReference {
+                        kind: "PersistentVolumeClaim".to_string(),
+                        name: from_workspace_name.clone(),
+                        ..Default::default()
+                    },
+                ),
                 ..Default::default()
             }),
             ..Default::default()
