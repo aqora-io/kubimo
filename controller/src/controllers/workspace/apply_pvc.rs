@@ -18,14 +18,22 @@ impl WorkspaceReconciler {
         ctx: &Context,
         workspace: &Workspace,
     ) -> Result<PersistentVolumeClaim, kubimo::Error> {
+        let workspace_name = workspace.name()?;
         let namespace = workspace.require_namespace()?;
-        let name = workspace.name()?;
+
+        if let Some(pvc) = ctx
+            .api_namespaced::<PersistentVolumeClaim>(namespace)
+            .get_opt(workspace_name)
+            .await?
+        {
+            return Ok(pvc);
+        }
 
         let data_source =
             if let Some(clone_workspace_name) = workspace.spec.clone_workspace_name.as_ref() {
                 let snapshot = VolumeSnapshot {
                     metadata: ObjectMeta {
-                        name: Some(name.to_owned()),
+                        name: Some(workspace_name.to_owned()),
                         namespace: Some(namespace.to_owned()),
                         ..Default::default()
                     },
@@ -46,7 +54,7 @@ impl WorkspaceReconciler {
                 Some(TypedLocalObjectReference {
                     api_group: Some("snapshot.storage.k8s.io".to_string()),
                     kind: "VolumeSnapshot".to_string(),
-                    name: name.to_owned(),
+                    name: workspace_name.to_owned(),
                 })
             } else {
                 None
@@ -54,7 +62,7 @@ impl WorkspaceReconciler {
 
         let pvc = PersistentVolumeClaim {
             metadata: ObjectMeta {
-                name: Some(name.to_owned()),
+                name: Some(workspace_name.to_owned()),
                 namespace: Some(namespace.to_owned()),
                 owner_references: Some(vec![workspace.static_controller_owner_ref()?]),
                 ..Default::default()
