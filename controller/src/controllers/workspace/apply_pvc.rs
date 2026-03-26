@@ -1,6 +1,9 @@
 use kubimo::k8s_openapi::api::core::v1::{
     PersistentVolumeClaim, PersistentVolumeClaimSpec, TypedLocalObjectReference,
 };
+use kubimo::kcr_snapshot_storage_k8s_io::v1::volumesnapshots::{
+    VolumeSnapshot, VolumeSnapshotSource, VolumeSnapshotSpec,
+};
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{Workspace, prelude::*};
 
@@ -16,10 +19,43 @@ impl WorkspaceReconciler {
         workspace: &Workspace,
     ) -> Result<PersistentVolumeClaim, kubimo::Error> {
         let namespace = workspace.require_namespace()?;
+        let name = workspace.name()?;
+
+        let data_source =
+            if let Some(clone_workspace_name) = workspace.spec.clone_workspace_name.as_ref() {
+                let snapshot = VolumeSnapshot {
+                    metadata: ObjectMeta {
+                        name: Some(name.to_owned()),
+                        namespace: Some(namespace.to_owned()),
+                        ..Default::default()
+                    },
+                    spec: VolumeSnapshotSpec {
+                        source: VolumeSnapshotSource {
+                            persistent_volume_claim_name: Some(clone_workspace_name.clone()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+
+                ctx.api_namespaced::<VolumeSnapshot>(namespace)
+                    .patch(&snapshot)
+                    .await?;
+
+                Some(TypedLocalObjectReference {
+                    api_group: Some("snapshot.storage.k8s.io".to_string()),
+                    kind: "VolumeSnapshot".to_string(),
+                    name: name.to_owned(),
+                })
+            } else {
+                None
+            };
+
         let pvc = PersistentVolumeClaim {
             metadata: ObjectMeta {
-                name: workspace.metadata.name.clone(),
-                namespace: workspace.metadata.namespace.clone(),
+                name: Some(name.to_owned()),
+                namespace: Some(namespace.to_owned()),
                 owner_references: Some(vec![workspace.static_controller_owner_ref()?]),
                 ..Default::default()
             },
@@ -28,13 +64,7 @@ impl WorkspaceReconciler {
                 resources: Resources::default()
                     .storage(workspace.spec.storage.clone())
                     .into(),
-                data_source: workspace.spec.clone_workspace_name.as_ref().map(
-                    |from_workspace_name| TypedLocalObjectReference {
-                        kind: "PersistentVolumeClaim".to_string(),
-                        name: from_workspace_name.clone(),
-                        ..Default::default()
-                    },
-                ),
+                data_source,
                 ..Default::default()
             }),
             ..Default::default()

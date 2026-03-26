@@ -16,6 +16,7 @@ mod validation;
 
 pub use json_patch_macros;
 pub use k8s_openapi;
+pub use kcr_snapshot_storage_k8s_io;
 pub use kube;
 pub use url;
 

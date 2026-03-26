@@ -1549,6 +1549,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kcr_snapshot_storage_k8s_io"
+version = "0.0.0"
+source = "git+https://github.com/metio/kube-custom-resources-rs.git#d5d11237449e8d7161f7e825a7b70a3bcf9cfe72"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1688,6 +1700,7 @@ dependencies = [
  "json-patch",
  "json-patch-macros",
  "k8s-openapi",
+ "kcr_snapshot_storage_k8s_io",
  "kube",
  "schemars",
  "serde",
