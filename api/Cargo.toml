@@ -19,6 +19,7 @@ client = [
   "tracing",
 ]
 runtime = ["kube/runtime"]
+ws = ["kube/ws"]
 
 [dependencies]
 json-patch-macros = { path = "../json-patch-macros" }

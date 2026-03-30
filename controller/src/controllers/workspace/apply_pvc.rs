@@ -1,11 +1,11 @@
 use kubimo::k8s_openapi::api::core::v1::{
-    PersistentVolumeClaim, PersistentVolumeClaimSpec, TypedLocalObjectReference,
+    PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, TypedLocalObjectReference,
 };
 use kubimo::kcr_snapshot_storage_k8s_io::v1::volumesnapshots::{
     VolumeSnapshot, VolumeSnapshotSource, VolumeSnapshotSpec,
 };
-use kubimo::kube::api::ObjectMeta;
-use kubimo::{Workspace, prelude::*};
+use kubimo::kube::api::{AttachParams, ObjectMeta};
+use kubimo::{Expr, FilterParams, Runner, RunnerCommand, RunnerField, Workspace, prelude::*};
 
 use crate::context::Context;
 use crate::resources::Resources;
@@ -46,6 +46,33 @@ impl WorkspaceReconciler {
                     },
                     ..Default::default()
                 };
+
+                if let Some(editor) = ctx
+                    .api_namespaced::<Runner>(namespace)
+                    .find(&FilterParams::new().with_fields(vec![
+                        Expr::new(RunnerField::Workspace).eq(clone_workspace_name),
+                        Expr::new(RunnerField::Command).eq(RunnerCommand::Edit),
+                    ]))
+                    .await?
+                {
+                    let proc = ctx
+                        .api_namespaced::<Pod>(namespace)
+                        .kube()
+                        .exec(
+                            editor.name()?,
+                            ["/usr/bin/sync"],
+                            &AttachParams::default()
+                                .container("runner")
+                                .stdout(true)
+                                .stderr(true),
+                        )
+                        .await?;
+                    if proc.join().await.is_err() {
+                        return Err(kubimo::Error::Custom(
+                            "Cannot sync runner volume".to_string(),
+                        ));
+                    }
+                }
 
                 ctx.api_namespaced::<VolumeSnapshot>(namespace)
                     .patch(&snapshot)
