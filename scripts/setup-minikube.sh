@@ -10,3 +10,4 @@ minikube start --container-runtime=containerd \
 minikube addons disable storage-provisioner
 minikube addons disable default-storageclass
 kubectl patch storageclass csi-hostpath-sc -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+kubectl patch volumesnapshotclass csi-hostpath-snapclass --type=merge -p '{"metadata":{"annotations":{"snapshot.storage.kubernetes.io/is-default-class":"true"}}}'
