@@ -16,7 +16,7 @@ rules:
     resources: ["roles", "rolebindings"]
     verbs: ["*"]
   - apiGroups: [""]
-    resources: ["pods", "services", "persistentvolumeclaims", "serviceaccounts"]
+    resources: ["pods", "pods/exec", "pods/log", "services", "persistentvolumeclaims", "serviceaccounts"]
     verbs: ["*"]
   - apiGroups: ["snapshot.storage.k8s.io"]
     resources: ["volumesnapshots"]
