@@ -19,9 +19,11 @@ client = [
   "tracing",
 ]
 runtime = ["kube/runtime"]
+ws = ["kube/ws"]
 
 [dependencies]
 json-patch-macros = { path = "../json-patch-macros" }
+k8s-crd-snapshot-storage = { path = "../k8s-crd-snapshot-storage" }
 
 futures = { version = "0.3", optional = true }
 hyper-util = { version = "0.1", optional = true, default-features = false, features = [
