@@ -16,7 +16,7 @@ impl WorkspaceReconciler {
         &self,
         ctx: &Context,
         workspace: &Workspace,
-    ) -> Result<Job, kubimo::Error> {
+    ) -> Result<Option<Job>, kubimo::Error> {
         let workspace_name = workspace.name()?;
         let namespace = workspace.require_namespace()?;
 
@@ -25,7 +25,11 @@ impl WorkspaceReconciler {
             .get_opt(workspace_name)
             .await?
         {
-            return Ok(job);
+            return Ok(Some(job));
+        }
+
+        if workspace.spec.clone_workspace_name.is_some() {
+            return Ok(None);
         }
 
         let mut volumes = workspace.spec.volumes.clone().unwrap_or_default();
@@ -95,6 +99,8 @@ chown -R 1000:1000 /home/me
             }),
             ..Default::default()
         };
-        ctx.api_namespaced::<Job>(namespace).patch(&job).await
+        Ok(Some(
+            ctx.api_namespaced::<Job>(namespace).patch(&job).await?,
+        ))
     }
 }

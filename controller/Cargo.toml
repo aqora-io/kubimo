@@ -5,7 +5,7 @@ license = { workspace = true }
 edition = "2024"
 
 [dependencies]
-kubimo = { path = "../api" }
+kubimo = { path = "../api", features = ["ws"] }
 
 async-trait = "0.1"
 futures = "0.3"
