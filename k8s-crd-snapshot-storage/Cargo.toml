@@ -1,0 +1,12 @@
+[package]
+name = "k8s-crd-snapshot-storage"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+k8s-openapi = { version = "0.27", features = ["latest", "schemars"] }
+kube = { version = "3.0", default-features = false, features = ["derive"] }
+schemars = { version = "1.0", features = ["derive", "chrono04", "url2"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
