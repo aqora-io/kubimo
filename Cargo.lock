@@ -1536,6 +1536,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "k8s-crd-snapshot-storage"
+version = "0.1.14"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "k8s-openapi"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1687,6 +1698,7 @@ dependencies = [
  "hyper-util",
  "json-patch",
  "json-patch-macros",
+ "k8s-crd-snapshot-storage",
  "k8s-openapi",
  "kube",
  "schemars",
