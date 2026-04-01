@@ -1,8 +1,8 @@
 use kubimo::k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerPort, EnvVar, HTTPGetAction,
-    PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec, Probe, SecurityContext,
-    Volume, VolumeMount,
+    Container, ContainerPort, EnvVar, HTTPGetAction, PersistentVolumeClaimVolumeSource, Pod,
+    PodSecurityContext, PodSpec, Probe, Volume, VolumeMount,
 };
+
 use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{Runner, RunnerCommand, prelude::*};
@@ -10,6 +10,7 @@ use kubimo::{Runner, RunnerCommand, prelude::*};
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::ingress::ingress_path;
+use crate::hardened_security_context;
 use crate::resources::Resources;
 
 use super::RunnerReconciler;
@@ -89,16 +90,7 @@ impl RunnerReconciler {
                         name: Some("marimo".to_string()),
                         ..Default::default()
                     }]),
-                    security_context: Some(SecurityContext {
-                        run_as_non_root: Some(true),
-                        run_as_user: Some(1000),
-                        allow_privilege_escalation: Some(false),
-                        capabilities: Some(Capabilities {
-                            drop: Some(vec!["ALL".into()]),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }),
+                    security_context: Some(hardened_security_context()),
                     env,
                     env_from: runner.spec.env_from.clone(),
                     startup_probe: Some(Probe {

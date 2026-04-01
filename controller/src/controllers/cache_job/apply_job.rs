@@ -1,14 +1,16 @@
 use kubimo::k8s_openapi::api::batch::v1::{Job, JobSpec};
 use kubimo::k8s_openapi::api::core::v1::{
-    Capabilities, Container, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec,
-    PodTemplateSpec, SecurityContext, Volume, VolumeMount,
+    Container, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
+    Volume, VolumeMount,
 };
+
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{CacheJob, Workspace, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::indexer;
+use crate::hardened_security_context;
 use crate::resources::Resources;
 
 use super::CacheJobReconciler;
@@ -24,16 +26,7 @@ impl CacheJobReconciler {
         Container {
             name: "cache".into(),
             image: Some(ctx.config.marimo_image.clone()),
-            security_context: Some(SecurityContext {
-                run_as_non_root: Some(true),
-                run_as_user: Some(1000),
-                allow_privilege_escalation: Some(false),
-                capabilities: Some(Capabilities {
-                    drop: Some(vec!["ALL".into()]),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
+            security_context: Some(hardened_security_context()),
             resources: Resources::default()
                 .cpu(cache_job.spec.cpu.clone())
                 .memory(cache_job.spec.memory.clone())
@@ -58,16 +51,7 @@ impl CacheJobReconciler {
         Ok(Container {
             name: "indexer".to_string(),
             image: Some(ctx.config.marimo_image.clone()),
-            security_context: Some(SecurityContext {
-                run_as_non_root: Some(true),
-                run_as_user: Some(1000),
-                allow_privilege_escalation: Some(false),
-                capabilities: Some(Capabilities {
-                    drop: Some(vec!["ALL".into()]),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
+            security_context: Some(hardened_security_context()),
             command: Some(cmd!["/app/indexer"]),
             args: Some(indexer::upload_args(workspace, false)?),
             env: indexer::env(workspace),

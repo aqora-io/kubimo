@@ -1,13 +1,15 @@
 use kubimo::k8s_openapi::api::core::v1::{
-    Capabilities, Container, PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec,
-    SecurityContext, Volume, VolumeMount,
+    Container, PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec, Volume,
+    VolumeMount,
 };
+
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{Expr, FilterParams, Runner, RunnerCommand, RunnerField, Workspace, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::indexer;
+use crate::hardened_security_context;
 
 use super::WorkspaceReconciler;
 
@@ -36,16 +38,7 @@ impl WorkspaceReconciler {
                 }),
                 containers: vec![Container {
                     name: "indexer".to_string(),
-                    security_context: Some(SecurityContext {
-                        run_as_non_root: Some(true),
-                        run_as_user: Some(1000),
-                        allow_privilege_escalation: Some(false),
-                        capabilities: Some(Capabilities {
-                            drop: Some(vec!["ALL".into()]),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }),
+                    security_context: Some(hardened_security_context()),
                     image: Some(ctx.config.marimo_image.clone()),
                     command: Some(cmd!["/app/indexer"]),
                     args: Some(indexer::upload_args(workspace, true)?),
