@@ -1,7 +1,8 @@
 use kubimo::k8s_openapi::api::core::v1::{
-    Container, ContainerPort, HTTPGetAction, PersistentVolumeClaimVolumeSource, Pod,
+    Container, ContainerPort, EnvVar, HTTPGetAction, PersistentVolumeClaimVolumeSource, Pod,
     PodSecurityContext, PodSpec, Probe, Volume, VolumeMount,
 };
+
 use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{Runner, RunnerCommand, prelude::*};
@@ -9,6 +10,7 @@ use kubimo::{Runner, RunnerCommand, prelude::*};
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::ingress::ingress_path;
+use crate::hardened_security_context;
 use crate::resources::Resources;
 
 use super::RunnerReconciler;
@@ -28,14 +30,6 @@ impl RunnerReconciler {
             ..Default::default()
         };
         let mut command = cmd!["bash", "/setup/start.sh", "--base-url", ingress_path,];
-        if let Some(token) = runner
-            .spec
-            .token
-            .as_ref()
-            .and_then(|token| token.value.as_ref())
-        {
-            command.extend(cmd!["--token", token]);
-        }
         if let Some(log_level) = runner.spec.log_level.as_ref() {
             command.extend(cmd!["--log-level", log_level]);
         }
@@ -46,6 +40,22 @@ impl RunnerReconciler {
             }
             .into(),
         );
+        let env = if let Some(token) = runner
+            .spec
+            .token
+            .as_ref()
+            .and_then(|token| token.value.as_ref())
+        {
+            let mut env = runner.spec.env.clone().unwrap_or_default();
+            env.push(EnvVar {
+                name: "TOKEN".into(),
+                value: Some(token.clone()),
+                ..Default::default()
+            });
+            Some(env)
+        } else {
+            runner.spec.env.clone()
+        };
         let pod = Pod {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
@@ -80,7 +90,8 @@ impl RunnerReconciler {
                         name: Some("marimo".to_string()),
                         ..Default::default()
                     }]),
-                    env: runner.spec.env.clone(),
+                    security_context: Some(hardened_security_context()),
+                    env,
                     env_from: runner.spec.env_from.clone(),
                     startup_probe: Some(Probe {
                         http_get: Some(probe_action.clone()),

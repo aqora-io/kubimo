@@ -3,11 +3,13 @@ use kubimo::k8s_openapi::api::core::v1::{
     Container, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
     Volume, VolumeMount,
 };
+
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{Workspace, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
+use crate::hardened_security_context;
 
 use super::WorkspaceReconciler;
 
@@ -76,6 +78,7 @@ chown -R 1000:1000 /home/me
                         containers: vec![Container {
                             name: "init".into(),
                             image: Some(ctx.config.marimo_image.clone()),
+                            security_context: Some(hardened_security_context()),
                             volume_mounts: Some(vec![VolumeMount {
                                 mount_path: "/home/me".into(),
                                 name: workspace_name.into(),
