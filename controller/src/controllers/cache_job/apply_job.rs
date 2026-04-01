@@ -1,7 +1,7 @@
 use kubimo::k8s_openapi::api::batch::v1::{Job, JobSpec};
 use kubimo::k8s_openapi::api::core::v1::{
-    Container, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
-    Volume, VolumeMount,
+    Capabilities, Container, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec,
+    PodTemplateSpec, SecurityContext, Volume, VolumeMount,
 };
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{CacheJob, Workspace, prelude::*};
@@ -24,6 +24,16 @@ impl CacheJobReconciler {
         Container {
             name: "cache".into(),
             image: Some(ctx.config.marimo_image.clone()),
+            security_context: Some(SecurityContext {
+                run_as_non_root: Some(true),
+                run_as_user: Some(1000),
+                allow_privilege_escalation: Some(false),
+                capabilities: Some(Capabilities {
+                    drop: Some(vec!["ALL".into()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             resources: Resources::default()
                 .cpu(cache_job.spec.cpu.clone())
                 .memory(cache_job.spec.memory.clone())
@@ -48,6 +58,16 @@ impl CacheJobReconciler {
         Ok(Container {
             name: "indexer".to_string(),
             image: Some(ctx.config.marimo_image.clone()),
+            security_context: Some(SecurityContext {
+                run_as_non_root: Some(true),
+                run_as_user: Some(1000),
+                allow_privilege_escalation: Some(false),
+                capabilities: Some(Capabilities {
+                    drop: Some(vec!["ALL".into()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             command: Some(cmd!["/app/indexer"]),
             args: Some(indexer::upload_args(workspace, false)?),
             env: indexer::env(workspace),
