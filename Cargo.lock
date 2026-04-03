@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "indexer"
-version = "0.1.16-alpha.2"
+version = "0.1.16-alpha.3"
 dependencies = [
  "base32",
  "bytes",
@@ -1505,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "json-patch-macros"
-version = "0.1.16-alpha.2"
+version = "0.1.16-alpha.3"
 
 [[package]]
 name = "json5"
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "k8s-crd-snapshot-storage"
-version = "0.1.16-alpha.2"
+version = "0.1.16-alpha.3"
 dependencies = [
  "k8s-openapi",
  "kube",
@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "kubimo"
-version = "0.1.16-alpha.2"
+version = "0.1.16-alpha.3"
 dependencies = [
  "cel-interpreter",
  "chrono",
@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "kubimo-controller"
-version = "0.1.16-alpha.2"
+version = "0.1.16-alpha.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1863,7 +1863,7 @@ dependencies = [
 
 [[package]]
 name = "notebook_meta"
-version = "0.1.16-alpha.2"
+version = "0.1.16-alpha.3"
 dependencies = [
  "serde",
 ]
