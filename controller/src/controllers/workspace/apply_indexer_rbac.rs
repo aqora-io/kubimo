@@ -116,9 +116,9 @@ impl WorkspaceReconciler {
         futures::future::try_join_all(vec![
             self.apply_indexer_service_account(ctx, workspace).boxed(),
             self.apply_indexer_role(ctx, workspace).boxed(),
-            self.apply_indexer_role_binding(ctx, workspace).boxed(),
         ])
         .await?;
+        self.apply_indexer_role_binding(ctx, workspace).await?;
         Ok(())
     }
 }
