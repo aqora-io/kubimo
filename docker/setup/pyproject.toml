@@ -3,10 +3,10 @@ name = "workspace"
 version = "0.1.0"
 requires-python = ">=3.10"
 
-dependencies = ["marimo[recommended,lsp]>=0.21.1"]
+dependencies = []
 
 [dependency-groups]
-dev = ["ruff>=0.15.6", "ty>=0.0.23", "watchdog>=6.0.0", "nbconvert>=7.17.0"]
+dev = []
 
 [build-system]
 requires = ["pdm-backend"]
