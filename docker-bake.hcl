@@ -10,6 +10,14 @@ variable "SCCACHE_REGION" {
   default = "auto"
 }
 
+variable "MARIMO_GIT" {
+  default = "https://github.com/aqora-io/marimo.git"
+}
+
+variable "MARIMO_GIT_REF" {
+  default = "feat-responsive-embed"
+}
+
 group "default" {
   targets = ["marimo", "controller"]
 }
@@ -39,4 +47,8 @@ target "marimo" {
   dockerfile = "docker/Dockerfile.marimo"
   context = "."
   platforms = [BAKE_LOCAL_PLATFORM]
+  args = {
+    MARIMO_GIT     = MARIMO_GIT
+    MARIMO_GIT_REF = MARIMO_GIT_REF
+  }
 }
