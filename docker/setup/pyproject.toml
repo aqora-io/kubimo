@@ -3,7 +3,7 @@ name = "workspace"
 version = "0.1.0"
 requires-python = ">=3.10"
 
-dependencies = ["marimo[recommended,lsp]>=0.23.4"]
+dependencies = ["marimo[recommended,lsp]"]
 
 [dependency-groups]
 dev = [
