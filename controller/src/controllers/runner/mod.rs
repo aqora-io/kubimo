@@ -3,16 +3,19 @@ mod apply_owner_reference;
 mod apply_pod;
 mod apply_service;
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::{collections::BTreeMap, time::Duration};
 
 use futures::prelude::*;
-use kubimo::k8s_openapi::api::{
-    core::v1::{Pod, Service},
-    networking::v1::Ingress,
-};
 use kubimo::kube::runtime::{Controller, controller::Action};
 use kubimo::{KubimoLabel, Runner, prelude::*};
+use kubimo::{
+    Workspace,
+    k8s_openapi::api::{
+        core::v1::{Pod, Service},
+        networking::v1::Ingress,
+    },
+};
 
 use crate::backoff::default_error_policy;
 use crate::context::Context;
@@ -39,6 +42,22 @@ impl Reconciler for RunnerReconciler {
     type Error = kubimo::Error;
 
     async fn apply(&self, ctx: &Context, runner: &Runner) -> Result<Action, Self::Error> {
+        let namespace = runner.require_namespace()?;
+        let workspace = ctx
+            .api_namespaced::<Workspace>(namespace)
+            .get_opt(&runner.spec.workspace)
+            .await?;
+        match workspace {
+            // Workspace does not exist, weird but we'll wait
+            None => return Ok(Action::requeue(Duration::from_secs(10))),
+            // Workspace is not ready yet
+            Some(workspace) if !is_workspace_ready(&workspace) => {
+                return Ok(Action::requeue(Duration::from_secs(5)));
+            }
+            // Workspace is ready
+            Some(_) => {}
+        }
+
         futures::future::try_join_all([
             self.apply_owner_reference(ctx, runner).boxed(),
             self.apply_pod(ctx, runner).map_ok(|_| ()).boxed(),
@@ -46,8 +65,18 @@ impl Reconciler for RunnerReconciler {
             self.apply_ingress(ctx, runner).map_ok(|_| ()).boxed(),
         ])
         .await?;
+
         Ok(Action::await_change())
     }
+}
+
+fn is_workspace_ready(workspace: &Workspace) -> bool {
+    workspace.status.as_ref().is_some_and(|status| {
+        status
+            .conditions
+            .as_ref()
+            .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
+    })
 }
 
 pub fn controller(ctx: &Context) -> Controller<Runner> {
