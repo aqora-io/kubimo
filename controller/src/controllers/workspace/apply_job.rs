@@ -1,7 +1,7 @@
 use kubimo::k8s_openapi::api::batch::v1::{Job, JobSpec};
 use kubimo::k8s_openapi::api::core::v1::{
     Container, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
-    Volume, VolumeMount,
+    SecurityContext, Volume, VolumeMount,
 };
 
 use kubimo::kube::api::ObjectMeta;
@@ -45,9 +45,9 @@ impl WorkspaceReconciler {
         });
         let mut init_containers = vec![Container {
             name: "init-dirs".into(),
-            image: Some(ctx.config.busybox_image.clone()),
+            image: Some(ctx.config.marimo_image.clone()),
             volume_mounts: Some(vec![VolumeMount {
-                mount_path: "/home/me".into(),
+                mount_path: "/mnt".into(),
                 name: workspace_name.into(),
                 ..Default::default()
             }]),
@@ -56,10 +56,15 @@ impl WorkspaceReconciler {
                 "-c",
                 r#"
 set -ex
-mkdir -p /home/me/workspace
-chown -R 1000:1000 /home/me
+chown me:me /mnt
+cp -a /home/me/. /mnt
 "#,
             ]),
+            security_context: Some(SecurityContext {
+                run_as_user: Some(0),
+                run_as_group: Some(0),
+                ..Default::default()
+            }),
             ..Default::default()
         }];
         if let Some(spec_init_containers) = workspace.spec.init_containers.clone() {
@@ -75,19 +80,13 @@ chown -R 1000:1000 /home/me
             spec: Some(JobSpec {
                 template: PodTemplateSpec {
                     spec: Some(PodSpec {
+                        init_containers: Some(init_containers),
                         containers: vec![Container {
-                            name: "init".into(),
-                            image: Some(ctx.config.marimo_image.clone()),
-                            security_context: Some(hardened_security_context()),
-                            volume_mounts: Some(vec![VolumeMount {
-                                mount_path: "/home/me".into(),
-                                name: workspace_name.into(),
-                                ..Default::default()
-                            }]),
-                            command: Some(cmd!["bash", "/setup/init.sh"]),
+                            name: "init".to_string(),
+                            image: Some(ctx.config.busybox_image.clone()),
+                            command: Some(cmd!["/bin/true"]),
                             ..Default::default()
                         }],
-                        init_containers: Some(init_containers),
                         security_context: Some(PodSecurityContext {
                             fs_group: Some(1000),
                             ..Default::default()
