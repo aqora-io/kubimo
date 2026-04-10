@@ -1,12 +1,16 @@
+use std::collections::BTreeMap;
+
 use kubimo::k8s_openapi::api::core::v1::{
     Container, PersistentVolumeClaimVolumeSource, Pod, PodSpec, Volume, VolumeMount,
 };
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{Expr, FilterParams, Runner, RunnerCommand, RunnerField, Workspace, prelude::*};
+use kubimo::{
+    Expr, FilterParams, KubimoLabel, Runner, RunnerCommand, RunnerField, Workspace, prelude::*,
+};
 
 use crate::command::cmd;
 use crate::context::Context;
-use crate::controllers::indexer;
+use crate::controllers::{indexer, workspace_affinity};
 
 use super::WorkspaceReconciler;
 
@@ -20,15 +24,25 @@ impl WorkspaceReconciler {
         let namespace = workspace.require_namespace()?;
         let service_account_name = indexer::service_account_name(workspace_name);
         let pod_name = indexer::pod_name(workspace_name);
+        let mut labels: BTreeMap<String, String> = [(
+            KubimoLabel::borrow("name").to_string(),
+            pod_name.to_string(),
+        )]
+        .into_iter()
+        .collect();
+        labels.extend(workspace_affinity::workspace_label_map(workspace_name));
+        let affinity = Some(workspace_affinity::workspace_affinity(workspace_name));
         let pod = Pod {
             metadata: ObjectMeta {
                 name: Some(pod_name.to_string()),
                 namespace: workspace.metadata.namespace.clone(),
                 owner_references: Some(vec![workspace.static_controller_owner_ref()?]),
+                labels: Some(labels),
                 ..Default::default()
             },
             spec: Some(PodSpec {
                 service_account_name: Some(service_account_name.to_string()),
+                affinity,
                 containers: vec![Container {
                     name: "indexer".to_string(),
                     image: Some(ctx.config.marimo_image.clone()),

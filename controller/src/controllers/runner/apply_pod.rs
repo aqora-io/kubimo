@@ -9,6 +9,7 @@ use kubimo::{Runner, RunnerCommand, prelude::*};
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::ingress::ingress_path;
+use crate::controllers::workspace_affinity;
 use crate::resources::Resources;
 
 use super::RunnerReconciler;
@@ -46,6 +47,9 @@ impl RunnerReconciler {
             }
             .into(),
         );
+        let affinity = Some(workspace_affinity::workspace_affinity(
+            &runner.spec.workspace,
+        ));
         let pod = Pod {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
@@ -58,6 +62,7 @@ impl RunnerReconciler {
                 runtime_class_name: Some("gvisor".to_string()),
                 automount_service_account_token: Some(false),
                 enable_service_links: Some(false),
+                affinity,
                 security_context: Some(PodSecurityContext {
                     fs_group: Some(1000),
                     ..Default::default()

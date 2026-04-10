@@ -6,7 +6,7 @@
 mod prelude {
     pub use kube::CustomResource;
     pub use schemars::JsonSchema;
-    pub use serde::{Serialize, Deserialize};
+    pub use serde::{Deserialize, Serialize};
 }
 use self::prelude::*;
 
@@ -14,11 +14,16 @@ use self::prelude::*;
 /// More info: <https://kubernetes.io/docs/concepts/storage/volume-snapshots#volumesnapshots>
 /// Required.
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
-#[kube(group = "snapshot.storage.k8s.io", version = "v1", kind = "VolumeSnapshot", plural = "volumesnapshots")]
+#[kube(
+    group = "snapshot.storage.k8s.io",
+    version = "v1",
+    kind = "VolumeSnapshot",
+    plural = "volumesnapshots"
+)]
 #[kube(namespaced)]
 #[kube(status = "VolumeSnapshotStatus")]
-#[kube(derive="Default")]
-#[kube(derive="PartialEq")]
+#[kube(derive = "Default")]
+#[kube(derive = "PartialEq")]
 pub struct VolumeSnapshotSpec {
     /// source specifies where a snapshot will be created from.
     /// This field is immutable after creation.
@@ -36,7 +41,11 @@ pub struct VolumeSnapshotSpec {
     /// a given CSI Driver and more than one have been marked as default,
     /// CreateSnapshot will fail and generate an event.
     /// Empty string is not allowed for this field.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "volumeSnapshotClassName")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "volumeSnapshotClassName"
+    )]
     pub volume_snapshot_class_name: Option<String>,
 }
 
@@ -52,13 +61,21 @@ pub struct VolumeSnapshotSource {
     /// This field should be set if the snapshot does not exists, and needs to be
     /// created.
     /// This field is immutable.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "persistentVolumeClaimName")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "persistentVolumeClaimName"
+    )]
     pub persistent_volume_claim_name: Option<String>,
     /// volumeSnapshotContentName specifies the name of a pre-existing VolumeSnapshotContent
     /// object representing an existing volume snapshot.
     /// This field should be set if the snapshot already exists and only needs a representation in Kubernetes.
     /// This field is immutable.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "volumeSnapshotContentName")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "volumeSnapshotContentName"
+    )]
     pub volume_snapshot_content_name: Option<String>,
 }
 
@@ -77,7 +94,11 @@ pub struct VolumeSnapshotStatus {
     /// VolumeSnapshot and VolumeSnapshotContent objects is successful (by validating that
     /// both VolumeSnapshot and VolumeSnapshotContent point at each other) before using
     /// this object.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "boundVolumeSnapshotContentName")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "boundVolumeSnapshotContentName"
+    )]
     pub bound_volume_snapshot_content_name: Option<String>,
     /// creationTime is the timestamp when the point-in-time snapshot is taken
     /// by the underlying storage system.
@@ -87,7 +108,11 @@ pub struct VolumeSnapshotStatus {
     /// For a pre-existing snapshot, this field will be filled with the "creation_time"
     /// value returned from the CSI "ListSnapshots" gRPC call if the driver supports it.
     /// If not specified, it may indicate that the creation time of the snapshot is unknown.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "creationTime")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "creationTime"
+    )]
     pub creation_time: Option<String>,
     /// error is the last observed error during snapshot creation, if any.
     /// This field could be helpful to upper level controllers(i.e., application controller)
@@ -105,7 +130,11 @@ pub struct VolumeSnapshotStatus {
     /// value returned from the CSI "ListSnapshots" gRPC call if the driver supports it,
     /// otherwise, this field will be set to "True".
     /// If not specified, it means the readiness of a snapshot is unknown.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "readyToUse")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "readyToUse"
+    )]
     pub ready_to_use: Option<bool>,
     /// restoreSize represents the minimum size of volume required to create a volume
     /// from this snapshot.
@@ -117,11 +146,19 @@ pub struct VolumeSnapshotStatus {
     /// When restoring a volume from this snapshot, the size of the volume MUST NOT
     /// be smaller than the restoreSize if it is specified, otherwise the restoration will fail.
     /// If not specified, it indicates that the size is unknown.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "restoreSize")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "restoreSize"
+    )]
     pub restore_size: Option<String>,
     /// VolumeGroupSnapshotName is the name of the VolumeGroupSnapshot of which this
     /// VolumeSnapshot is a part of.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "volumeGroupSnapshotName")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "volumeGroupSnapshotName"
+    )]
     pub volume_group_snapshot_name: Option<String>,
 }
 
@@ -143,4 +180,3 @@ pub struct VolumeSnapshotStatusError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
 }
-

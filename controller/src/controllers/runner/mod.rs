@@ -16,6 +16,7 @@ use kubimo::{KubimoLabel, Runner, prelude::*};
 
 use crate::backoff::default_error_policy;
 use crate::context::Context;
+use crate::controllers::workspace_affinity;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 
@@ -24,12 +25,16 @@ struct RunnerReconciler;
 
 impl RunnerReconciler {
     fn pod_labels(&self, runner: &Runner) -> kubimo::Result<BTreeMap<String, String>> {
-        Ok([(
+        let mut labels: BTreeMap<String, String> = [(
             KubimoLabel::borrow("name").to_string(),
             runner.name()?.to_string(),
         )]
         .into_iter()
-        .collect())
+        .collect();
+        labels.extend(workspace_affinity::workspace_label_map(
+            &runner.spec.workspace,
+        ));
+        Ok(labels)
     }
 }
 

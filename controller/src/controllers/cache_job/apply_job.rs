@@ -9,6 +9,7 @@ use kubimo::{CacheJob, Workspace, prelude::*};
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::indexer;
+use crate::controllers::workspace_affinity;
 use crate::resources::Resources;
 
 use super::CacheJobReconciler;
@@ -85,8 +86,10 @@ impl CacheJobReconciler {
         let should_run_indexer =
             workspace.spec.indexer.is_some() && !indexer::is_pod_running(ctx, &workspace).await?;
 
+        let affinity = Some(workspace_affinity::workspace_affinity(workspace_name));
         let mut pod_spec = PodSpec {
             containers: vec![],
+            affinity,
             security_context: Some(PodSecurityContext {
                 fs_group: Some(1000),
                 ..Default::default()
@@ -114,6 +117,7 @@ impl CacheJobReconciler {
             pod_spec.containers.push(cache_container);
         }
 
+        let pod_labels = workspace_affinity::workspace_label_map(workspace_name);
         let job = Job {
             metadata: ObjectMeta {
                 name: Some(cache_job_name.to_string()),
@@ -124,8 +128,11 @@ impl CacheJobReconciler {
             spec: Some(JobSpec {
                 backoff_limit: cache_job.spec.backoff_limit,
                 template: PodTemplateSpec {
+                    metadata: Some(ObjectMeta {
+                        labels: Some(pod_labels),
+                        ..Default::default()
+                    }),
                     spec: Some(pod_spec),
-                    ..Default::default()
                 },
                 ..Default::default()
             }),
