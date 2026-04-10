@@ -8,6 +8,7 @@ use kubimo::{Workspace, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
+use crate::controllers::workspace_affinity;
 
 use super::WorkspaceReconciler;
 
@@ -63,6 +64,8 @@ chown -R 1000:1000 /home/me
         if let Some(spec_init_containers) = workspace.spec.init_containers.clone() {
             init_containers.extend(spec_init_containers)
         }
+        let pod_labels = workspace_affinity::workspace_label_map(workspace_name);
+        let affinity = Some(workspace_affinity::workspace_affinity(workspace_name));
         let job = Job {
             metadata: ObjectMeta {
                 name: workspace.metadata.name.clone(),
@@ -72,6 +75,10 @@ chown -R 1000:1000 /home/me
             },
             spec: Some(JobSpec {
                 template: PodTemplateSpec {
+                    metadata: Some(ObjectMeta {
+                        labels: Some(pod_labels),
+                        ..Default::default()
+                    }),
                     spec: Some(PodSpec {
                         containers: vec![Container {
                             name: "init".into(),
@@ -85,6 +92,7 @@ chown -R 1000:1000 /home/me
                             ..Default::default()
                         }],
                         init_containers: Some(init_containers),
+                        affinity,
                         security_context: Some(PodSecurityContext {
                             fs_group: Some(1000),
                             ..Default::default()
@@ -93,7 +101,6 @@ chown -R 1000:1000 /home/me
                         restart_policy: Some("Never".into()),
                         ..Default::default()
                     }),
-                    ..Default::default()
                 },
                 ..Default::default()
             }),

@@ -6,8 +6,7 @@
 mod prelude {
     pub use kube::CustomResource;
     pub use schemars::JsonSchema;
-    pub use serde::{Serialize, Deserialize};
+    pub use serde::{Deserialize, Serialize};
     pub use std::collections::BTreeMap;
 }
 use self::prelude::*;
-

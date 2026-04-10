@@ -51,3 +51,5 @@ for crd_name in "${crds[@]}"; do
 done
 
 popd
+
+cargo fmt -p k8s-crd-snapshot-storage
