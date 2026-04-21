@@ -15,7 +15,7 @@ variable "MARIMO_GIT" {
 }
 
 variable "MARIMO_GIT_REF" {
-  default = "feat-responsive-embed"
+  default = "feat-ssr"
 }
 
 group "default" {

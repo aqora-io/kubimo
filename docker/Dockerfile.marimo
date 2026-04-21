@@ -85,6 +85,7 @@ RUN \
   pnpm install --frozen-lockfile
   uv sync --locked
   make fe
+  make -C packages/ssr
   uv build --wheel
 EOF
 
@@ -120,9 +121,12 @@ uv pip install --system \
   "nbconvert>=7.17.0"
 EOF
 
-RUN --mount=from=nodejs,src=/mnt,dst=/mnt \
+RUN --mount=from=nodejs,src=/mnt,dst=/mnt/nodejs \
+    --mount=from=build-marimo,src=/build/packages/ssr,dst=/mnt/marimo \
+    --mount=type=cache,target=/root/.npm,sharing=locked \
 <<EOF
-  tar xf /mnt/node.tar.gz -C /usr/local --strip-components 1 --wildcards '*/bin' '*/share' '*/lib' '*/include'
+  tar xf /mnt/nodejs/node.tar.gz -C /usr/local --strip-components 1 --wildcards '*/bin' '*/share' '*/lib' '*/include'
+  npm install -g /mnt/marimo/npm.tgz
   corepack enable
 EOF
 
