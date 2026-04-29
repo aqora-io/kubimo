@@ -135,6 +135,7 @@ pub enum RunnerCommand {
     #[default]
     Edit,
     Run,
+    Render,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default, PartialEq)]

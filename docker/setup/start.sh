@@ -92,6 +92,26 @@ elif [[ "$CMD" == "run" ]]; then
     --include-code \
     "$directory"
 
+elif [[ "$CMD" == "render" ]]; then
+  argv=(
+    --host "${HOST:-0.0.0.0}"
+    --port "${PORT:-80}"
+  )
+
+  if [ -n "$BASE_URL" ]; then
+    argv+=(--base-path "$BASE_URL")
+  fi
+  if [ -n "$TOKEN" ]; then
+    argv+=(--token "$TOKEN")
+  fi
+
+  uv sync
+  exec marimo-ssr serve \
+    --marimo /setup/launch.py \
+    --venv "$VIRTUAL_ENV" \
+    "${argv[@]}" \
+    "$directory"
+
 elif [[ "$CMD" == "cache" ]]; then
   uv sync
   exec "$VIRTUAL_ENV/bin/python3" /app/cache.py \
