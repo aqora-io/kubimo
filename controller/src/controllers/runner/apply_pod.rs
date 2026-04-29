@@ -52,6 +52,7 @@ impl RunnerReconciler {
             match runner.spec.command {
                 RunnerCommand::Edit => "edit",
                 RunnerCommand::Run => "run",
+                RunnerCommand::Render => "render",
             }
             .into(),
         );
