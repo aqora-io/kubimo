@@ -29,6 +29,11 @@ while [[ $# -gt 0 ]]; do
     shift
     shift
     ;;
+  --origin)
+    ORIGIN="$2"
+    shift
+    shift
+    ;;
   -* | --*)
     echo "Unknown option $1"
     exit 1
@@ -92,6 +97,25 @@ elif [[ "$CMD" == "run" ]]; then
     "${marimo_flags[@]}" \
     --include-code \
     "$directory"
+
+elif [[ "$CMD" == "render" ]]; then
+  argv=(
+    --host "${HOST:-0.0.0.0}"
+    --port "${PORT:-80}"
+  )
+
+  if [ -n "$ORIGIN" ]; then
+    argv+=(--origin "$ORIGIN")
+  fi
+  if [ -n "$BASE_URL" ]; then
+    argv+=(--base-path "$BASE_URL")
+  fi
+  if [ -n "$TOKEN" ]; then
+    argv+=(--token "$TOKEN")
+  fi
+
+  uv sync
+  exec marimo-ssr serve "${argv[@]}" "$directory"
 
 elif [[ "$CMD" == "cache" ]]; then
   uv sync

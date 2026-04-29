@@ -7,6 +7,7 @@ use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{Runner, RunnerCommand, prelude::*};
 
+use crate::Config;
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::ingress::ingress_path;
@@ -24,11 +25,6 @@ impl RunnerReconciler {
         let namespace = runner.require_namespace()?;
         let ingress_path = ingress_path(runner)?;
         let path_prefix = ingress_path.strip_suffix('/').unwrap_or(&ingress_path);
-        let probe_action = HTTPGetAction {
-            path: Some(format!("{path_prefix}/health")),
-            port: IntOrString::Int(80),
-            ..Default::default()
-        };
         let mut command = cmd!["bash", "/setup/start.sh", "--base-url", ingress_path,];
         let mut env = runner.spec.env.clone().unwrap_or_default();
         if let Some(token_spec) = runner.spec.token.as_ref() {
@@ -48,10 +44,23 @@ impl RunnerReconciler {
         if let Some(log_level) = runner.spec.log_level.as_ref() {
             command.extend(cmd!["--log-level", log_level]);
         }
+        let port = runner_port(runner);
+        if port != 80 {
+            command.extend(cmd!["--port", port]);
+        }
+        if let Some(host) = runner_origin(&ctx.config, runner) {
+            command.extend(cmd!["--origin", host]);
+        }
+        let probe_action = HTTPGetAction {
+            path: Some(format!("{path_prefix}/health")),
+            port: IntOrString::Int(port),
+            ..Default::default()
+        };
         command.push(
             match runner.spec.command {
                 RunnerCommand::Edit => "edit",
                 RunnerCommand::Run => "run",
+                RunnerCommand::Render => "render",
             }
             .into(),
         );
@@ -71,7 +80,7 @@ impl RunnerReconciler {
                 ..Default::default()
             }]),
             ports: Some(vec![ContainerPort {
-                container_port: 80,
+                container_port: port,
                 name: Some("marimo".to_string()),
                 ..Default::default()
             }]),
@@ -103,7 +112,11 @@ impl RunnerReconciler {
                 ..Default::default()
             },
             spec: Some(PodSpec {
-                runtime_class_name: Some("gvisor".to_string()),
+                runtime_class_name: matches!(
+                    runner.spec.command,
+                    RunnerCommand::Edit | RunnerCommand::Run
+                )
+                .then(|| "gvisor".to_string()),
                 automount_service_account_token: Some(false),
                 enable_service_links: Some(false),
                 affinity,
@@ -127,4 +140,30 @@ impl RunnerReconciler {
         };
         ctx.api_namespaced::<Pod>(namespace).patch(&pod).await
     }
+}
+
+pub(crate) fn runner_port(runner: &Runner) -> i32 {
+    match runner.spec.command {
+        RunnerCommand::Render => 8080,
+        RunnerCommand::Edit | RunnerCommand::Run => 80,
+    }
+}
+
+pub(crate) fn runner_origin<'a>(config: &'a Config, runner: &'a Runner) -> Option<String> {
+    // Runner's origin is the first that appears in its spec
+    let first_spec_host = runner
+        .spec
+        .ingress
+        .as_ref()
+        .and_then(|ing| ing.tls.as_ref())
+        .and_then(|tls| tls.hosts.as_ref())
+        .and_then(|hs| hs.first())
+        .map(String::as_str);
+
+    // We fallback on configured host if none found
+    let first_config_host = config.runner_hosts.first().map(String::as_str);
+
+    first_spec_host
+        .or(first_config_host)
+        .map(|host| format!("https://{host}"))
 }

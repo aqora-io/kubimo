@@ -9,6 +9,7 @@ use kubimo::{Runner, prelude::*};
 
 use crate::context::Context;
 use crate::controllers::ingress::ingress_path;
+use crate::controllers::runner::apply_pod::runner_port;
 
 use super::RunnerReconciler;
 
@@ -97,7 +98,7 @@ impl RunnerReconciler {
                                 service: Some(IngressServiceBackend {
                                     name: runner.name()?.to_string(),
                                     port: Some(ServiceBackendPort {
-                                        number: Some(80),
+                                        number: Some(runner_port(runner)),
                                         ..Default::default()
                                     }),
                                 }),
