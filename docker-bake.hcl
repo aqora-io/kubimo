@@ -28,7 +28,7 @@ target "controller" {
   inherits = ["docker-metadata-controller"]
   dockerfile = "docker/Dockerfile.controller"
   context = "."
-  platforms = [BAKE_LOCAL_PLATFORM]
+  # platforms = [BAKE_LOCAL_PLATFORM]
   args = {
     SCCACHE_ENDPOINT = SCCACHE_ENDPOINT
     SCCACHE_BUCKET   = SCCACHE_BUCKET
@@ -46,7 +46,7 @@ target "marimo" {
   inherits = ["docker-metadata-marimo"]
   dockerfile = "docker/Dockerfile.marimo"
   context = "."
-  platforms = [BAKE_LOCAL_PLATFORM]
+  # platforms = [BAKE_LOCAL_PLATFORM]
   args = {
     MARIMO_GIT     = MARIMO_GIT
     MARIMO_GIT_REF = MARIMO_GIT_REF
