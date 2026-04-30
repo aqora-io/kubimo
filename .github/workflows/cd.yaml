@@ -17,10 +17,10 @@ jobs:
       matrix:
         image:
           - name: controller
-            dockerfile: docker/Dockerfile.controller
+            bake-target: controller
             registry: ghcr.io/aqora-io/kubimo-controller
           - name: marimo
-            dockerfile: docker/Dockerfile.marimo
+            bake-target: marimo
             registry: ghcr.io/aqora-io/kubimo-marimo
         platform:
           - runner: ubuntu-latest
@@ -54,27 +54,29 @@ jobs:
             type=semver,pattern={{major}}
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/bake-action@v7
         with:
-          context: .
-          file: ${{ matrix.image.dockerfile }}
-          platforms: ${{ matrix.platform.pair }}
-          labels: ${{ steps.meta.outputs.labels }}
-          outputs: ${{ github.event_name == 'push' && format('type=image,"name={0}",push-by-digest=true,name-canonical=true,push=true', matrix.image.registry) || '' }}
-          cache-from: type=registry,ref=${{ matrix.image.registry }}:cache-${{ matrix.platform.arch }}
-          cache-to: ${{ github.event_name == 'push' && format('type=registry,ref={0}:cache-{1},mode=max', matrix.image.registry, matrix.platform.arch) || '' }}
-          build-args: |
-            SCCACHE_ENDPOINT=${{ secrets.SCCACHE_ENDPOINT }}
-            SCCACHE_BUCKET=${{ secrets.SCCACHE_BUCKET }}
-            SCCACHE_REGION=${{ secrets.SCCACHE_REGION }}
-          secrets: |
-            SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
-            SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
+          source: .
+          files: |
+            ./docker-bake.hcl
+            cwd://${{ steps.meta.outputs.bake-file }}
+          targets: ${{ matrix.image.bake-target }}
+          set: |
+            *.platform=${{ matrix.platform.pair }}
+            *.output=${{ github.event_name == 'push' && format('type=image,"name={0}",push-by-digest=true,name-canonical=true,push=true', matrix.image.registry) || 'type=cacheonly' }}
+            *.cache-from=type=registry,ref=${{ matrix.image.registry }}:cache-${{ matrix.platform.arch }}
+            *.cache-to=${{ github.event_name == 'push' && format('type=registry,ref={0}:cache-{1},mode=max', matrix.image.registry, matrix.platform.arch) || 'type=inline' }}
+        env:
+          SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_ENDPOINT }}
+          SCCACHE_BUCKET: ${{ secrets.SCCACHE_BUCKET }}
+          SCCACHE_REGION: ${{ secrets.SCCACHE_REGION }}
+          SCCACHE_AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+          SCCACHE_AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
       - name: Export digest
         if: github.event_name == 'push'
         run: |
           mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
+          digest="${{ fromJSON(steps.build.outputs.metadata)[matrix.image.bake-target]['containerimage.digest'] }}"
           touch "/tmp/digests/${digest#sha256:}"
       - name: Upload digest
         if: github.event_name == 'push'
