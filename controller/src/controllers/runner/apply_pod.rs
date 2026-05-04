@@ -50,6 +50,42 @@ impl RunnerReconciler {
         let affinity = Some(workspace_affinity::workspace_affinity(
             &runner.spec.workspace,
         ));
+        let mut containers = vec![Container {
+            name: "runner".into(),
+            image: Some(ctx.config.marimo_image.clone()),
+            resources: Resources::default()
+                .cpu(runner.spec.cpu.clone())
+                .memory(runner.spec.memory.clone())
+                .into(),
+            volume_mounts: Some(vec![VolumeMount {
+                mount_path: "/home/me".to_string(),
+                name: runner.spec.workspace.clone(),
+                ..Default::default()
+            }]),
+            ports: Some(vec![ContainerPort {
+                container_port: 80,
+                name: Some("marimo".to_string()),
+                ..Default::default()
+            }]),
+            env: runner.spec.env.clone(),
+            env_from: runner.spec.env_from.clone(),
+            startup_probe: Some(Probe {
+                http_get: Some(probe_action.clone()),
+                failure_threshold: Some(90),
+                period_seconds: Some(1),
+                ..Default::default()
+            }),
+            liveness_probe: Some(Probe {
+                http_get: Some(probe_action.clone()),
+                period_seconds: Some(10),
+                ..Default::default()
+            }),
+            command: Some(command),
+            ..Default::default()
+        }];
+        if let Some(sidecars) = runner.spec.sidecars.clone() {
+            containers.extend(sidecars);
+        }
         let pod = Pod {
             metadata: ObjectMeta {
                 name: runner.metadata.name.clone(),
@@ -68,39 +104,7 @@ impl RunnerReconciler {
                     ..Default::default()
                 }),
                 hostname: Some("kubimo".into()),
-                containers: vec![Container {
-                    name: "runner".into(),
-                    image: Some(ctx.config.marimo_image.clone()),
-                    resources: Resources::default()
-                        .cpu(runner.spec.cpu.clone())
-                        .memory(runner.spec.memory.clone())
-                        .into(),
-                    volume_mounts: Some(vec![VolumeMount {
-                        mount_path: "/home/me".to_string(),
-                        name: runner.spec.workspace.clone(),
-                        ..Default::default()
-                    }]),
-                    ports: Some(vec![ContainerPort {
-                        container_port: 80,
-                        name: Some("marimo".to_string()),
-                        ..Default::default()
-                    }]),
-                    env: runner.spec.env.clone(),
-                    env_from: runner.spec.env_from.clone(),
-                    startup_probe: Some(Probe {
-                        http_get: Some(probe_action.clone()),
-                        failure_threshold: Some(90),
-                        period_seconds: Some(1),
-                        ..Default::default()
-                    }),
-                    liveness_probe: Some(Probe {
-                        http_get: Some(probe_action.clone()),
-                        period_seconds: Some(10),
-                        ..Default::default()
-                    }),
-                    command: Some(command),
-                    ..Default::default()
-                }],
+                containers,
                 volumes: Some(vec![Volume {
                     name: runner.spec.workspace.clone(),
                     persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
