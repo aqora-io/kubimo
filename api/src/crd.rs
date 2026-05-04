@@ -178,6 +178,7 @@ pub struct RunnerSpec {
     pub ingress: Option<RunnerIngress>,
     pub lifecycle: Option<RunnerLifecycle>,
     pub token: Option<RunnerToken>,
+    pub sidecars: Option<Vec<Container>>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]
