@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 
 use chrono::{DateTime, Utc};
-use k8s_openapi::api::core::v1::{Container, EnvFromSource, EnvVar, Volume};
+use k8s_openapi::api::core::v1::{
+    Container, EnvFromSource, EnvVar, SecretKeySelector, Volume,
+};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{CustomResource, CustomResourceExt, Resource};
@@ -149,6 +151,7 @@ pub struct RunnerStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RunnerToken {
     pub value: Option<String>,
+    pub secret_ref: Option<SecretKeySelector>,
 }
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]

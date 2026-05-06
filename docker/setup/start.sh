@@ -105,6 +105,7 @@ else
   base_url_flag="--base-url=$BASE_URL"
 fi
 
+TOKEN="${TOKEN:-$MARIMO_TOKEN}"
 if [ -z "$TOKEN" ]; then
   token_flag="--no-token"
 else
