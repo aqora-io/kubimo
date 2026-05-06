@@ -4,7 +4,7 @@ use std::time::Duration;
 use chrono::{TimeDelta, Utc};
 use futures::prelude::*;
 use kubimo::k8s_openapi::{
-    api::core::v1::Pod,
+    api::core::v1::{Pod, Secret},
     apimachinery::pkg::apis::meta::v1::{Condition, Time},
     jiff::Timestamp,
 };
@@ -29,6 +29,10 @@ pub enum RunnerStatusError {
     Url(#[from] url::ParseError),
     #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
+    #[error("token secret {secret} is missing key {key}")]
+    TokenSecretKeyMissing { secret: String, key: String },
+    #[error("token secret {secret} key {key} is not valid utf-8")]
+    TokenSecretKeyInvalidUtf8 { secret: String, key: String },
 }
 
 fn runner_api_endpoint(
@@ -47,13 +51,50 @@ fn runner_api_endpoint(
     .join("api/")?)
 }
 
+async fn resolve_token(
+    ctx: &Context,
+    runner: &Runner,
+) -> Result<Option<String>, RunnerStatusError> {
+    let Some(token_spec) = runner.spec.token.as_ref() else {
+        return Ok(None);
+    };
+    if let Some(value) = token_spec.value.as_ref() {
+        return Ok(Some(value.clone()));
+    }
+    let Some(secret_ref) = token_spec.secret_ref.as_ref() else {
+        return Ok(None);
+    };
+    let namespace = runner.require_namespace()?;
+    let secret = ctx
+        .api_namespaced::<Secret>(namespace)
+        .get(&secret_ref.name)
+        .await?;
+    let bytes = secret
+        .data
+        .as_ref()
+        .and_then(|data| data.get(&secret_ref.key))
+        .ok_or_else(|| RunnerStatusError::TokenSecretKeyMissing {
+            secret: secret_ref.name.clone(),
+            key: secret_ref.key.clone(),
+        })?;
+    let value = String::from_utf8(bytes.0.clone()).map_err(|_| {
+        RunnerStatusError::TokenSecretKeyInvalidUtf8 {
+            secret: secret_ref.name.clone(),
+            key: secret_ref.key.clone(),
+        }
+    })?;
+    Ok(Some(value))
+}
+
 pub struct RunnerApi {
     client: reqwest::Client,
     api_endpoint: Url,
+    token: Option<String>,
 }
 
 impl RunnerApi {
-    pub fn build(
+    pub async fn build(
+        ctx: &Context,
         client: &reqwest::Client,
         runner: &Runner,
         resolution: &StatusCheckResolution,
@@ -61,12 +102,20 @@ impl RunnerApi {
         Ok(Self {
             client: client.clone(),
             api_endpoint: runner_api_endpoint(resolution, runner)?,
+            token: resolve_token(ctx, runner).await?,
         })
+    }
+
+    fn get(&self, url: Url) -> reqwest::RequestBuilder {
+        let req = self.client.get(url);
+        match &self.token {
+            Some(token) => req.bearer_auth(token),
+            None => req,
+        }
     }
 
     pub async fn connections(&self) -> Result<Connections, RunnerStatusError> {
         Ok(self
-            .client
             .get(self.api_endpoint.join("status/connections")?)
             .send()
             .await?
@@ -77,7 +126,6 @@ impl RunnerApi {
 
     pub async fn marimo_version(&self) -> Result<String, RunnerStatusError> {
         Ok(self
-            .client
             .get(self.api_endpoint.join("version")?)
             .send()
             .await?
@@ -118,7 +166,13 @@ impl RunnerStatusReconciler {
         {
             return Ok(Some(Action::requeue(interval)));
         }
-        let api = RunnerApi::build(&self.client, runner, &ctx.config.runner_status.resolution)?;
+        let api = RunnerApi::build(
+            ctx,
+            &self.client,
+            runner,
+            &ctx.config.runner_status.resolution,
+        )
+        .await?;
         let connections = match api.connections().await {
             Ok(connections) => connections,
             Err(err) => {

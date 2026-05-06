@@ -1,6 +1,7 @@
 use kubimo::k8s_openapi::api::core::v1::{
-    Container, ContainerPort, HTTPGetAction, PersistentVolumeClaimVolumeSource, Pod,
-    PodSecurityContext, PodSpec, Probe, Volume, VolumeMount,
+    Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction,
+    PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec, Probe, Volume,
+    VolumeMount,
 };
 use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
@@ -29,13 +30,20 @@ impl RunnerReconciler {
             ..Default::default()
         };
         let mut command = cmd!["bash", "/setup/start.sh", "--base-url", ingress_path,];
-        if let Some(token) = runner
-            .spec
-            .token
-            .as_ref()
-            .and_then(|token| token.value.as_ref())
-        {
-            command.extend(cmd!["--token", token]);
+        let mut env = runner.spec.env.clone().unwrap_or_default();
+        if let Some(token_spec) = runner.spec.token.as_ref() {
+            if let Some(token) = token_spec.value.as_ref() {
+                command.extend(cmd!["--token", token]);
+            } else if let Some(secret_ref) = token_spec.secret_ref.as_ref() {
+                env.push(EnvVar {
+                    name: "MARIMO_TOKEN".into(),
+                    value_from: Some(EnvVarSource {
+                        secret_key_ref: Some(secret_ref.clone()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+            }
         }
         if let Some(log_level) = runner.spec.log_level.as_ref() {
             command.extend(cmd!["--log-level", log_level]);
@@ -67,7 +75,7 @@ impl RunnerReconciler {
                 name: Some("marimo".to_string()),
                 ..Default::default()
             }]),
-            env: runner.spec.env.clone(),
+            env: if env.is_empty() { None } else { Some(env) },
             env_from: runner.spec.env_from.clone(),
             startup_probe: Some(Probe {
                 http_get: Some(probe_action.clone()),
