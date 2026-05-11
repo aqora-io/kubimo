@@ -1,4 +1,5 @@
 use kubimo::k8s_openapi::api::batch::v1::Job;
+use kubimo::k8s_openapi::api::core::v1::PersistentVolumeClaim;
 use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kubimo::k8s_openapi::jiff::Timestamp;
 use kubimo::{Workspace, WorkspaceStatus, prelude::*};
@@ -27,10 +28,20 @@ impl WorkspaceReconciler {
                 )
             } else {
                 let status = if workspace.spec.clone_workspace_name.is_some() {
-                    // Workspaces that are cloned do not have jobs to run
-                    StatusKind::JobComplete
+                    // Complete if its pvc is bound
+                    // since cloned workspaces have no jobs to initialize them
+                    let pvc_phase = ctx
+                        .api_namespaced::<PersistentVolumeClaim>(namespace)
+                        .get_opt(name)
+                        .await?
+                        .and_then(|pvc| pvc.status)
+                        .and_then(|st| st.phase);
+                    match pvc_phase.as_deref() {
+                        Some("Bound") => StatusKind::JobComplete,
+                        _ => StatusKind::JobNotComplete,
+                    }
                 } else {
-                    // Other workspaces have a job to initialize their persistent volume
+                    // Not Complete unless its job was created
                     StatusKind::JobNotComplete
                 };
                 update_workspace_status(workspace.clone(), None, status)
