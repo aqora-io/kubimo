@@ -104,7 +104,11 @@ impl RunnerReconciler {
                 ..Default::default()
             },
             spec: Some(PodSpec {
-                runtime_class_name: Some("gvisor".to_string()),
+                runtime_class_name: matches!(
+                    runner.spec.command,
+                    RunnerCommand::Edit | RunnerCommand::Run
+                )
+                .then(|| "gvisor".to_string()),
                 automount_service_account_token: Some(false),
                 enable_service_links: Some(false),
                 affinity,
