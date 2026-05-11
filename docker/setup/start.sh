@@ -107,11 +107,7 @@ elif [[ "$CMD" == "render" ]]; then
   fi
 
   uv sync
-  exec marimo-ssr serve \
-    --marimo /setup/launch.py \
-    --venv "$VIRTUAL_ENV" \
-    "${argv[@]}" \
-    "$directory"
+  exec marimo-ssr serve "${argv[@]}" "$directory"
 
 elif [[ "$CMD" == "cache" ]]; then
   uv sync
