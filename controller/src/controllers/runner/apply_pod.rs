@@ -7,6 +7,7 @@ use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{Runner, RunnerCommand, prelude::*};
 
+use crate::Config;
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::ingress::ingress_path;
@@ -46,6 +47,9 @@ impl RunnerReconciler {
         let port = runner_port(runner);
         if port != 80 {
             command.extend(cmd!["--port", port]);
+        }
+        if let Some(host) = runner_origin(&ctx.config, runner) {
+            command.extend(cmd!["--origin", host]);
         }
         let probe_action = HTTPGetAction {
             path: Some(format!("{path_prefix}/health")),
@@ -143,4 +147,21 @@ pub(crate) fn runner_port(runner: &Runner) -> i32 {
         RunnerCommand::Render => 8080,
         RunnerCommand::Edit | RunnerCommand::Run => 80,
     }
+}
+
+pub(crate) fn runner_origin<'a>(config: &'a Config, runner: &'a Runner) -> Option<&'a str> {
+    // Runner's origin is the first that appears in its spec
+    let first_spec_host = runner
+        .spec
+        .ingress
+        .as_ref()
+        .and_then(|ing| ing.tls.as_ref())
+        .and_then(|tls| tls.hosts.as_ref())
+        .and_then(|hs| hs.first())
+        .map(String::as_str);
+
+    // We fallback on configured host if none found
+    let first_config_host = config.runner_hosts.first().map(String::as_str);
+
+    first_spec_host.or(first_config_host)
 }

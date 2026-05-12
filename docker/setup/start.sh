@@ -29,6 +29,11 @@ while [[ $# -gt 0 ]]; do
     shift
     shift
     ;;
+  --origin)
+    ORIGIN="$2"
+    shift
+    shift
+    ;;
   -* | --*)
     echo "Unknown option $1"
     exit 1
@@ -99,6 +104,9 @@ elif [[ "$CMD" == "render" ]]; then
     --port "${PORT:-80}"
   )
 
+  if [ -n "$ORIGIN" ]; then
+    argv+=(--origin "$ORIGIN")
+  fi
   if [ -n "$BASE_URL" ]; then
     argv+=(--base-path "$BASE_URL")
   fi
