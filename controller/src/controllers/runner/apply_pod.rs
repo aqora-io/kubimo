@@ -149,7 +149,7 @@ pub(crate) fn runner_port(runner: &Runner) -> i32 {
     }
 }
 
-pub(crate) fn runner_origin<'a>(config: &'a Config, runner: &'a Runner) -> Option<&'a str> {
+pub(crate) fn runner_origin<'a>(config: &'a Config, runner: &'a Runner) -> Option<String> {
     // Runner's origin is the first that appears in its spec
     let first_spec_host = runner
         .spec
@@ -163,5 +163,7 @@ pub(crate) fn runner_origin<'a>(config: &'a Config, runner: &'a Runner) -> Optio
     // We fallback on configured host if none found
     let first_config_host = config.runner_hosts.first().map(String::as_str);
 
-    first_spec_host.or(first_config_host)
+    first_spec_host
+        .or(first_config_host)
+        .map(|host| format!("https://{host}"))
 }
