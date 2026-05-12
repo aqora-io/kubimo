@@ -3,6 +3,7 @@ use kubimo::kube::api::ObjectMeta;
 use kubimo::{Runner, prelude::*};
 
 use crate::context::Context;
+use crate::controllers::runner::apply_pod::runner_port;
 
 use super::RunnerReconciler;
 
@@ -24,7 +25,7 @@ impl RunnerReconciler {
                 selector: Some(self.pod_labels(runner)?),
                 ports: Some(vec![ServicePort {
                     name: Some("marimo".to_string()),
-                    port: 80,
+                    port: runner_port(runner),
                     ..Default::default()
                 }]),
                 ..Default::default()

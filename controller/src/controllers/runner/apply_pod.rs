@@ -24,11 +24,6 @@ impl RunnerReconciler {
         let namespace = runner.require_namespace()?;
         let ingress_path = ingress_path(runner)?;
         let path_prefix = ingress_path.strip_suffix('/').unwrap_or(&ingress_path);
-        let probe_action = HTTPGetAction {
-            path: Some(format!("{path_prefix}/health")),
-            port: IntOrString::Int(80),
-            ..Default::default()
-        };
         let mut command = cmd!["bash", "/setup/start.sh", "--base-url", ingress_path,];
         let mut env = runner.spec.env.clone().unwrap_or_default();
         if let Some(token_spec) = runner.spec.token.as_ref() {
@@ -48,6 +43,15 @@ impl RunnerReconciler {
         if let Some(log_level) = runner.spec.log_level.as_ref() {
             command.extend(cmd!["--log-level", log_level]);
         }
+        let port = runner_port(runner);
+        if port != 80 {
+            command.extend(cmd!["--port", port]);
+        }
+        let probe_action = HTTPGetAction {
+            path: Some(format!("{path_prefix}/health")),
+            port: IntOrString::Int(port),
+            ..Default::default()
+        };
         command.push(
             match runner.spec.command {
                 RunnerCommand::Edit => "edit",
@@ -72,7 +76,7 @@ impl RunnerReconciler {
                 ..Default::default()
             }]),
             ports: Some(vec![ContainerPort {
-                container_port: 80,
+                container_port: port,
                 name: Some("marimo".to_string()),
                 ..Default::default()
             }]),
@@ -131,5 +135,12 @@ impl RunnerReconciler {
             ..Default::default()
         };
         ctx.api_namespaced::<Pod>(namespace).patch(&pod).await
+    }
+}
+
+pub(crate) fn runner_port(runner: &Runner) -> i32 {
+    match runner.spec.command {
+        RunnerCommand::Render => 8080,
+        RunnerCommand::Edit | RunnerCommand::Run => 80,
     }
 }
