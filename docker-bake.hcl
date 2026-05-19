@@ -11,11 +11,8 @@ variable "SCCACHE_REGION" {
 }
 
 variable "MARIMO_GIT" {
-  default = "https://github.com/aqora-io/marimo.git"
-}
-
-variable "MARIMO_GIT_REF" {
-  default = "feat-ssr"
+  # feat-ssr branch of our fork
+  default = "https://github.com/aqora-io/marimo.git#0a93a8bd4604dbda46425bcd65ae2fdff01143bb"
 }
 
 group "default" {
@@ -52,7 +49,6 @@ target "marimo" {
     SCCACHE_BUCKET   = SCCACHE_BUCKET
     SCCACHE_REGION   = SCCACHE_REGION
     MARIMO_GIT       = MARIMO_GIT
-    MARIMO_GIT_REF   = MARIMO_GIT_REF
   }
   secret = [
     "id=SCCACHE_AWS_ACCESS_KEY_ID,env=SCCACHE_AWS_ACCESS_KEY_ID",
