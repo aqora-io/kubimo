@@ -3,7 +3,8 @@
 minikube start --container-runtime=containerd \
   --network=minikube \
   --docker-opt containerd=/var/run/containerd/containerd.sock \
-  --addons=ingress,gvisor,metrics-server,dashboard,volumesnapshots,csi-hostpath-driver
+  --addons=ingress,gvisor,metrics-server,dashboard,volumesnapshots,csi-hostpath-driver \
+  ${MINIKUBE_SUBNET:+--subnet=$MINIKUBE_SUBNET}
 
 # Shamelessly copy-pasted from:
 # https://minikube.sigs.k8s.io/docs/tutorials/volume_snapshots_and_csi/
