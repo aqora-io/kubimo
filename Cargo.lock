@@ -1506,6 +1506,11 @@ dependencies = [
 [[package]]
 name = "json-patch-macros"
 version = "0.1.24"
+dependencies = [
+ "json-patch",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "json5"
