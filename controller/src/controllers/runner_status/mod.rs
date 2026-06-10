@@ -1,13 +1,12 @@
+mod apply_conditions;
+mod conditions;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{TimeDelta, Utc};
 use futures::prelude::*;
-use kubimo::k8s_openapi::{
-    api::core::v1::{Pod, Secret},
-    apimachinery::pkg::apis::meta::v1::{Condition, Time},
-    jiff::Timestamp,
-};
+use kubimo::k8s_openapi::api::core::v1::Secret;
 use kubimo::kube::runtime::controller::Action;
 use kubimo::{Runner, RunnerStatus, prelude::*};
 use serde::Deserialize;
@@ -147,6 +146,11 @@ impl Connections {
     }
 }
 
+/// Requeue interval while startup conditions are not all True. PVC and
+/// Workspace changes don't trigger this controller's watches, so a faster
+/// requeue is what surfaces startup progress promptly.
+const STARTUP_REQUEUE_INTERVAL: Duration = Duration::from_secs(3);
+
 #[derive(Debug, Clone, Default)]
 struct RunnerStatusReconciler {
     client: reqwest::Client,
@@ -229,68 +233,6 @@ impl RunnerStatusReconciler {
         }
         Ok(Some(Action::requeue(interval)))
     }
-
-    async fn apply_pod_ready_condition(
-        &self,
-        ctx: &Context,
-        runner: &Runner,
-        status: &mut RunnerStatus,
-    ) -> kubimo::Result<()> {
-        const STATUS_TYPE: &str = "PodReady";
-        let pod = ctx
-            .api_namespaced::<Pod>(runner.require_namespace()?)
-            .get_opt(runner.name()?)
-            .await?;
-        let (reason_str, message_str) = if let Some(pod) = pod {
-            if let Some(condition) = pod
-                .status
-                .as_ref()
-                .and_then(|s| s.conditions.as_ref())
-                .and_then(|conditions| conditions.iter().find(|c| c.type_ == "Ready"))
-            {
-                if condition.status == "True" {
-                    ("Ready", "Ready")
-                } else {
-                    ("NotReady", "Not ready")
-                }
-            } else {
-                ("NotStarted", "Not started")
-            }
-        } else {
-            ("NotPresent", "Not present")
-        };
-        let status_str = if reason_str == "Ready" {
-            "True"
-        } else {
-            "False"
-        };
-        if let Some(condition) = status
-            .conditions
-            .as_mut()
-            .and_then(|c| c.iter_mut().find(|c| c.type_ == STATUS_TYPE))
-        {
-            if condition.reason != reason_str {
-                condition.status = status_str.to_string();
-                condition.reason = reason_str.to_string();
-                condition.message = message_str.to_string();
-                condition.observed_generation = runner.metadata.generation;
-                condition.last_transition_time = Time(Timestamp::now());
-            }
-        } else {
-            status
-                .conditions
-                .get_or_insert_with(Vec::new)
-                .push(Condition {
-                    type_: STATUS_TYPE.to_string(),
-                    reason: reason_str.to_string(),
-                    status: status_str.to_string(),
-                    message: message_str.to_string(),
-                    observed_generation: runner.metadata.generation,
-                    last_transition_time: Time(Timestamp::now()),
-                });
-        }
-        Ok(())
-    }
 }
 
 #[async_trait::async_trait]
@@ -300,18 +242,23 @@ impl Reconciler for RunnerStatusReconciler {
 
     async fn apply(&self, ctx: &Context, runner: &Runner) -> Result<Action, Self::Error> {
         let mut status = runner.status.clone().unwrap_or_default();
+        let startup_complete = self
+            .apply_startup_conditions(ctx, runner, &mut status)
+            .await?;
         let action = self.poll_api_status(ctx, runner, &mut status).await?;
-        if let Some(action) = action {
-            self.apply_pod_ready_condition(ctx, runner, &mut status)
-                .await?;
-            if Some(&status) != runner.status.as_ref() {
-                let mut patched = runner.clone();
-                patched.status = Some(status);
-                ctx.api_for(runner)?.patch_status(&patched).await?;
-            }
+        let Some(action) = action else {
+            // Runner was deleted for inactivity
+            return Ok(Action::await_change());
+        };
+        if Some(&status) != runner.status.as_ref() {
+            let mut patched = runner.clone();
+            patched.status = Some(status);
+            ctx.api_for(runner)?.patch_status(&patched).await?;
+        }
+        if startup_complete {
             Ok(action)
         } else {
-            Ok(Action::await_change())
+            Ok(Action::requeue(STARTUP_REQUEUE_INTERVAL))
         }
     }
 }
