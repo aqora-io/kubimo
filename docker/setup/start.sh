@@ -114,7 +114,6 @@ elif [[ "$CMD" == "render" ]]; then
     argv+=(--token "$TOKEN")
   fi
 
-  uv sync
   exec marimo-ssr serve "${argv[@]}" "$directory"
 
 elif [[ "$CMD" == "cache" ]]; then
