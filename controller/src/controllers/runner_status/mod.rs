@@ -8,7 +8,7 @@ use chrono::{TimeDelta, Utc};
 use futures::prelude::*;
 use kubimo::k8s_openapi::api::core::v1::Secret;
 use kubimo::kube::runtime::controller::Action;
-use kubimo::{Runner, RunnerStatus, prelude::*};
+use kubimo::{Runner, RunnerCommand, RunnerStatus, prelude::*};
 use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
@@ -245,10 +245,15 @@ impl Reconciler for RunnerStatusReconciler {
         let startup_complete = self
             .apply_startup_conditions(ctx, runner, &mut status)
             .await?;
-        let action = self.poll_api_status(ctx, runner, &mut status).await?;
-        let Some(action) = action else {
-            // Runner was deleted for inactivity
-            return Ok(Action::await_change());
+        let action = if matches!(runner.spec.command, RunnerCommand::Render) {
+            Action::await_change()
+        } else {
+            let action = self.poll_api_status(ctx, runner, &mut status).await?;
+            let Some(action) = action else {
+                // Runner was deleted for inactivity
+                return Ok(Action::await_change());
+            };
+            action
         };
         if Some(&status) != runner.status.as_ref() {
             let mut patched = runner.clone();
