@@ -9,6 +9,7 @@ impl CacheJobReconciler {
         &self,
         ctx: &Context,
         cache_job: &CacheJob,
+        workspace: &Workspace,
     ) -> Result<(), kubimo::Error> {
         let namespace = cache_job.require_namespace()?;
         if !cache_job
@@ -23,10 +24,6 @@ impl CacheJobReconciler {
                 })
             })
         {
-            let workspace = ctx
-                .api_namespaced::<Workspace>(namespace)
-                .get(cache_job.spec.workspace.as_ref())
-                .await?;
             let mut owner_refs = cache_job
                 .metadata
                 .owner_references

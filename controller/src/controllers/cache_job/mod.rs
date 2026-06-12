@@ -2,14 +2,16 @@ mod apply_job;
 mod apply_owner_reference;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::prelude::*;
-use kubimo::CacheJob;
 use kubimo::k8s_openapi::api::batch::v1::Job;
 use kubimo::kube::runtime::{Controller, controller::Action};
+use kubimo::{CacheJob, Workspace, prelude::*};
 
 use crate::backoff::default_error_policy;
 use crate::context::Context;
+use crate::controllers::runner::is_workspace_ready;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 
@@ -22,11 +24,31 @@ impl Reconciler for CacheJobReconciler {
     type Error = kubimo::Error;
 
     async fn apply(&self, ctx: &Context, cache_job: &CacheJob) -> Result<Action, Self::Error> {
-        futures::future::try_join_all([
-            self.apply_owner_reference(ctx, cache_job).boxed(),
-            self.apply_job(ctx, cache_job).map_ok(|_| ()).boxed(),
-        ])
-        .await?;
+        let namespace = cache_job.require_namespace()?;
+        let workspace = ctx
+            .api_namespaced::<Workspace>(namespace)
+            .get_opt(&cache_job.spec.workspace)
+            .await?;
+        // Workspace does not exist
+        let Some(workspace) = workspace else {
+            return Err(kubimo::Error::Custom(format!(
+                "CacheJob bound to workspace that does not exist: {workspace:?}",
+                workspace = cache_job.spec.workspace
+            )));
+        };
+
+        // Set the owner reference before gating on readiness so the CacheJob
+        // is garbage-collected even if the workspace never becomes ready.
+        self.apply_owner_reference(ctx, cache_job, &workspace)
+            .await?;
+
+        // The cache job mounts the workspace volume; running it before the
+        // workspace's init job has populated the volume fails `uv sync`.
+        if !is_workspace_ready(&workspace) {
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+
+        self.apply_job(ctx, cache_job).await?;
         Ok(Action::await_change())
     }
 }
