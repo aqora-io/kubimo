@@ -80,7 +80,7 @@ impl Reconciler for RunnerReconciler {
     }
 }
 
-fn is_workspace_ready(workspace: &Workspace) -> bool {
+pub(crate) fn is_workspace_ready(workspace: &Workspace) -> bool {
     workspace.status.as_ref().is_some_and(|status| {
         status
             .conditions
