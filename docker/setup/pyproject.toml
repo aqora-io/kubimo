@@ -19,3 +19,7 @@ dev = [
 [build-system]
 requires = ["pdm-backend"]
 build-backend = "pdm.backend"
+
+[tool.marimo.venv]
+path = "/home/me/venv"
+writable = true
