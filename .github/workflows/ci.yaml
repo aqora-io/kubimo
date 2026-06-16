@@ -28,3 +28,19 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+
+  cache-py:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        # marimo pinned to the MARIMO_GIT tag in docker/Dockerfile.marimo;
+        # bump this together with that pin.
+        run: pip install 'marimo==0.23.6' pytest
+      - name: Test cache.py
+        run: pytest docker/app/test_cache.py -v
