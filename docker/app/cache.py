@@ -10,7 +10,7 @@ import fnmatch
 from functools import lru_cache
 
 import marimo
-from marimo._server.export import run_app_then_export_as_html
+from marimo._server.export import export_as_md, run_app_then_export_as_html
 from marimo._utils.marimo_path import MarimoPath
 
 logging.basicConfig(level=logging.INFO)
@@ -18,21 +18,27 @@ logger = logging.getLogger(__name__)
 _LOG_LEVEL_CHOICES = ["debug", "info", "warning", "error", "critical"]
 
 
+def _write_export(export_dir: Path, result):
+    contents = result.contents
+    if isinstance(contents, str):
+        contents = contents.encode("utf-8")
+    (export_dir / result.download_filename).write_bytes(contents)
+
+
 async def _cache_app(path: Path, *, include_code: bool):
     logger.info(f"Caching {path}")
-    export_result = await run_app_then_export_as_html(
-        MarimoPath(path),
+    marimo_path = MarimoPath(path)
+    html_result = await run_app_then_export_as_html(
+        marimo_path,
         include_code=include_code,
         cli_args={},
         argv=[],
     )
+    md_result = export_as_md(marimo_path)
     export_dir = path.parent / "__marimo__"
     export_dir.mkdir(parents=True, exist_ok=True)
-    export_path = export_dir / export_result.download_filename
-    contents = export_result.contents
-    if isinstance(contents, str):
-        contents = contents.encode("utf-8")
-    export_path.write_bytes(contents)
+    _write_export(export_dir, html_result)
+    _write_export(export_dir, md_result)
 
 
 def _is_gitignored(path: Path, git_root: Path) -> bool:
