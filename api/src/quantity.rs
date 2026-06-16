@@ -1,7 +1,7 @@
-use std::borrow::Cow;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use std::{borrow::Cow, ops::Mul};
 
 pub use k8s_openapi::apimachinery::pkg::api::resource::Quantity as KubeQuantity;
 use schemars::JsonSchema;
@@ -11,7 +11,7 @@ use strum::{Display, EnumString};
 pub type StorageQuantity = Quantity<StorageUnit>;
 pub type CpuQuantity = Quantity<CpuUnit>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Display, EnumString, JsonSchema)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Display, EnumString, JsonSchema)]
 pub enum StorageUnit {
     #[strum(serialize = "")]
     B,
@@ -21,6 +21,40 @@ pub enum StorageUnit {
     Ti,
     Pi,
     Ei,
+}
+
+impl StorageUnit {
+    pub const fn exponent(self) -> u8 {
+        match self {
+            Self::B => 0,
+            Self::Ki => 10,
+            Self::Mi => 20,
+            Self::Gi => 30,
+            Self::Ti => 40,
+            Self::Pi => 50,
+            Self::Ei => 60,
+        }
+    }
+
+    pub const fn multiplier(self) -> u64 {
+        1 << self.exponent()
+    }
+}
+
+impl Mul<StorageUnit> for i64 {
+    type Output = i64;
+
+    fn mul(self, rhs: StorageUnit) -> Self::Output {
+        self * rhs.multiplier() as i64
+    }
+}
+
+impl Mul<StorageUnit> for u64 {
+    type Output = u64;
+
+    fn mul(self, rhs: StorageUnit) -> Self::Output {
+        self * rhs.multiplier()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Display, EnumString, JsonSchema)]
@@ -86,12 +120,13 @@ impl<T> Quantity<T> {
         }
     }
 
-    pub fn as_unit(&self) -> Option<(f64, T)>
+    pub fn as_unit<F>(&self) -> Option<(F, T)>
     where
+        F: FromStr,
         T: FromStr,
     {
         let split = self.quantity.0.find(|c: char| c.is_alphabetic())?;
-        let value = self.quantity.0[..split].parse::<f64>().ok()?;
+        let value = self.quantity.0[..split].parse::<F>().ok()?;
         let unit = self.quantity.0[split..].parse::<T>().ok()?;
         Some((value, unit))
     }
