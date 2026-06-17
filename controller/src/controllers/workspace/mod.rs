@@ -8,6 +8,7 @@ mod cleanup_indexer;
 use std::sync::Arc;
 
 use futures::prelude::*;
+use kubimo::k8s_crd_snapshot_storage::VolumeSnapshot;
 use kubimo::k8s_openapi::api::batch::v1::Job;
 use kubimo::k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod, ServiceAccount};
 use kubimo::k8s_openapi::api::rbac::v1::{Role, RoleBinding};
@@ -61,6 +62,7 @@ pub async fn run(
     let roles = ctx.api_global::<Role>().kube().clone();
     let role_bindings = ctx.api_global::<RoleBinding>().kube().clone();
     let runners = ctx.api_global::<Runner>().kube().clone();
+    let snaps = ctx.api_global::<VolumeSnapshot>().kube().clone();
     Ok(Controller::new(bmows, Default::default())
         .owns(pvc, Default::default())
         .owns(jobs, Default::default())
@@ -68,6 +70,7 @@ pub async fn run(
         .owns(service_accounts, Default::default())
         .owns(roles, Default::default())
         .owns(role_bindings, Default::default())
+        .owns(snaps, Default::default())
         .watches(runners, watcher::Config::default(), |runner| {
             runner
                 .namespace()
