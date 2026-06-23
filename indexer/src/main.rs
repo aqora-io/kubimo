@@ -1,3 +1,4 @@
+mod disk;
 mod keys;
 mod python;
 mod s3;
@@ -20,9 +21,10 @@ use futures::{
     stream::{StreamExt, TryStreamExt, futures_unordered::FuturesUnordered},
 };
 use kubimo::{
-    WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory, WorkspaceDirEntry,
+    Workspace, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory, WorkspaceDirEntry,
     WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache,
-    WorkspaceDirSpec, WorkspaceDirSymlink, prelude::*, url::Url,
+    WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceStatus, WorkspaceStorageStatus, prelude::*,
+    url::Url,
 };
 use python::{Notebook, get_marimo_notebook};
 use thiserror::Error;
@@ -861,6 +863,7 @@ async fn run(
     if let Err(err) = futs.try_collect::<()>().await {
         tracing::error!("Error waiting for tasks: {}", err);
     }
+    update_workspace_storage_status(args, client).await;
     let paths = match Arc::try_unwrap(paths) {
         Ok(paths) => paths.into_inner(),
         Err(paths) => {
@@ -869,6 +872,41 @@ async fn run(
         }
     };
     RunResult { names, urls, paths }
+}
+
+/// Measure how much space the mounted workspace volume is using and publish it
+/// to the Workspace's status. Best-effort: failures are logged and never abort
+/// indexing.
+async fn update_workspace_storage_status(args: &UploadArgs, client: &kubimo::Client) {
+    let usage = match disk::disk_usage(&args.directory) {
+        Ok(usage) => usage,
+        Err(err) => {
+            tracing::error!(
+                "Could not determine disk usage for {:?}: {err}",
+                args.directory
+            );
+            return;
+        }
+    };
+    let mut workspace = Workspace::new(&args.name, Default::default());
+    workspace.status = Some(WorkspaceStatus {
+        storage: Some(WorkspaceStorageStatus {
+            used: Some(disk::storage_quantity(usage.used)),
+            capacity: Some(disk::storage_quantity(usage.capacity)),
+            available: Some(disk::storage_quantity(usage.available)),
+        }),
+        ..Default::default()
+    });
+    if let Err(err) = client.api::<Workspace>().patch_status(&workspace).await {
+        tracing::error!("Failed to update workspace storage status: {err}");
+    } else {
+        tracing::info!(
+            "Updated workspace {} storage status: {} / {} bytes used",
+            args.name,
+            usage.used,
+            usage.capacity
+        );
+    }
 }
 
 async fn watch(
@@ -919,7 +957,9 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
-    let client = kubimo::Client::infer()
+    let client = kubimo::Client::builder()
+        .name("kubimo-indexer")
+        .build()
         .await
         .expect("Could not create client");
     let s3 = S3Client::from_env();

@@ -45,7 +45,8 @@ impl WorkspaceReconciler {
         let namespace = workspace.require_namespace()?;
         let owner_references = Some(vec![workspace.static_controller_owner_ref()?]);
         let role_name = indexer::role_name(workspace_name);
-        let crd = WorkspaceDir::crd();
+        let dir_crd = WorkspaceDir::crd();
+        let workspace_crd = Workspace::crd();
         let role = Role {
             metadata: ObjectMeta {
                 name: Some(role_name.to_string()),
@@ -53,20 +54,28 @@ impl WorkspaceReconciler {
                 owner_references,
                 ..Default::default()
             },
-            rules: Some(vec![PolicyRule {
-                api_groups: Some(vec![crd.spec.group]),
-                resources: Some(vec![crd.spec.names.plural]),
-                verbs: vec![
-                    "get".to_string(),
-                    "list".to_string(),
-                    "watch".to_string(),
-                    "create".to_string(),
-                    "update".to_string(),
-                    "patch".to_string(),
-                    "delete".to_string(),
-                ],
-                ..Default::default()
-            }]),
+            rules: Some(vec![
+                PolicyRule {
+                    api_groups: Some(vec![dir_crd.spec.group]),
+                    resources: Some(vec![dir_crd.spec.names.plural]),
+                    verbs: vec![
+                        "get".to_string(),
+                        "list".to_string(),
+                        "watch".to_string(),
+                        "create".to_string(),
+                        "update".to_string(),
+                        "patch".to_string(),
+                        "delete".to_string(),
+                    ],
+                    ..Default::default()
+                },
+                PolicyRule {
+                    api_groups: Some(vec![workspace_crd.spec.group]),
+                    resources: Some(vec![format!("{}/status", workspace_crd.spec.names.plural)]),
+                    verbs: vec!["get".to_string(), "patch".to_string(), "update".to_string()],
+                    ..Default::default()
+                },
+            ]),
         };
         ctx.api_namespaced::<Role>(namespace).patch(&role).await?;
         Ok(())
