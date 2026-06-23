@@ -81,6 +81,10 @@ async fn main() -> ExitCode {
                 .await
                 .unwrap()
                 .wait(),
+            controllers::budget::run(ctx.clone(), shutdown_signal("budget"))
+                .await
+                .unwrap()
+                .wait(),
         ])
         .map(|_| Ok(ExitCode::SUCCESS)),
         shutdown_timeout(Duration::from_secs(60)).boxed(),

@@ -1,3 +1,4 @@
+pub mod budget;
 pub mod cache_job;
 pub(crate) mod indexer;
 pub(crate) mod ingress;

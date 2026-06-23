@@ -25,13 +25,13 @@ pub use api::{Api, ApiListStream};
 #[cfg(feature = "client")]
 pub use client::{Client, ClientBuilder};
 pub use crd::{
-    AutoScale, CacheJob, CacheJobField, CacheJobSpec, LogLevel, Requirement, Runner, RunnerCommand,
-    RunnerField, RunnerIngress, RunnerLifecycle, RunnerSpec, RunnerStatus, RunnerTls, RunnerToken,
-    StorageRequirement, Workspace, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory,
-    WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo,
-    WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField,
-    WorkspaceIndexer, WorkspaceIndexerPod, WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus,
-    all_crds,
+    AutoScale, Budget, BudgetResourceStatus, BudgetSpec, BudgetStatus, CacheJob, CacheJobField,
+    CacheJobSpec, LogLevel, Requirement, Runner, RunnerCommand, RunnerField, RunnerIngress,
+    RunnerLifecycle, RunnerSpec, RunnerStatus, RunnerTls, RunnerToken, StorageRequirement,
+    Workspace, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory, WorkspaceDirEntry,
+    WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache,
+    WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField, WorkspaceIndexer, WorkspaceIndexerPod,
+    WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus, all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;
@@ -43,7 +43,7 @@ pub use label::KubimoLabel;
 pub use list_stream::{ApiListStreamExt, ListStream};
 pub use meta::{ObjectMetaExt, ResourceNameExt, ResourceNamespaceExt, ResourceOwnerRefExt};
 pub use quantity::{CpuQuantity, CpuUnit, Quantity, StorageQuantity, StorageUnit};
-pub use selector::{Expr, WellKnownField};
+pub use selector::{Expr, Expression, Selector, WellKnownField};
 
 pub mod prelude {
     #[cfg(feature = "client")]

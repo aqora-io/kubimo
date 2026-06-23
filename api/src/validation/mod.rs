@@ -6,6 +6,12 @@ pub fn workspace_max_storage_greater_than_min() -> Rule {
         .field_path(".spec.storage.max")
 }
 
+pub fn budget_selector_not_empty() -> Rule {
+    Rule::new(include_str!("./budget_selector_not_empty.cel"))
+        .message("budget selector must not be empty")
+        .field_path(".spec.selector")
+}
+
 pub fn workspace_auto_scale_bounds() -> Rule {
     Rule::new(include_str!("./workspace_auto_scale_bounds.cel"))
         .message("storage auto-scale requires 0 < from < 1 and to > 1")
@@ -57,6 +63,7 @@ mod tests {
     fn test_runner_cel_compiles() {
         test_compiles(workspace_max_storage_greater_than_min());
         test_compiles(workspace_auto_scale_bounds());
+        test_compiles(budget_selector_not_empty());
         test_compiles(workspace_no_volume_with_name());
         test_compiles(runner_immutable_fields());
         test_compiles(runner_max_memory_greater_than_min());

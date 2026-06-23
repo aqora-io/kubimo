@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::core::v1::{Container, EnvFromSource, EnvVar, SecretKeySelector, Volume};
@@ -10,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use strum::Display;
 use url::Url;
 
+use crate::selector::Selector;
 use crate::validation::{
-    log_level, runner_immutable_fields, runner_max_cpu_greater_than_min,
+    budget_selector_not_empty, log_level, runner_immutable_fields, runner_max_cpu_greater_than_min,
     runner_max_memory_greater_than_min, workspace_auto_scale_bounds,
     workspace_max_storage_greater_than_min, workspace_no_volume_with_name,
 };
@@ -64,16 +66,6 @@ pub struct StorageRequirement {
     pub min: Option<StorageQuantity>,
     pub max: Option<StorageQuantity>,
     pub auto: Option<AutoScale>,
-}
-
-impl StorageRequirement {
-    /// min/max view for code paths that don't care about auto-scaling.
-    pub fn to_requirement(&self) -> Requirement<StorageQuantity> {
-        Requirement {
-            min: self.min.clone(),
-            max: self.max.clone(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -328,6 +320,62 @@ impl Workspace {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct BudgetResourceStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used: Option<StorageQuantity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<StorageQuantity>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Vec<Condition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<BudgetResourceStatus>,
+}
+
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[kube(
+    group = "kubimo.aqora.io",
+    version = "v1",
+    kind = "Budget",
+    shortname = "bmob",
+    namespaced,
+    status = "BudgetStatus",
+    validation = budget_selector_not_empty(),
+)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetSpec {
+    /// matchLabels — objects whose labels are a superset of this map are governed by the budget.
+    pub selector: BTreeMap<String, String>,
+    /// Maximum total storage summed across all matching Workspaces. Only
+    /// Workspaces that declare an explicit `spec.storage.min` count against and
+    /// are constrained by this limit; storage-class-default Workspaces (no `min`)
+    /// are neither sized nor refused here.
+    pub storage: Option<StorageQuantity>,
+}
+
+impl BudgetSpec {
+    /// Whether `labels` satisfy every entry in this budget's selector.
+    pub fn matches(&self, labels: Option<&BTreeMap<String, String>>) -> bool {
+        let Some(labels) = labels else {
+            return self.selector.is_empty();
+        };
+        self.selector
+            .iter()
+            .all(|(key, value)| labels.get(key) == Some(value))
+    }
+
+    /// Equality label selector for listing the objects this budget governs.
+    pub fn label_selector(&self) -> Selector {
+        self.selector.iter().collect()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceDirDirectory {
     pub name: Option<String>,
 }
@@ -446,5 +494,34 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         Runner::crd(),
         CacheJob::crd(),
         WorkspaceDir::crd(),
+        Budget::crd(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn budget_matches_label_superset() {
+        let budget = BudgetSpec {
+            selector: labels(&[("user", "alice")]),
+            storage: None,
+        };
+        // a superset of the selector matches
+        assert!(budget.matches(Some(&labels(&[("user", "alice"), ("team", "x")]))));
+        // exact match
+        assert!(budget.matches(Some(&labels(&[("user", "alice")]))));
+        // different value, missing key, and no labels do not match
+        assert!(!budget.matches(Some(&labels(&[("user", "bob")]))));
+        assert!(!budget.matches(Some(&labels(&[("team", "x")]))));
+        assert!(!budget.matches(None));
+    }
 }
