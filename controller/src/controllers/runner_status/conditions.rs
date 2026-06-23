@@ -252,6 +252,7 @@ mod tests {
                 observed_generation: None,
                 last_transition_time: Time(Timestamp::UNIX_EPOCH),
             }]),
+            ..Default::default()
         });
         workspace
     }

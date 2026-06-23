@@ -50,13 +50,11 @@ pub struct Resources {
 
 impl Resources {
     pub fn storage(mut self, requirement: Option<Requirement<StorageQuantity>>) -> Self {
-        if let Some(requirement) = requirement {
-            self.requests.storage = requirement.min;
-            self.limits.storage = requirement.max;
-        } else {
-            self.requests.storage = None;
-            self.limits.storage = None;
-        }
+        // Only the request is applied to the PVC. A storage `limit` is immutable
+        // once the claim is bound, so writing one would make every later
+        // reconcile (e.g. auto-scaling a `requests` bump) fail with a 422. The
+        // `max` ceiling is enforced in software when computing the request.
+        self.requests.storage = requirement.and_then(|requirement| requirement.min);
         self
     }
 
@@ -119,5 +117,24 @@ impl From<Resources> for Option<ResourceRequirements> {
         } else {
             Some(value.into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kubimo::StorageUnit;
+
+    #[test]
+    fn storage_sets_request_but_never_a_limit() {
+        // A storage limit is immutable on a bound PVC, so `max` must not reach
+        // the claim even when configured.
+        let resources = Resources::default().storage(Some(Requirement {
+            min: Some(StorageQuantity::new(10, StorageUnit::Gi)),
+            max: Some(StorageQuantity::new(20, StorageUnit::Gi)),
+        }));
+        let volume: VolumeResourceRequirements = resources.into();
+        assert!(volume.requests.unwrap().contains_key("storage"));
+        assert!(volume.limits.is_none());
     }
 }

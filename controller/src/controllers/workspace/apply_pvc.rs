@@ -1,5 +1,3 @@
-use std::cmp::max_by_key;
-
 use kubimo::k8s_crd_snapshot_storage::{VolumeSnapshot, VolumeSnapshotSource, VolumeSnapshotSpec};
 use kubimo::k8s_openapi::api::core::v1::{
     PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, TypedLocalObjectReference,
@@ -8,7 +6,7 @@ use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kubimo::kube::api::{AttachParams, ObjectMeta};
 use kubimo::{
     Expr, FilterParams, Requirement, Runner, RunnerCommand, RunnerField, StorageQuantity,
-    Workspace, prelude::*,
+    StorageRequirement, StorageUnit, Workspace, WorkspaceStorageStatus, prelude::*,
 };
 
 use crate::context::Context;
@@ -26,6 +24,24 @@ impl WorkspaceReconciler {
         let namespace = workspace.require_namespace()?;
         let owner_ref = workspace.static_controller_owner_ref()?;
 
+        // PVCs can only grow, and a bound claim's storage `limit` is immutable
+        // (it cannot be added, changed, or removed). Read the current request as
+        // a never-shrink floor, and the current limit so we echo it back
+        // unchanged on every apply rather than fighting that immutability.
+        let existing_pvc = ctx
+            .api_namespaced::<PersistentVolumeClaim>(namespace)
+            .get_opt(workspace_name)
+            .await?;
+        let current_request = existing_pvc.as_ref().and_then(current_storage_request);
+        let current_limit = existing_pvc.as_ref().and_then(current_storage_limit);
+
+        let storage = effective_storage(
+            workspace.spec.storage.as_ref(),
+            workspace.status.as_ref().and_then(|s| s.storage.as_ref()),
+            current_request.as_ref(),
+            current_limit.as_ref(),
+        );
+
         let pvc = PersistentVolumeClaim {
             metadata: ObjectMeta {
                 name: Some(workspace_name.to_owned()),
@@ -40,7 +56,8 @@ impl WorkspaceReconciler {
                     namespace,
                     owner_ref,
                     workspace.spec.clone_workspace_name.as_deref(),
-                    workspace.spec.storage.as_ref(),
+                    storage,
+                    current_limit,
                 )
                 .await?,
             ),
@@ -58,8 +75,17 @@ async fn get_pvc_spec(
     namespace: &str,
     owner_ref: OwnerReference,
     clone_workspace_name: Option<&str>,
-    storage: Option<&Requirement<StorageQuantity>>,
+    storage: Option<Requirement<StorageQuantity>>,
+    preserve_limit: Option<StorageQuantity>,
 ) -> Result<PersistentVolumeClaimSpec, kubimo::Error> {
+    // Echo back an existing PVC's storage limit unchanged; never introduce one.
+    // A bound claim's limit is immutable, so dropping or changing it 422s.
+    let resources = |storage| {
+        let mut resources = Resources::default().storage(storage);
+        resources.limits.storage = preserve_limit.clone();
+        resources
+    };
+
     let spec = PersistentVolumeClaimSpec {
         access_modes: Some(vec!["ReadWriteOnce".to_string()]),
         ..Default::default()
@@ -80,21 +106,16 @@ async fn get_pvc_spec(
         )
         .await?;
 
-        let storage = if let Some((storage, clone_storage)) =
-            storage.zip(clone_workspace.spec.storage.as_ref())
-        {
-            Some(max_by_key(storage, clone_storage, |req| {
-                req.min
-                    .as_ref()
-                    .and_then(StorageQuantity::as_unit::<i64>)
-                    .map(|(amount, unit)| amount * unit)
-            }))
-        } else {
-            storage.or(clone_workspace.spec.storage.as_ref())
-        };
+        // Ensure the cloned PVC is at least as large as the source's configured minimum.
+        let clone_storage = clone_workspace
+            .spec
+            .storage
+            .as_ref()
+            .map(StorageRequirement::to_requirement);
+        let storage = pick_larger(storage, clone_storage);
 
         Ok(PersistentVolumeClaimSpec {
-            resources: Resources::default().storage(storage.cloned()).into(),
+            resources: resources(storage).into(),
             data_source: Some(TypedLocalObjectReference {
                 api_group: Some("snapshot.storage.k8s.io".to_string()),
                 kind: "VolumeSnapshot".to_string(),
@@ -104,10 +125,97 @@ async fn get_pvc_spec(
         })
     } else {
         Ok(PersistentVolumeClaimSpec {
-            resources: Resources::default().storage(storage.cloned()).into(),
+            resources: resources(storage).into(),
             ..spec
         })
     }
+}
+
+/// Read the requested storage quantity from an existing PVC's spec.
+fn current_storage_request(pvc: &PersistentVolumeClaim) -> Option<StorageQuantity> {
+    let resources = pvc.spec.as_ref()?.resources.as_ref()?;
+    resources
+        .requests
+        .as_ref()?
+        .get("storage")
+        .cloned()
+        .map(StorageQuantity::from)
+}
+
+/// Read the storage limit from an existing PVC's spec, if one is set.
+fn current_storage_limit(pvc: &PersistentVolumeClaim) -> Option<StorageQuantity> {
+    let resources = pvc.spec.as_ref()?.resources.as_ref()?;
+    resources
+        .limits
+        .as_ref()?
+        .get("storage")
+        .cloned()
+        .map(StorageQuantity::from)
+}
+
+/// Pick the requirement with the larger configured minimum.
+fn pick_larger(
+    a: Option<Requirement<StorageQuantity>>,
+    b: Option<Requirement<StorageQuantity>>,
+) -> Option<Requirement<StorageQuantity>> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let key = |req: &Requirement<StorageQuantity>| {
+                req.min
+                    .as_ref()
+                    .and_then(StorageQuantity::to_bytes)
+                    .unwrap_or(0)
+            };
+            Some(if key(&a) >= key(&b) { a } else { b })
+        }
+        (a, b) => a.or(b),
+    }
+}
+
+/// Resolve the storage requirement to apply to the PVC, accounting for
+/// auto-scaling against the reported usage and never shrinking below the
+/// current request.
+fn effective_storage(
+    spec: Option<&StorageRequirement>,
+    status: Option<&WorkspaceStorageStatus>,
+    current_request: Option<&StorageQuantity>,
+    current_limit: Option<&StorageQuantity>,
+) -> Option<Requirement<StorageQuantity>> {
+    let spec = spec?;
+    let max_bytes = spec.max.as_ref().and_then(StorageQuantity::to_bytes);
+    let mut request = spec.min.as_ref().and_then(StorageQuantity::to_bytes);
+
+    // auto-scale: grow when usage exceeds `from * capacity`
+    if let (Some(auto), Some(status)) = (spec.auto.as_ref(), status)
+        && let (Some(used), Some(capacity)) = (
+            status.used.as_ref().and_then(StorageQuantity::to_bytes),
+            status.capacity.as_ref().and_then(StorageQuantity::to_bytes),
+        )
+        && used as f64 > auto.from * capacity as f64
+    {
+        let target = (capacity as f64 * auto.to).ceil() as u64;
+        request = Some(request.map_or(target, |b| b.max(target)));
+    }
+
+    // clamp up-bound to max, then to an existing PVC's immutable limit (the
+    // request may never exceed a limit already on the claim), then floor to the
+    // PVC's current request (never shrink)
+    if let Some(max) = max_bytes {
+        request = request.map(|b| b.min(max));
+    }
+    if let Some(limit) = current_limit.and_then(StorageQuantity::to_bytes) {
+        request = request.map(|b| b.min(limit));
+    }
+    if let Some(cur) = current_request.and_then(StorageQuantity::to_bytes) {
+        request = Some(request.map_or(cur, |b| b.max(cur)));
+    }
+
+    // `max` is only a clamp on the request above; it is deliberately not carried
+    // into the PVC spec, since a bound claim's storage limit is immutable.
+    Some(Requirement {
+        min: request.map(|b| StorageQuantity::new(b as f64, StorageUnit::B)),
+        max: None,
+    })
 }
 
 async fn get_or_create_snapshot(
@@ -212,5 +320,77 @@ async fn sync_workspace_pvc(
             reason = status.as_ref().and_then(|x| x.reason.as_deref()),
             message = status.as_ref().and_then(|x| x.message.as_deref()),
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kubimo::AutoScale;
+
+    fn gi(n: u64) -> StorageQuantity {
+        StorageQuantity::new(n as f64, StorageUnit::Gi)
+    }
+
+    fn request_bytes(req: &Requirement<StorageQuantity>) -> Option<u64> {
+        req.min.as_ref().and_then(StorageQuantity::to_bytes)
+    }
+
+    #[test]
+    fn no_spec_yields_no_requirement() {
+        assert!(effective_storage(None, None, None, None).is_none());
+    }
+
+    #[test]
+    fn max_is_a_clamp_and_never_a_pvc_field() {
+        let spec = StorageRequirement {
+            min: Some(gi(10)),
+            max: Some(gi(20)),
+            auto: None,
+        };
+        let result = effective_storage(Some(&spec), None, None, None).unwrap();
+        assert_eq!(request_bytes(&result), gi(10).to_bytes());
+        assert!(result.max.is_none());
+    }
+
+    #[test]
+    fn auto_scale_grows_request_clamped_to_max() {
+        let spec = StorageRequirement {
+            min: Some(gi(1)),
+            max: Some(gi(3)),
+            auto: Some(AutoScale { from: 0.5, to: 1.5 }),
+        };
+        // used (60Gi) > 0.5 * capacity (100Gi): target ceil(100*1.5)=150Gi, clamped to max 3Gi
+        let status = WorkspaceStorageStatus {
+            used: Some(gi(60)),
+            capacity: Some(gi(100)),
+            available: Some(gi(40)),
+        };
+        let result = effective_storage(Some(&spec), Some(&status), None, None).unwrap();
+        assert_eq!(request_bytes(&result), gi(3).to_bytes());
+    }
+
+    #[test]
+    fn never_shrinks_below_current_request() {
+        let spec = StorageRequirement {
+            min: Some(gi(1)),
+            max: None,
+            auto: None,
+        };
+        let result = effective_storage(Some(&spec), None, Some(&gi(5)), None).unwrap();
+        assert_eq!(request_bytes(&result), gi(5).to_bytes());
+    }
+
+    #[test]
+    fn request_never_exceeds_existing_immutable_limit() {
+        // A claim already carrying a 2Gi limit can never request more, even when
+        // min/max would ask for more — exceeding the immutable limit is invalid.
+        let spec = StorageRequirement {
+            min: Some(gi(10)),
+            max: Some(gi(20)),
+            auto: None,
+        };
+        let result = effective_storage(Some(&spec), None, None, Some(&gi(2))).unwrap();
+        assert_eq!(request_bytes(&result), gi(2).to_bytes());
     }
 }
