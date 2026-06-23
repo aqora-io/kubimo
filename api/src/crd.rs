@@ -70,7 +70,21 @@ pub struct WorkspaceIndexer {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<WorkspaceStorageStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceStorageStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used: Option<StorageQuantity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<StorageQuantity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<StorageQuantity>,
 }
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]

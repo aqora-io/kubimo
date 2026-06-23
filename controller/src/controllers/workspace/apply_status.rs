@@ -137,6 +137,7 @@ fn update_workspace_status(
     }
     workspace.status = Some(WorkspaceStatus {
         conditions: Some(conditions),
+        ..Default::default()
     });
     workspace
 }
