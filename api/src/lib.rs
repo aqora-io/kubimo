@@ -25,12 +25,13 @@ pub use api::{Api, ApiListStream};
 #[cfg(feature = "client")]
 pub use client::{Client, ClientBuilder};
 pub use crd::{
-    CacheJob, CacheJobField, CacheJobSpec, LogLevel, Requirement, Runner, RunnerCommand,
+    AutoScale, CacheJob, CacheJobField, CacheJobSpec, LogLevel, Requirement, Runner, RunnerCommand,
     RunnerField, RunnerIngress, RunnerLifecycle, RunnerSpec, RunnerStatus, RunnerTls, RunnerToken,
-    Workspace, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory, WorkspaceDirEntry,
-    WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache,
-    WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField, WorkspaceIndexer, WorkspaceIndexerPod,
-    WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus, all_crds,
+    StorageRequirement, Workspace, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory,
+    WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo,
+    WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField,
+    WorkspaceIndexer, WorkspaceIndexerPod, WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus,
+    all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;

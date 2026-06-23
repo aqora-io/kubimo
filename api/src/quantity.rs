@@ -132,6 +132,22 @@ impl<T> Quantity<T> {
     }
 }
 
+impl Quantity<StorageUnit> {
+    /// Parse to a byte count, accepting both bare numbers ("12345") and unit
+    /// suffixes ("10Gi").
+    pub fn to_bytes(&self) -> Option<u64> {
+        let s = self.to_string();
+        let split = s.find(|c: char| c.is_alphabetic()).unwrap_or(s.len());
+        let value: f64 = s[..split].trim().parse().ok()?;
+        let unit = if split == s.len() {
+            StorageUnit::B
+        } else {
+            s[split..].trim().parse().ok()?
+        };
+        Some((value * unit.multiplier() as f64) as u64)
+    }
+}
+
 impl<T> FromStr for Quantity<T> {
     type Err = core::convert::Infallible;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -189,5 +205,22 @@ mod tests {
         let sq_from_quantity: Quantity<StorageUnit> = KubeQuantity("20Mi".to_string()).into();
         assert_eq!(sq_from_quantity.to_string(), "20Mi");
         assert_eq!(sq_from_quantity.as_unit(), Some((20.0, StorageUnit::Mi)));
+    }
+
+    #[test]
+    fn test_storage_to_bytes() {
+        // bare byte count (how the indexer writes status)
+        let bare: Quantity<StorageUnit> = KubeQuantity("12345".to_string()).into();
+        assert_eq!(bare.to_bytes(), Some(12345));
+
+        // unit-suffixed
+        assert_eq!(
+            Quantity::new(10, StorageUnit::Gi).to_bytes(),
+            Some(10 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            Quantity::new(20, StorageUnit::Mi).to_bytes(),
+            Some(20 * 1024 * 1024)
+        );
     }
 }

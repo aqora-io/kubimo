@@ -1,0 +1,5 @@
+!has(self.spec.storage) ||
+!has(self.spec.storage.auto) ||
+(self.spec.storage.auto.from > 0.0 &&
+ self.spec.storage.auto.from < 1.0 &&
+ self.spec.storage.auto.to > 1.0)

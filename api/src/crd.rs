@@ -12,8 +12,8 @@ use url::Url;
 
 use crate::validation::{
     log_level, runner_immutable_fields, runner_max_cpu_greater_than_min,
-    runner_max_memory_greater_than_min, workspace_max_storage_greater_than_min,
-    workspace_no_volume_with_name,
+    runner_max_memory_greater_than_min, workspace_auto_scale_bounds,
+    workspace_max_storage_greater_than_min, workspace_no_volume_with_name,
 };
 
 use crate::{
@@ -49,6 +49,31 @@ impl JsonSchema for LogLevel {
 pub struct Requirement<T> {
     pub min: Option<T>,
     pub max: Option<T>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoScale {
+    pub from: f64,
+    pub to: f64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageRequirement {
+    pub min: Option<StorageQuantity>,
+    pub max: Option<StorageQuantity>,
+    pub auto: Option<AutoScale>,
+}
+
+impl StorageRequirement {
+    /// min/max view for code paths that don't care about auto-scaling.
+    pub fn to_requirement(&self) -> Requirement<StorageQuantity> {
+        Requirement {
+            min: self.min.clone(),
+            max: self.max.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -96,11 +121,12 @@ pub struct WorkspaceStorageStatus {
     namespaced,
     status = "WorkspaceStatus",
     validation = workspace_max_storage_greater_than_min(),
+    validation = workspace_auto_scale_bounds(),
     validation = workspace_no_volume_with_name(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSpec {
-    pub storage: Option<Requirement<StorageQuantity>>,
+    pub storage: Option<StorageRequirement>,
     pub init_containers: Option<Vec<Container>>,
     #[schemars(length(max = 25))]
     pub volumes: Option<Vec<Volume>>,
