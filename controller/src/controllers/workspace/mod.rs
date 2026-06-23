@@ -5,7 +5,11 @@ mod apply_pvc;
 mod apply_status;
 mod cleanup_indexer;
 
+pub(crate) use apply_pvc::pvc_storage_request;
+pub(crate) use apply_status::BUDGET_EXCEEDED_REASON;
+
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::prelude::*;
 use kubimo::k8s_crd_snapshot_storage::VolumeSnapshot;
@@ -21,6 +25,10 @@ use crate::context::Context;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 
+/// Sibling Workspace deletions that free up budget do not trigger a refused
+/// Workspace, so recheck periodically.
+const BUDGET_REQUEUE_INTERVAL: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Copy)]
 struct WorkspaceReconciler;
 
@@ -30,8 +38,15 @@ impl Reconciler for WorkspaceReconciler {
     type Error = kubimo::Error;
 
     async fn apply(&self, ctx: &Context, workspace: &Workspace) -> Result<Action, Self::Error> {
+        let (plan, current_limit) = self.plan_storage(ctx, workspace).await?;
+        if let Some(reason) = plan.refuse {
+            self.apply_budget_status(ctx, workspace, &reason).await?;
+            return Ok(Action::requeue(BUDGET_REQUEUE_INTERVAL));
+        }
         futures::future::try_join_all([
-            self.apply_pvc(ctx, workspace).map_ok(|_| ()).boxed(),
+            self.apply_pvc(ctx, workspace, plan.request, current_limit)
+                .map_ok(|_| ())
+                .boxed(),
             self.apply_job(ctx, workspace).map_ok(|_| ()).boxed(),
             self.apply_indexer_rbac(ctx, workspace).boxed(),
             self.apply_indexer(ctx, workspace).boxed(),

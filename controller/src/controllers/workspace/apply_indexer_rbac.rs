@@ -72,6 +72,9 @@ impl WorkspaceReconciler {
                 PolicyRule {
                     api_groups: Some(vec![workspace_crd.spec.group]),
                     resources: Some(vec![format!("{}/status", workspace_crd.spec.names.plural)]),
+                    // Restrict to this workspace so a compromised pod cannot patch
+                    // the status of any other workspace in the namespace.
+                    resource_names: Some(vec![workspace_name.to_string()]),
                     verbs: vec!["get".to_string(), "patch".to_string(), "update".to_string()],
                     ..Default::default()
                 },

@@ -55,6 +55,8 @@ impl Resources {
         // reconcile (e.g. auto-scaling a `requests` bump) fail with a 422. The
         // `max` ceiling is enforced in software when computing the request.
         self.requests.storage = requirement.and_then(|requirement| requirement.min);
+        // Clear any limit a reused `Resources` may carry, upholding the invariant.
+        self.limits.storage = None;
         self
     }
 

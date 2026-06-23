@@ -133,18 +133,28 @@ impl<T> Quantity<T> {
 }
 
 impl Quantity<StorageUnit> {
-    /// Parse to a byte count, accepting both bare numbers ("12345") and unit
-    /// suffixes ("10Gi").
+    /// Parse to a byte count, accepting bare numbers ("12345", "1e9") and binary
+    /// unit suffixes ("10Gi"). Returns `None` on malformed input or a magnitude
+    /// that does not fit in a `u64`.
     pub fn to_bytes(&self) -> Option<u64> {
         let s = self.to_string();
-        let split = s.find(|c: char| c.is_alphabetic()).unwrap_or(s.len());
-        let value: f64 = s[..split].trim().parse().ok()?;
-        let unit = if split == s.len() {
-            StorageUnit::B
+        let s = s.trim();
+        // A bare magnitude — including scientific notation like "1e9" — parses
+        // whole. Only when that fails is there a binary unit suffix
+        // (Ki/Mi/.../Ei) to split off; doing it in this order keeps the `E` of
+        // "10Ei" with the unit instead of mistaking it for an exponent.
+        let (value, unit): (f64, StorageUnit) = if let Ok(value) = s.parse() {
+            (value, StorageUnit::B)
         } else {
-            s[split..].trim().parse().ok()?
+            let split = s.find(|c: char| c.is_ascii_alphabetic())?;
+            (s[..split].parse().ok()?, s[split..].parse().ok()?)
         };
-        Some((value * unit.multiplier() as f64) as u64)
+        let bytes = value * unit.multiplier() as f64;
+        // Reject NaN/inf, negatives, and anything that would saturate on cast.
+        if !bytes.is_finite() || bytes < 0.0 || bytes >= 2f64.powi(64) {
+            return None;
+        }
+        Some(bytes as u64)
     }
 }
 
@@ -222,5 +232,23 @@ mod tests {
             Quantity::new(20, StorageUnit::Mi).to_bytes(),
             Some(20 * 1024 * 1024)
         );
+
+        // scientific notation (a valid bare quantity form) is not mistaken for a unit
+        let sci: Quantity<StorageUnit> = KubeQuantity("1e9".to_string()).into();
+        assert_eq!(sci.to_bytes(), Some(1_000_000_000));
+
+        // the `Ei` suffix keeps its leading `E` with the unit, not the magnitude
+        assert_eq!(
+            Quantity::new(2, StorageUnit::Ei).to_bytes(),
+            Some(2u64 * (1u64 << 60))
+        );
+
+        // malformed and out-of-range values are rejected rather than saturating
+        let neg: Quantity<StorageUnit> = KubeQuantity("-5".to_string()).into();
+        assert_eq!(neg.to_bytes(), None);
+        let garbage: Quantity<StorageUnit> = KubeQuantity("abc".to_string()).into();
+        assert_eq!(garbage.to_bytes(), None);
+        let overflow: Quantity<StorageUnit> = KubeQuantity("1e30Gi".to_string()).into();
+        assert_eq!(overflow.to_bytes(), None);
     }
 }

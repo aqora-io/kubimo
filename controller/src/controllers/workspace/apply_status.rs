@@ -8,6 +8,10 @@ use crate::context::Context;
 
 use super::WorkspaceReconciler;
 
+/// `reason` of the `Ready=False` condition written when a Workspace is refused
+/// provisioning because it does not fit its budget.
+pub(crate) const BUDGET_EXCEEDED_REASON: &str = "BudgetExceeded";
+
 impl WorkspaceReconciler {
     pub(crate) async fn apply_status(
         &self,
@@ -51,6 +55,28 @@ impl WorkspaceReconciler {
             .await?;
         Ok(())
     }
+
+    /// Mark the workspace not-Ready because provisioning was refused by a budget.
+    pub(crate) async fn apply_budget_status(
+        &self,
+        ctx: &Context,
+        workspace: &Workspace,
+        reason: &str,
+    ) -> Result<(), kubimo::Error> {
+        if workspace.metadata.deletion_timestamp.is_some() {
+            return Ok(());
+        }
+        let namespace = workspace.require_namespace()?;
+        let workspace = update_workspace_status(
+            workspace.clone(),
+            None,
+            StatusKind::BudgetExceeded(reason.to_owned()),
+        );
+        ctx.api_namespaced::<Workspace>(namespace)
+            .patch_status(&workspace)
+            .await?;
+        Ok(())
+    }
 }
 
 #[allow(clippy::enum_variant_names)] // redudant variants but useful if we add non-job related
@@ -58,6 +84,7 @@ enum StatusKind {
     JobFailed,
     JobNotComplete,
     JobComplete,
+    BudgetExceeded(String),
 }
 
 impl StatusKind {
@@ -124,6 +151,14 @@ fn update_workspace_status(
             status: "True".into(),
             type_: "Ready".into(),
         },
+        StatusKind::BudgetExceeded(message) => Condition {
+            last_transition_time,
+            observed_generation,
+            message,
+            reason: BUDGET_EXCEEDED_REASON.into(),
+            status: "False".into(),
+            type_: "Ready".into(),
+        },
     };
     let mut conditions = workspace
         .status
@@ -135,6 +170,11 @@ fn update_workspace_status(
     } else {
         conditions.push(ready);
     }
+    // Send only `conditions`. `storage` is owned by the indexer's field manager
+    // ("kubimo-indexer") under server-side apply; copying it into this patch would
+    // make "kubimo-controller" co-claim those fields and 409-conflict with the
+    // indexer's writes. Omitting it (storage stays `None`, skipped on serialize)
+    // leaves the indexer's value untouched on the server.
     workspace.status = Some(WorkspaceStatus {
         conditions: Some(conditions),
         ..Default::default()
