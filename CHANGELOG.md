@@ -2,6 +2,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.1.31 - 2026-06-25
+#### Bug Fixes
+- (**docker**) remove launch.py - (e845dd9) - Antoine Chauvin
+- use sandbox for marimo - (87f8380) - Julian Popescu
+
+- - -
+
 ## v0.1.30 - 2026-06-24
 #### Build system
 - add cocogitto config - (ef5fdcb) - Antoine Chauvin
