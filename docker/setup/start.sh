@@ -76,14 +76,7 @@ fi
 # needs the table, otherwise --sandbox builds an ephemeral sandbox per
 # notebook instead of using the workspace venv.
 ensure_marimo_venv_config() {
-  if [ -f pyproject.toml ] && ! python3 -c '
-import sys, tomllib
-with open("pyproject.toml", "rb") as f:
-    data = tomllib.load(f)
-# Check for the table itself, not a key inside it: appending a duplicate
-# [tool.marimo.venv] header would be invalid TOML.
-sys.exit(0 if "venv" in data.get("tool", {}).get("marimo", {}) else 1)
-'; then
+  if [ -f pyproject.toml ] && ! is_marimo_venv_configured; then
     cat >>pyproject.toml <<TOML
 
 [tool.marimo.venv]
@@ -93,6 +86,17 @@ TOML
   fi
 }
 
+is_marimo_venv_configured() {
+  python3 -c '
+import sys, tomllib
+with open("pyproject.toml", "rb") as f:
+    data = tomllib.load(f)
+# Check for the table itself, not a key inside it: appending a duplicate
+# [tool.marimo.venv] header would be invalid TOML.
+sys.exit(0 if "venv" in data.get("tool", {}).get("marimo", {}) else 1)
+'
+}
+
 # --sandbox on a directory makes marimo spawn each kernel as an IPC subprocess
 # on the workspace venv (see [tool.marimo.venv] in the template pyproject), so
 # user-installed packages aren't shadowed by the image's system site-packages
@@ -100,7 +104,7 @@ TOML
 if [[ "$CMD" == "edit" ]]; then
   uv sync
   ensure_marimo_venv_config
-  exec "$VIRTUAL_ENV/bin/python3" /setup/launch.py \
+  exec marimo \
     "${common_flags[@]}" \
     --yes \
     edit \
@@ -115,7 +119,7 @@ if [[ "$CMD" == "edit" ]]; then
 elif [[ "$CMD" == "run" ]]; then
   uv sync
   ensure_marimo_venv_config
-  exec "$VIRTUAL_ENV/bin/python3" /setup/launch.py \
+  exec marimo \
     "${common_flags[@]}" \
     --yes \
     run \
