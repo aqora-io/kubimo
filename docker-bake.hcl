@@ -12,7 +12,7 @@ variable "SCCACHE_REGION" {
 
 variable "MARIMO_GIT" {
   # feat-ssr branch of our fork
-  default = "https://github.com/aqora-io/marimo.git#5e1798b8990bcd687bc7aaab6fe64e8957a20c7d"
+  default = "https://github.com/aqora-io/marimo.git#75691a95e08630442c2c644d2dd270b0c31ab6a4"
 }
 
 group "default" {
