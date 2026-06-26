@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.1.32 - 2026-06-26
+#### Build system
+- (**marimo**) update to latest changes - (b8dea17) - Antoine Chauvin
+
+- - -
+
 ## v0.1.31 - 2026-06-25
 #### Bug Fixes
 - (**docker**) remove launch.py - (e845dd9) - Antoine Chauvin
