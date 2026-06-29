@@ -2,6 +2,15 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.1.33-alpha.0 - 2026-06-29
+#### Continuous Integration
+- smarter chart version bump - (787c482) - Antoine Chauvin
+- allow bumping on other branches than main - (4dbee2b) - Antoine Chauvin
+#### Miscellaneous Chores
+- (**marimo**) update with latest changes - (3e75d7d) - Antoine Chauvin
+
+- - -
+
 ## v0.1.32 - 2026-06-26
 #### Build system
 - (**marimo**) update to latest changes - (b8dea17) - Antoine Chauvin
