@@ -59,13 +59,28 @@ def helm_bump(path: Path, version: semver.Version) -> None:
     with path.open("r+") as chart_file:
         chart_doc = yaml.load(chart_file)
 
+        app_version = semver.Version.parse(chart_doc["appVersion"])
         chart_version = semver.Version.parse(chart_doc["version"])
-        chart_doc["version"] = str(chart_version.bump_patch())
+        chart_doc["version"] = str(
+            replicate_semver_change(app_version, version, chart_version)
+        )
         chart_doc["appVersion"] = str(version)
 
         _ = chart_file.seek(0)
         _ = chart_file.truncate()
         yaml.dump(chart_doc, chart_file)
+
+
+def replicate_semver_change(
+    left: semver.Version, right: semver.Version, version: semver.Version
+) -> semver.Version:
+    return version.replace(
+        major=(version.major - left.major + right.major),
+        minor=(version.minor - left.minor + right.minor),
+        patch=(version.patch - left.patch + right.patch),
+        prerelease=right.prerelease,
+        build=right.build,
+    )
 
 
 if __name__ == "__main__":
