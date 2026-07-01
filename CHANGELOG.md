@@ -2,6 +2,19 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.1.33 - 2026-07-01
+#### Features
+- storage budget - (cb27f3f) - Julian Popescu
+- auto scaling storage for workspace - (2fd4c68) - Julian Popescu
+- storage status for workspaces - (417c6fa) - Julian Popescu
+#### Continuous Integration
+- smarter chart version bump - (8af27ce) - Antoine Chauvin
+- allow bumping on other branches than main - (615ef28) - Antoine Chauvin
+#### Miscellaneous Chores
+- (**marimo**) update with latest changes - (68a5896) - Antoine Chauvin
+
+- - -
+
 ## v0.1.32 - 2026-06-26
 #### Build system
 - (**marimo**) update to latest changes - (b8dea17) - Antoine Chauvin
