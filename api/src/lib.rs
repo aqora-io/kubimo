@@ -9,6 +9,7 @@ mod filter_params;
 mod label;
 #[cfg(feature = "client")]
 mod list_stream;
+mod manifest;
 mod meta;
 mod quantity;
 pub mod selector;
@@ -31,7 +32,7 @@ pub use crd::{
     Workspace, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory, WorkspaceDirEntry,
     WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache,
     WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField, WorkspaceIndexer, WorkspaceIndexerPod,
-    WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus, all_crds,
+    WorkspaceRestoreFrom, WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus, all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;
@@ -41,6 +42,9 @@ pub use filter_params::FilterParams;
 pub use label::KubimoLabel;
 #[cfg(feature = "client")]
 pub use list_stream::{ApiListStreamExt, ListStream};
+pub use manifest::{
+    MANIFEST_FILE_NAME, ManifestDirectory, ManifestVersion, WorkspaceManifest, manifest_url,
+};
 pub use meta::{ObjectMetaExt, ResourceNameExt, ResourceNamespaceExt, ResourceOwnerRefExt};
 pub use quantity::{CpuQuantity, CpuUnit, Quantity, StorageQuantity, StorageUnit};
 pub use selector::{Expr, Expression, Selector, WellKnownField};

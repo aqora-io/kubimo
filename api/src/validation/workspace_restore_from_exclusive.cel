@@ -1,0 +1,1 @@
+!has(self.spec.restoreFrom) || !has(self.spec.cloneWorkspaceName)
