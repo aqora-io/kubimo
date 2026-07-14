@@ -24,6 +24,20 @@ pub fn workspace_no_volume_with_name() -> Rule {
         .field_path(".spec.volumes")
 }
 
+pub fn workspace_restore_from_exclusive() -> Rule {
+    Rule::new(include_str!("./workspace_restore_from_exclusive.cel"))
+        .message("restoreFrom and cloneWorkspaceName are mutually exclusive")
+        .field_path(".spec.restoreFrom")
+}
+
+pub fn workspace_restore_from_not_indexer_prefix() -> Rule {
+    Rule::new(include_str!(
+        "./workspace_restore_from_not_indexer_prefix.cel"
+    ))
+    .message("the workspace's own indexer must not write to the restoreFrom archive location")
+    .field_path(".spec.restoreFrom")
+}
+
 pub fn runner_immutable_fields() -> Rule {
     Rule::new(include_str!("./runner_immutable_fields.cel"))
         .message("workspace is immutable")
@@ -63,6 +77,8 @@ mod tests {
     fn test_runner_cel_compiles() {
         test_compiles(workspace_max_storage_greater_than_min());
         test_compiles(workspace_auto_scale_bounds());
+        test_compiles(workspace_restore_from_exclusive());
+        test_compiles(workspace_restore_from_not_indexer_prefix());
         test_compiles(budget_selector_not_empty());
         test_compiles(workspace_no_volume_with_name());
         test_compiles(runner_immutable_fields());

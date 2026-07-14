@@ -1,0 +1,6 @@
+!has(self.spec.restoreFrom) ||
+!has(self.spec.indexer) ||
+!has(self.spec.indexer.bucket) ||
+self.spec.indexer.bucket != self.spec.restoreFrom.bucket ||
+(has(self.spec.indexer.keyPrefix) ? self.spec.indexer.keyPrefix : "") !=
+  (has(self.spec.restoreFrom.keyPrefix) ? self.spec.restoreFrom.keyPrefix : "")

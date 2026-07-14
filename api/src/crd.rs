@@ -16,6 +16,7 @@ use crate::validation::{
     budget_selector_not_empty, log_level, runner_immutable_fields, runner_max_cpu_greater_than_min,
     runner_max_memory_greater_than_min, workspace_auto_scale_bounds,
     workspace_max_storage_greater_than_min, workspace_no_volume_with_name,
+    workspace_restore_from_exclusive, workspace_restore_from_not_indexer_prefix,
 };
 
 use crate::{
@@ -104,6 +105,17 @@ pub struct WorkspaceStorageStatus {
     pub available: Option<StorageQuantity>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRestoreFrom {
+    /// Bucket holding the source archive.
+    pub bucket: String,
+    pub key_prefix: Option<String>,
+    /// Env for the restore init container (AWS credentials), same shape as
+    /// `indexer.pod`.
+    pub pod: Option<WorkspaceIndexerPod>,
+}
+
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
     group = "kubimo.aqora.io",
@@ -115,6 +127,8 @@ pub struct WorkspaceStorageStatus {
     validation = workspace_max_storage_greater_than_min(),
     validation = workspace_auto_scale_bounds(),
     validation = workspace_no_volume_with_name(),
+    validation = workspace_restore_from_exclusive(),
+    validation = workspace_restore_from_not_indexer_prefix(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSpec {
@@ -124,6 +138,7 @@ pub struct WorkspaceSpec {
     pub volumes: Option<Vec<Volume>>,
     pub indexer: Option<WorkspaceIndexer>,
     pub clone_workspace_name: Option<String>,
+    pub restore_from: Option<WorkspaceRestoreFrom>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]
@@ -507,6 +522,31 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn workspace_restore_from_serde() {
+        let spec = WorkspaceSpec {
+            restore_from: Some(WorkspaceRestoreFrom {
+                bucket: "bucket".to_string(),
+                key_prefix: Some("workspace/".to_string()),
+                pod: None,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(json["restoreFrom"]["bucket"], "bucket");
+        assert_eq!(json["restoreFrom"]["keyPrefix"], "workspace/");
+        let parsed: WorkspaceSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.restore_from.unwrap().bucket, "bucket");
+    }
+
+    #[test]
+    fn workspace_crd_has_restore_from_validations() {
+        let crd = serde_json::to_string(&Workspace::crd()).unwrap();
+        assert!(crd.contains("restoreFrom"));
+        assert!(crd.contains("restoreFrom and cloneWorkspaceName are mutually exclusive"));
+        assert!(crd.contains("must not write to the restoreFrom archive location"));
     }
 
     #[test]
