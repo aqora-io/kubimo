@@ -56,7 +56,7 @@ CRD schema changes require re-running `apply_crds` against the cluster.
 
 - `api/` (crate name **`kubimo`**) — CRD type definitions plus a typed client wrapper. Features: `client` + `runtime` (default), `ws`. Examples: `apply_crds`, `print_crds`.
 - `controller/` (**`kubimo-controller`**, default member) — the operator binary.
-- `indexer/` — binary that runs *inside* workspace pods (shipped in the marimo image): watches the workspace directory, parses notebooks with tree-sitter-python, uploads files/metadata to S3 via `object_store`, and writes `WorkspaceDirectory` CRs.
+- `indexer/` — binary that runs *inside* workspace pods (shipped in the marimo image): watches the workspace directory, parses notebooks with tree-sitter-python, uploads files/metadata + a `manifest.json` (archive manifest) to S3 via `object_store`, and writes `WorkspaceDirectory` CRs. Its `download` subcommand restores tracked files from such an archive (used by `spec.restoreFrom`).
 - `notebook_meta/` — serde types for marimo notebook metadata (shared by indexer / written to S3).
 - `json-patch-macros/` — `patch!`/`path!`/`add!`/`put!`… macros for building JSON patches used in reconcilers.
 - `k8s-crd-snapshot-storage/` — typed bindings for `snapshot.storage.k8s.io` VolumeSnapshot (used for workspace cloning).
@@ -65,7 +65,7 @@ CRD schema changes require re-running `apply_crds` against the cluster.
 
 All defined with `#[derive(CustomResource, JsonSchema, ...)]` + `#[kube(...)]`, with CEL validation rules attached in the kube attribute:
 
-- **Workspace** (`bmow`) — persistent notebook workspace. Reconciles into a PVC (optionally cloned from another workspace via VolumeSnapshot), an init-containers Job, and an indexer Pod + its ServiceAccount/Role/RoleBinding. Gets `Ready` condition once the PVC is bound.
+- **Workspace** (`bmow`) — persistent notebook workspace. Reconciles into a PVC (optionally cloned from another workspace via VolumeSnapshot), an init-containers Job, and an indexer Pod + its ServiceAccount/Role/RoleBinding. Gets `Ready` condition once the PVC is bound. `spec.restoreFrom` (`{bucket, keyPrefix, pod.env}`, mutually exclusive with `cloneWorkspaceName`) seeds a new workspace's tracked files from an indexer S3 archive via a `restore` init container — works even after the source workspace was deleted, but requires the archive was written with `uploadContent: true` (see `examples/restore.yaml`).
 - **Runner** (`bmor`) — one marimo process (`spec.command`: Edit / Run / Render) in a workspace (`spec.workspace`). Reconciles into Pod + Service + Ingress. Not reconciled until its Workspace is Ready; owned by the Workspace.
 - **CacheJob** (`bmocj`) — a Job that pre-populates uv/marimo caches for a workspace.
 - **WorkspaceDirectory** (`bmowd`) — directory listing + file metadata. Written by the **indexer**, not the controller (the controller only attaches owner references).
