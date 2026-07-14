@@ -1,0 +1,58 @@
+# Creates a workspace restored from another workspace's S3 archive — the
+# manifest + content the indexer wrote under the given bucket/keyPrefix (see
+# examples/basic.yaml). The source workspace must have been indexed with
+# `uploadContent: true`; it does not need to still exist. Only tracked files
+# are restored (gitignored files, `.git` and files over the indexer's max
+# file size are not part of the archive).
+#
+# The restored workspace's own indexer must point at a different keyPrefix
+# than restoreFrom, otherwise it would overwrite the source archive.
+apiVersion: kubimo.aqora.io/v1
+kind: Workspace
+metadata:
+  name: "restored"
+spec:
+  storage:
+    min: "10Gi"
+  restoreFrom:
+    bucket: "bucket"
+    keyPrefix: "workspace/"
+    pod:
+      env:
+        - name: "AWS_ENDPOINT"
+          value: "http://minio-tenant-hl.minio-tenant.svc.cluster.local:9000"
+        - name: "AWS_REGION"
+          value: "us-east-1"
+        - name: "AWS_ALLOW_HTTP"
+          value: "true"
+        # Prefer envFrom with a Secret for credentials in real deployments.
+        - name: "AWS_ACCESS_KEY_ID"
+          value: "minioadmin"
+        - name: "AWS_SECRET_ACCESS_KEY"
+          value: "minioadmin"
+  indexer:
+    bucket: "bucket"
+    keyPrefix: "restored/"
+    uploadContent: true
+    pod:
+      env:
+        - name: "AWS_ENDPOINT"
+          value: "http://minio-tenant-hl.minio-tenant.svc.cluster.local:9000"
+        - name: "AWS_REGION"
+          value: "us-east-1"
+        - name: "AWS_ALLOW_HTTP"
+          value: "true"
+        - name: "AWS_ACCESS_KEY_ID"
+          value: "minioadmin"
+        - name: "AWS_SECRET_ACCESS_KEY"
+          value: "minioadmin"
+---
+apiVersion: kubimo.aqora.io/v1
+kind: Runner
+metadata:
+  name: "restored-editor"
+spec:
+  command: "Edit"
+  workspace: "restored"
+  ingress:
+    path: "/restored/edit"
