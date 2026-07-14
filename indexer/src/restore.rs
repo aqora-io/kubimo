@@ -61,6 +61,11 @@ pub fn plan_restore(manifest: &WorkspaceManifest) -> Result<RestorePlan, PlanErr
     let mut plan = RestorePlan::default();
     for directory in &manifest.directories {
         let dir_path = safe_relative_path(&directory.path)?;
+        // Also create the directory itself: its `directory` entry in the
+        // parent may be missing from a partially indexed batch.
+        if !dir_path.as_os_str().is_empty() {
+            plan.directories.push(dir_path.clone());
+        }
         for entry in &directory.entries {
             let entry_path = safe_entry_path(&dir_path, &entry.name)?;
             if entry.directory.is_some() {
@@ -136,11 +141,7 @@ pub async fn restore(args: &DownloadArgs, s3: &S3Client) -> Result<(), RestoreEr
     }
     for (link, target) in &plan.symlinks {
         let link = args.directory.join(link);
-        match tokio::fs::remove_file(&link).await {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
+        remove_if_exists(&link).await?;
         tokio::fs::symlink(target, &link).await?;
     }
     for path in &plan.skipped {
@@ -189,13 +190,33 @@ pub async fn restore(args: &DownloadArgs, s3: &S3Client) -> Result<(), RestoreEr
     Ok(())
 }
 
+async fn remove_if_exists(path: &Path) -> std::io::Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Open `path` for writing without ever following a pre-existing symlink
+/// (e.g. one planted by a malicious manifest entry of the same name): remove
+/// whatever is there and create a fresh regular file.
+async fn create_output_file(path: &Path) -> std::io::Result<tokio::fs::File> {
+    remove_if_exists(path).await?;
+    tokio::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+}
+
 async fn download_file(
     s3: &S3Client,
     directory: &Path,
     file: &RestoreFile,
 ) -> Result<(), RestoreError> {
     let full_path = directory.join(&file.path);
-    let output = tokio::fs::File::create(&full_path).await?;
+    let output = create_output_file(&full_path).await?;
     s3.download(&file.url, output, file.crc32).await?;
     if let Some(modified) = file.modified
         && let Err(err) = set_modified(&full_path, modified)
@@ -289,6 +310,19 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_restore_creates_dirs_without_parent_entry() {
+        // A directory that appears only as a ManifestDirectory path (no
+        // `directory` entry in its parent) must still be created, or its
+        // files fail to download.
+        let manifest = manifest(vec![ManifestDirectory {
+            path: "orphan".to_string(),
+            entries: vec![file_entry("a.txt", true)],
+        }]);
+        let plan = plan_restore(&manifest).unwrap();
+        assert!(plan.directories.contains(&PathBuf::from("orphan")));
+    }
+
+    #[test]
     fn test_plan_restore_rejects_parent_dir_in_path() {
         let manifest = manifest(vec![ManifestDirectory {
             path: "../evil".to_string(),
@@ -324,6 +358,31 @@ mod tests {
                 "expected {name:?} to be rejected"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_create_output_file_replaces_symlink_instead_of_following() {
+        let dir = std::env::temp_dir().join("kubimo-restore-test-symlink");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let target = dir.join("target.txt");
+        tokio::fs::write(&target, b"original").await.unwrap();
+        let link = dir.join("link.txt");
+        tokio::fs::symlink(&target, &link).await.unwrap();
+
+        let mut file = create_output_file(&link).await.unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut file, b"downloaded")
+            .await
+            .unwrap();
+        drop(file);
+
+        // The symlink target must be untouched and the link path must now be
+        // a regular file with the downloaded bytes.
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"original");
+        let meta = tokio::fs::symlink_metadata(&link).await.unwrap();
+        assert!(meta.is_file());
+        assert_eq!(tokio::fs::read(&link).await.unwrap(), b"downloaded");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[test]

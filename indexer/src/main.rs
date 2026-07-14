@@ -90,18 +90,18 @@ struct CleanArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct DownloadArgs {
+pub(crate) struct DownloadArgs {
     #[arg(long, short, env = "AWS_BUCKET")]
-    pub bucket: String,
+    pub(crate) bucket: String,
     #[arg(long, short = 'p', env = "AWS_KEY_PREFIX")]
-    pub key_prefix: Option<String>,
+    pub(crate) key_prefix: Option<String>,
     #[arg(long, default_value_t = 10)]
-    pub max_download_concurrency: usize,
+    pub(crate) max_download_concurrency: usize,
     /// Continue on per-file download errors instead of failing.
     #[arg(long)]
-    pub best_effort: bool,
+    pub(crate) best_effort: bool,
     #[arg(default_value = ".")]
-    pub directory: PathBuf,
+    pub(crate) directory: PathBuf,
 }
 
 #[derive(Clone)]
@@ -902,6 +902,9 @@ async fn run(
 
 /// Build and upload the archive manifest for the current batch. Best-effort:
 /// failures are logged and never abort indexing — the next batch rewrites it.
+/// Note the manifest reflects whatever the walk produced: a partially failed
+/// walk shrinks the manifest until a later batch repairs it (same semantics
+/// as the `WorkspaceDirectory` CR sweep).
 async fn upload_manifest(
     args: &UploadArgs,
     s3: &S3Client,
@@ -1017,24 +1020,17 @@ async fn main() {
     let cli = Cli::parse();
     let s3 = S3Client::from_env();
 
-    // Download needs no Kubernetes API access; only build a client for the
-    // commands that do.
-    if let Command::Download(args) = &cli.command {
-        if let Err(err) = restore::restore(args, &s3).await {
-            tracing::error!("Error restoring workspace: {err}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
-    let client = kubimo::Client::builder()
-        .name("kubimo-indexer")
-        .build()
-        .await
-        .expect("Could not create client");
-
     match cli.command {
+        // Download needs no Kubernetes API access; only the other commands
+        // build a client.
+        Command::Download(args) => {
+            if let Err(err) = restore::restore(&args, &s3).await {
+                tracing::error!("Error restoring workspace: {err}");
+                std::process::exit(1);
+            }
+        }
         Command::Upload(args) => {
+            let client = kube_client().await;
             let mut previous_names = BTreeSet::new();
             let mut previous_urls = BTreeSet::new();
             let mut names = WorkspaceDirNameSet::new(args.name.clone());
@@ -1064,8 +1060,16 @@ async fn main() {
             }
         }
         Command::Clean(args) => {
+            let client = kube_client().await;
             clean(&client, &s3, &args.name).await;
         }
-        Command::Download(_) => unreachable!("handled above"),
     }
+}
+
+async fn kube_client() -> kubimo::Client {
+    kubimo::Client::builder()
+        .name("kubimo-indexer")
+        .build()
+        .await
+        .expect("Could not create client")
 }
