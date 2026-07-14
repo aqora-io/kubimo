@@ -105,6 +105,27 @@ pub(crate) fn env_from(workspace: &Workspace) -> Option<Vec<EnvFromSource>> {
     )
 }
 
+pub(crate) async fn is_pod_running(
+    ctx: &Context,
+    workspace: &Workspace,
+) -> Result<bool, kubimo::Error> {
+    let workspace_name = workspace.name()?;
+    let namespace = workspace.require_namespace()?;
+    let Some(pod) = ctx
+        .api_namespaced::<Pod>(namespace)
+        .get_opt(pod_name(workspace_name).as_ref())
+        .await?
+    else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        pod.status
+            .as_ref()
+            .and_then(|status| status.phase.as_deref()),
+        Some("Running")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,25 +186,4 @@ mod tests {
         assert_eq!(env.len(), 1);
         assert_eq!(env[0].value.as_deref(), Some("debug"));
     }
-}
-
-pub(crate) async fn is_pod_running(
-    ctx: &Context,
-    workspace: &Workspace,
-) -> Result<bool, kubimo::Error> {
-    let workspace_name = workspace.name()?;
-    let namespace = workspace.require_namespace()?;
-    let Some(pod) = ctx
-        .api_namespaced::<Pod>(namespace)
-        .get_opt(pod_name(workspace_name).as_ref())
-        .await?
-    else {
-        return Ok(false);
-    };
-    Ok(matches!(
-        pod.status
-            .as_ref()
-            .and_then(|status| status.phase.as_deref()),
-        Some("Running")
-    ))
 }
