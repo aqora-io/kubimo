@@ -1,11 +1,14 @@
 use kubimo::k8s_openapi::api::core::v1::{EnvFromSource, EnvVar, Pod};
-use kubimo::{Workspace, prelude::*};
+use kubimo::{Workspace, WorkspaceIndexerPod, WorkspaceRestoreFrom, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
 
 pub(crate) const WORKSPACE_DIR: &str = "/home/me/workspace";
 pub(crate) const MOUNT_DIR: &str = "/home/me";
+/// Where the init job mounts the workspace volume.
+pub(crate) const INIT_MOUNT_DIR: &str = "/mnt";
+pub(crate) const INIT_WORKSPACE_DIR: &str = "/mnt/workspace";
 
 #[inline]
 pub(crate) fn pod_name(workspace_name: &str) -> String {
@@ -54,12 +57,17 @@ pub(crate) fn upload_args(
     Ok(args)
 }
 
-pub(crate) fn env(workspace: &Workspace) -> Option<Vec<EnvVar>> {
-    let mut env = workspace
-        .spec
-        .indexer
-        .as_ref()
-        .and_then(|indexer| indexer.pod.as_ref())
+pub(crate) fn download_args(restore: &WorkspaceRestoreFrom) -> Vec<String> {
+    let mut args = cmd!["download", "--bucket", restore.bucket];
+    if let Some(key_prefix) = restore.key_prefix.as_ref() {
+        args.extend(cmd!["--key-prefix", key_prefix]);
+    }
+    args.push(INIT_WORKSPACE_DIR.to_string());
+    args
+}
+
+pub(crate) fn pod_env(pod: Option<&WorkspaceIndexerPod>) -> Option<Vec<EnvVar>> {
+    let mut env = pod
         .and_then(|pod| pod.env.as_ref())
         .cloned()
         .unwrap_or_default();
@@ -73,13 +81,90 @@ pub(crate) fn env(workspace: &Workspace) -> Option<Vec<EnvVar>> {
     Some(env)
 }
 
+pub(crate) fn pod_env_from(pod: Option<&WorkspaceIndexerPod>) -> Option<Vec<EnvFromSource>> {
+    pod.and_then(|pod| pod.env_from.clone())
+}
+
+pub(crate) fn env(workspace: &Workspace) -> Option<Vec<EnvVar>> {
+    pod_env(
+        workspace
+            .spec
+            .indexer
+            .as_ref()
+            .and_then(|indexer| indexer.pod.as_ref()),
+    )
+}
+
 pub(crate) fn env_from(workspace: &Workspace) -> Option<Vec<EnvFromSource>> {
-    workspace
-        .spec
-        .indexer
-        .as_ref()
-        .and_then(|indexer| indexer.pod.as_ref())
-        .and_then(|pod| pod.env_from.clone())
+    pod_env_from(
+        workspace
+            .spec
+            .indexer
+            .as_ref()
+            .and_then(|indexer| indexer.pod.as_ref()),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kubimo::WorkspaceRestoreFrom;
+
+    #[test]
+    fn test_download_args_with_key_prefix() {
+        let args = download_args(&WorkspaceRestoreFrom {
+            bucket: "bucket".to_string(),
+            key_prefix: Some("workspace/".to_string()),
+            pod: None,
+        });
+        assert_eq!(
+            args,
+            vec![
+                "download",
+                "--bucket",
+                "bucket",
+                "--key-prefix",
+                "workspace/",
+                INIT_WORKSPACE_DIR,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_download_args_without_key_prefix() {
+        let args = download_args(&WorkspaceRestoreFrom {
+            bucket: "bucket".to_string(),
+            key_prefix: None,
+            pod: None,
+        });
+        assert_eq!(
+            args,
+            vec!["download", "--bucket", "bucket", INIT_WORKSPACE_DIR]
+        );
+    }
+
+    #[test]
+    fn test_pod_env_injects_rust_log() {
+        let env = pod_env(None).unwrap();
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].name, "RUST_LOG");
+        assert_eq!(env[0].value.as_deref(), Some("info"));
+    }
+
+    #[test]
+    fn test_pod_env_keeps_user_rust_log() {
+        let pod = kubimo::WorkspaceIndexerPod {
+            env: Some(vec![EnvVar {
+                name: "RUST_LOG".to_string(),
+                value: Some("debug".to_string()),
+                ..Default::default()
+            }]),
+            env_from: None,
+        };
+        let env = pod_env(Some(&pod)).unwrap();
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].value.as_deref(), Some("debug"));
+    }
 }
 
 pub(crate) async fn is_pod_running(
