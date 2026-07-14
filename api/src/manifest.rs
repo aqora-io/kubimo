@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -20,7 +19,6 @@ pub struct WorkspaceManifest {
     pub version: ManifestVersion,
     /// Name of the workspace the manifest was generated from.
     pub workspace: String,
-    pub generated_at: DateTime<Utc>,
     /// Whether raw file contents were uploaded (`--upload-content`).
     pub upload_content: bool,
     /// Sum of `file.size` over entries that have a content url.
@@ -76,9 +74,6 @@ mod tests {
         let manifest = WorkspaceManifest {
             version: ManifestVersion::V1,
             workspace: "workspace".to_string(),
-            generated_at: chrono::DateTime::parse_from_rfc3339("2026-07-14T00:00:00Z")
-                .unwrap()
-                .to_utc(),
             upload_content: true,
             total_content_bytes: 42,
             directories: vec![ManifestDirectory {
@@ -103,13 +98,11 @@ mod tests {
         assert_eq!(json["version"], "V1");
         assert_eq!(json["uploadContent"], true);
         assert_eq!(json["totalContentBytes"], 42);
-        assert_eq!(json["generatedAt"], "2026-07-14T00:00:00Z");
         assert_eq!(json["directories"][0]["path"], "");
         assert_eq!(json["directories"][0]["entries"][0]["name"], "notebook.py");
 
         let parsed: WorkspaceManifest = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.workspace, manifest.workspace);
-        assert_eq!(parsed.generated_at, manifest.generated_at);
         assert_eq!(parsed.upload_content, manifest.upload_content);
         assert_eq!(parsed.total_content_bytes, manifest.total_content_bytes);
         assert_eq!(parsed.directories.len(), 1);

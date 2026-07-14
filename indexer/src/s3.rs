@@ -12,7 +12,7 @@ use object_store::{
 };
 use thiserror::Error;
 use tokio::{
-    io::{AsyncRead, AsyncSeek, AsyncSeekExt},
+    io::{AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
     sync::{AcquireError, RwLock, Semaphore, SemaphorePermit},
 };
 use tokio_util::io::ReaderStream;
@@ -47,6 +47,18 @@ pub enum DeleteError {
     Url(#[from] ParseS3UrlError),
     #[error(transparent)]
     S3(#[from] object_store::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum DownloadError {
+    #[error(transparent)]
+    Url(#[from] ParseS3UrlError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    S3(#[from] object_store::Error),
+    #[error("crc32 mismatch: expected {expected:08x}, got {actual:08x}")]
+    Crc32Mismatch { expected: u32, actual: u32 },
 }
 
 #[derive(Debug, Error)]
@@ -217,6 +229,58 @@ impl S3Client {
         s3.delete(&key).await?;
         Ok(())
     }
+
+    /// GET a small object fully into memory.
+    #[tracing::instrument(skip(self))]
+    pub async fn get_bytes(&self, url: &Url) -> Result<bytes::Bytes, DownloadError> {
+        let (bucket, key) = parse_s3_url(url)?;
+        let s3 = self.bucket(&bucket).await?;
+        get_bytes_from_store(&s3, &key).await
+    }
+
+    /// Stream a GET to `output`, verifying against `expected_crc32` when
+    /// given. Returns the crc32 of the downloaded bytes.
+    #[tracing::instrument(skip(self, output))]
+    pub async fn download(
+        &self,
+        url: &Url,
+        output: impl AsyncWrite + Unpin,
+        expected_crc32: Option<u32>,
+    ) -> Result<u32, DownloadError> {
+        let (bucket, key) = parse_s3_url(url)?;
+        let s3 = self.bucket(&bucket).await?;
+        download_from_store(&s3, &key, output, expected_crc32).await
+    }
+}
+
+async fn get_bytes_from_store(
+    store: &impl ObjectStore,
+    key: &Key,
+) -> Result<bytes::Bytes, DownloadError> {
+    Ok(store.get(key).await?.bytes().await?)
+}
+
+async fn download_from_store(
+    store: &impl ObjectStore,
+    key: &Key,
+    mut output: impl AsyncWrite + Unpin,
+    expected_crc32: Option<u32>,
+) -> Result<u32, DownloadError> {
+    let mut stream = store.get(key).await?.into_stream();
+    let mut hasher = Crc32Hasher::new();
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk?;
+        hasher.update(&bytes);
+        output.write_all(&bytes).await?;
+    }
+    output.flush().await?;
+    let actual = hasher.finalize();
+    if let Some(expected) = expected_crc32
+        && expected != actual
+    {
+        return Err(DownloadError::Crc32Mismatch { expected, actual });
+    }
+    Ok(actual)
 }
 
 const MIN_PART_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
@@ -283,6 +347,71 @@ fn parse_s3_url(url: &Url) -> Result<(String, Key), ParseS3UrlError> {
     };
     let key = Key::parse(url.path())?;
     Ok((bucket.to_string(), key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::memory::InMemory;
+
+    async fn store_with(key: &str, contents: &'static [u8]) -> InMemory {
+        let store = InMemory::new();
+        store
+            .put(&Key::parse(key).unwrap(), contents.into())
+            .await
+            .unwrap();
+        store
+    }
+
+    #[tokio::test]
+    async fn test_download_writes_bytes_and_returns_crc32() {
+        let store = store_with("data.csv", b"hello world").await;
+        let mut output = std::io::Cursor::new(Vec::new());
+        let crc32 = download_from_store(
+            &store,
+            &Key::parse("data.csv").unwrap(),
+            &mut output,
+            Some(crc32fast::hash(b"hello world")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.into_inner(), b"hello world");
+        assert_eq!(crc32, crc32fast::hash(b"hello world"));
+    }
+
+    #[tokio::test]
+    async fn test_download_without_expected_crc32() {
+        let store = store_with("data.csv", b"hello world").await;
+        let mut output = std::io::Cursor::new(Vec::new());
+        download_from_store(&store, &Key::parse("data.csv").unwrap(), &mut output, None)
+            .await
+            .unwrap();
+        assert_eq!(output.into_inner(), b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_download_crc32_mismatch() {
+        let store = store_with("data.csv", b"hello world").await;
+        let mut output = std::io::Cursor::new(Vec::new());
+        let err = download_from_store(
+            &store,
+            &Key::parse("data.csv").unwrap(),
+            &mut output,
+            Some(crc32fast::hash(b"something else")),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DownloadError::Crc32Mismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_get_bytes_from_store() {
+        let store = store_with("manifest.json", b"{}").await;
+        let bytes = get_bytes_from_store(&store, &Key::parse("manifest.json").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), b"{}");
+    }
 }
 
 #[derive(Debug, Default)]

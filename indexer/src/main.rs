@@ -1,6 +1,8 @@
 mod disk;
 mod keys;
+mod manifest;
 mod python;
+mod restore;
 mod s3;
 mod watcher;
 
@@ -52,6 +54,7 @@ struct Cli {
 enum Command {
     Upload(UploadArgs),
     Clean(CleanArgs),
+    Download(DownloadArgs),
 }
 
 #[derive(Args, Debug)]
@@ -84,6 +87,21 @@ struct UploadArgs {
 #[derive(Args, Debug)]
 struct CleanArgs {
     name: String,
+}
+
+#[derive(Args, Debug)]
+pub struct DownloadArgs {
+    #[arg(long, short, env = "AWS_BUCKET")]
+    pub bucket: String,
+    #[arg(long, short = 'p', env = "AWS_KEY_PREFIX")]
+    pub key_prefix: Option<String>,
+    #[arg(long, default_value_t = 10)]
+    pub max_download_concurrency: usize,
+    /// Continue on per-file download errors instead of failing.
+    #[arg(long)]
+    pub best_effort: bool,
+    #[arg(default_value = ".")]
+    pub directory: PathBuf,
 }
 
 #[derive(Clone)]
@@ -767,6 +785,7 @@ async fn run(
         1000,
     );
     let (rx, paths) = edit_paths(&mut join_set, rx, args.directory.clone(), 1000);
+    let upload_permits = Arc::new(Semaphore::new(args.max_upload_concurrency));
     let mut rx = process(
         &mut join_set,
         rx,
@@ -775,7 +794,7 @@ async fn run(
             directory: Arc::new(args.directory.clone()),
             max_file_size: args.max_file_size,
             upload_content: args.upload_content,
-            upload_permits: Arc::new(Semaphore::new(args.max_upload_concurrency)),
+            upload_permits: upload_permits.clone(),
             keys: keys.clone(),
         },
         1000,
@@ -827,6 +846,13 @@ async fn run(
         .cloned()
         .collect::<BTreeSet<_>>();
 
+    // Upload the manifest before deleting stale objects so a concurrent
+    // reader never holds a manifest referencing objects deleted by this
+    // batch. The manifest url is never part of the stale-url bookkeeping.
+    if let Some(bucket) = args.bucket.as_deref() {
+        upload_manifest(args, s3, bucket, &workspace_dirs, &upload_permits).await;
+    }
+
     let futs = FuturesUnordered::new();
     for mut dir in workspace_dirs.into_values() {
         let bmowds = client.api::<WorkspaceDir>();
@@ -872,6 +898,38 @@ async fn run(
         }
     };
     RunResult { names, urls, paths }
+}
+
+/// Build and upload the archive manifest for the current batch. Best-effort:
+/// failures are logged and never abort indexing — the next batch rewrites it.
+async fn upload_manifest(
+    args: &UploadArgs,
+    s3: &S3Client,
+    bucket: &str,
+    workspace_dirs: &BTreeMap<String, WorkspaceDir>,
+    upload_permits: &Semaphore,
+) {
+    let manifest = manifest::build_manifest(&args.name, args.upload_content, workspace_dirs);
+    let url = match kubimo::manifest_url(bucket, args.key_prefix.as_deref()) {
+        Ok(url) => url,
+        Err(err) => {
+            tracing::error!("Error building manifest url: {err}");
+            return;
+        }
+    };
+    let bytes = match serde_json::to_vec(&manifest) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::error!("Error serializing manifest: {err}");
+            return;
+        }
+    };
+    let size = bytes.len() as u64;
+    let input = std::io::Cursor::new(bytes);
+    match s3.upload(&url, input, size, upload_permits).await {
+        Ok(_) => tracing::info!("Uploaded manifest to {url}"),
+        Err(err) => tracing::error!("Error uploading manifest to {url}: {err}"),
+    }
 }
 
 /// Measure how much space the mounted workspace volume is using and publish it
@@ -957,12 +1015,23 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
+    let s3 = S3Client::from_env();
+
+    // Download needs no Kubernetes API access; only build a client for the
+    // commands that do.
+    if let Command::Download(args) = &cli.command {
+        if let Err(err) = restore::restore(args, &s3).await {
+            tracing::error!("Error restoring workspace: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let client = kubimo::Client::builder()
         .name("kubimo-indexer")
         .build()
         .await
         .expect("Could not create client");
-    let s3 = S3Client::from_env();
 
     match cli.command {
         Command::Upload(args) => {
@@ -997,5 +1066,6 @@ async fn main() {
         Command::Clean(args) => {
             clean(&client, &s3, &args.name).await;
         }
+        Command::Download(_) => unreachable!("handled above"),
     }
 }
