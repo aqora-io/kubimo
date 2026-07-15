@@ -97,8 +97,8 @@ pub fn plan_restore(manifest: &WorkspaceManifest) -> Result<RestorePlan, PlanErr
 
 #[derive(Debug, Error)]
 pub enum RestoreError {
-    #[error("error fetching manifest: {0}")]
-    Manifest(#[from] DownloadError),
+    #[error(transparent)]
+    Download(#[from] DownloadError),
     #[error("error parsing manifest: {0}")]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -217,7 +217,19 @@ async fn download_file(
 ) -> Result<(), RestoreError> {
     let full_path = directory.join(&file.path);
     let output = create_output_file(&full_path).await?;
-    s3.download(&file.url, output, file.crc32).await?;
+    // `download` takes the handle by value, so it is closed by the time an
+    // error returns here.
+    if let Err(err) = s3.download(&file.url, output, file.crc32).await {
+        // Don't leave a partial or corrupt file behind — with --best-effort
+        // the restore continues and the file would otherwise look restored.
+        if let Err(remove_err) = remove_if_exists(&full_path).await {
+            tracing::warn!(
+                "Could not remove partial file {}: {remove_err}",
+                file.path.display()
+            );
+        }
+        return Err(err.into());
+    }
     if let Some(modified) = file.modified
         && let Err(err) = set_modified(&full_path, modified)
     {
