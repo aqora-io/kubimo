@@ -95,3 +95,32 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Node agent: owns the per-node data volume and hands workspace slots to runner
+# pods through a CSI node plugin.
+agent:
+  enabled: false
+  driverName: kubimo.aqora.io
+  image:
+    repository: ghcr.io/aqora-io/kubimo-agent
+    pullPolicy: IfNotPresent
+    tag: ""
+  registrarImage: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.14.0
+  kubeletDir: /var/lib/kubelet
+  rustLog: info
+  # Per-node data volume, provisioned as a generic ephemeral volume so each
+  # DaemonSet pod gets its own PVC. Sized to the working set of the slots on a
+  # node, not to the sum of their quotas: slot quotas are deliberately
+  # overcommitted, and the agent evicts idle slots under pressure.
+  dataVolume:
+    storageClassName: kubimo-node-data
+    size: 200Gi
+    createStorageClass: true
+    provisioner: csi.scaleway.com
+  # DEVELOPMENT ONLY. Lets the agent serve slots on a filesystem without XFS
+  # project-quota enforcement, which means slots have NO capacity limit and one
+  # workspace can fill the volume for every other tenant on the node.
+  allowUnquotaedSlots: false
+  nodeSelector: {}
+  tolerations: []
+  priorityClassName: ""
