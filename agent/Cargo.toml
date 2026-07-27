@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
+indexer = { path = "../indexer" }
+kubimo = { path = "../api", default-features = false, features = ["client"] }
 libc = "0.2"
 prost = "0.14"
 prost-types = "0.14"

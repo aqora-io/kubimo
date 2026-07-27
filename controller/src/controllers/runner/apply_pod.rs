@@ -43,6 +43,12 @@ impl RunnerReconciler {
             .and_then(|workspace| workspace.spec.storage.as_ref())
             .and_then(|storage| storage.max.as_ref())
             .and_then(|max| max.to_bytes());
+        // Where the agent pulls the workspace's files from. Absent means the
+        // workspace has no archive configured and starts on an empty slot.
+        let archive = workspace
+            .as_ref()
+            .and_then(|workspace| workspace.spec.indexer.as_ref())
+            .map(|indexer| (indexer.bucket.clone(), indexer.key_prefix.clone()));
         let ingress_path = ingress_path(runner)?;
         let path_prefix = ingress_path.strip_suffix('/').unwrap_or(&ingress_path);
         let mut command = cmd!["bash", "/setup/start.sh", "--base-url", ingress_path,];
@@ -143,7 +149,12 @@ impl RunnerReconciler {
                 security_context: pod_security_context(mode),
                 hostname: Some("kubimo".into()),
                 containers,
-                volumes: Some(vec![workspace_volume(runner, mode, storage_limit_bytes)]),
+                volumes: Some(vec![workspace_volume(
+                    runner,
+                    mode,
+                    storage_limit_bytes,
+                    archive,
+                )]),
                 ..Default::default()
             }),
             ..Default::default()
@@ -167,6 +178,7 @@ fn workspace_volume(
     runner: &Runner,
     mode: WorkspaceMode,
     storage_limit_bytes: Option<u64>,
+    archive: Option<(Option<String>, Option<String>)>,
 ) -> Volume {
     let name = runner.spec.workspace.clone();
     match mode {
@@ -182,6 +194,16 @@ fn workspace_volume(
             let mut attributes = BTreeMap::from([("workspace".to_string(), name.clone())]);
             if let Some(limit) = storage_limit_bytes {
                 attributes.insert("limitBytes".to_string(), limit.to_string());
+            }
+            // Only pass the bucket when it is actually set: the agent treats a
+            // missing bucket as "no archive, start empty" rather than guessing.
+            if let Some((bucket, key_prefix)) = archive {
+                if let Some(bucket) = bucket {
+                    attributes.insert("bucket".to_string(), bucket);
+                }
+                if let Some(key_prefix) = key_prefix {
+                    attributes.insert("keyPrefix".to_string(), key_prefix);
+                }
             }
             Volume {
                 name,
@@ -239,4 +261,110 @@ pub(crate) fn runner_origin<'a>(config: &'a Config, runner: &'a Runner) -> Optio
     first_spec_host
         .or(first_config_host)
         .map(|host| format!("https://{host}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kubimo::{RunnerSpec, WorkspaceIndexer};
+
+    fn runner(command: RunnerCommand) -> Runner {
+        Runner::new(
+            "bmor-test",
+            RunnerSpec {
+                workspace: "bmow-test".into(),
+                command,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn dedicated_mode_mounts_the_workspace_pvc() {
+        let volume = workspace_volume(
+            &runner(RunnerCommand::Edit),
+            WorkspaceMode::Dedicated,
+            None,
+            None,
+        );
+        assert_eq!(
+            volume.persistent_volume_claim.unwrap().claim_name,
+            "bmow-test"
+        );
+        assert!(volume.csi.is_none());
+    }
+
+    #[test]
+    fn pooled_mode_uses_an_inline_csi_volume() {
+        let volume = workspace_volume(
+            &runner(RunnerCommand::Edit),
+            WorkspaceMode::Pooled,
+            Some(2_147_483_648),
+            Some((Some("bucket".into()), Some("workspace/abc/".into()))),
+        );
+        assert!(volume.persistent_volume_claim.is_none());
+        let csi = volume.csi.unwrap();
+        assert_eq!(csi.driver, SLOT_CSI_DRIVER);
+        let attrs = csi.volume_attributes.unwrap();
+        assert_eq!(attrs.get("workspace").unwrap(), "bmow-test");
+        assert_eq!(attrs.get("limitBytes").unwrap(), "2147483648");
+        assert_eq!(attrs.get("bucket").unwrap(), "bucket");
+        assert_eq!(attrs.get("keyPrefix").unwrap(), "workspace/abc/");
+    }
+
+    /// A workspace with no indexer config must not get a half-specified
+    /// archive: the agent keys off `bucket` being absent to start empty.
+    #[test]
+    fn pooled_mode_omits_archive_attributes_when_unconfigured() {
+        let volume = workspace_volume(
+            &runner(RunnerCommand::Edit),
+            WorkspaceMode::Pooled,
+            None,
+            None,
+        );
+        let attrs = volume.csi.unwrap().volume_attributes.unwrap();
+        assert!(!attrs.contains_key("bucket"));
+        assert!(!attrs.contains_key("keyPrefix"));
+        assert!(!attrs.contains_key("limitBytes"));
+    }
+
+    /// Render never mutates user data, so its bind is read-only.
+    #[test]
+    fn render_gets_a_read_only_slot_and_edit_does_not() {
+        for (command, expected) in [
+            (RunnerCommand::Render, true),
+            (RunnerCommand::Edit, false),
+            (RunnerCommand::Run, false),
+        ] {
+            let volume =
+                workspace_volume(&runner(command.clone()), WorkspaceMode::Pooled, None, None);
+            assert_eq!(volume.csi.unwrap().read_only, Some(expected), "{command:?}");
+        }
+    }
+
+    /// `fsGroup` on a shared node volume makes kubelet recursively chown every
+    /// slot on the node at each pod start.
+    #[test]
+    fn fs_group_is_only_set_for_dedicated_volumes() {
+        assert_eq!(
+            pod_security_context(WorkspaceMode::Dedicated)
+                .unwrap()
+                .fs_group,
+            Some(1000)
+        );
+        assert!(pod_security_context(WorkspaceMode::Pooled).is_none());
+    }
+
+    #[test]
+    fn indexer_config_maps_into_archive_attributes() {
+        let indexer = WorkspaceIndexer {
+            bucket: Some("b".into()),
+            key_prefix: Some("p/".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            (indexer.bucket.clone(), indexer.key_prefix.clone()),
+            (Some("b".to_string()), Some("p/".to_string()))
+        );
+    }
 }

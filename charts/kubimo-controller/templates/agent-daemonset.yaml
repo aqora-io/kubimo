@@ -17,6 +17,7 @@ spec:
         {{- include "kubimo-controller.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: agent
     spec:
+      serviceAccountName: {{ include "kubimo-controller.fullname" . }}-agent
       # A DaemonSet rather than controller-managed pinned Pods: a bare pod
       # pinned by nodeAffinity can never be rescheduled onto a cordoned node,
       # and a DaemonSet gets tolerations, priorityClassName and correct
