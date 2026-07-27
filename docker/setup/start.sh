@@ -81,9 +81,24 @@ ensure_marimo_venv_config() {
 
 [tool.marimo.venv]
 path = "$VIRTUAL_ENV"
-writable = true
+writable = false
 TOML
   fi
+}
+
+# Sync the workspace venv, but never install marimo into it.
+#
+# marimo is already importable from the image's system site-packages, and that
+# is the *fork's* build. Workspaces created before this change still declare
+# `marimo[recommended,lsp]` in their own pyproject.toml — user data we do not
+# rewrite — and installing it would put a PyPI copy in the venv that shadows
+# the system one. Kernels would then run a different marimo from the server,
+# which marimo only warns about while the two talk over ZeroMQ.
+#
+# `--no-install-package` skips it without touching the user's declared
+# dependencies or their lockfile.
+uv_sync_workspace() {
+  uv sync --no-install-package marimo
 }
 
 is_marimo_venv_configured() {
@@ -102,7 +117,18 @@ sys.exit(0 if "venv" in data.get("tool", {}).get("marimo", {}) else 1)
 # user-installed packages aren't shadowed by the image's system site-packages
 # that launch.py prioritizes for the server.
 if [[ "$CMD" == "edit" ]]; then
-  uv sync
+  # Backgrounded: marimo's --sandbox resolves each kernel's environment lazily
+  # at websocket connect, and /health is a constant response, so nothing about
+  # serving depends on this finishing. The venv itself already exists and is
+  # populated (from the image, via init-dirs or the agent's reflink template),
+  # which is what makes this safe — marimo hard-errors on a *missing* venv but
+  # never on a stale one.
+  #
+  # The trade: a workspace that has added dependencies has a window where they
+  # are not yet installed, and opening a notebook in it shows marimo's
+  # "Install packages" banner. Recoverable, and the same banner users already
+  # get for genuinely missing packages.
+  uv_sync_workspace &
   ensure_marimo_venv_config
   exec marimo \
     "${common_flags[@]}" \
@@ -117,7 +143,8 @@ if [[ "$CMD" == "edit" ]]; then
     "$directory"
 
 elif [[ "$CMD" == "run" ]]; then
-  uv sync
+  # Same reasoning as `edit` above.
+  uv_sync_workspace &
   ensure_marimo_venv_config
   exec marimo \
     "${common_flags[@]}" \
@@ -150,7 +177,7 @@ elif [[ "$CMD" == "render" ]]; then
   exec marimo-ssr serve "${argv[@]}" "$directory"
 
 elif [[ "$CMD" == "cache" ]]; then
-  uv sync
+  uv_sync_workspace
   exec "$VIRTUAL_ENV/bin/python3" /app/cache.py \
     --include-code "${common_flags[@]}"
 

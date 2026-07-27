@@ -7,10 +7,12 @@
 
 mod csi;
 mod hydrate;
+mod kernel;
 mod mount;
 mod quota;
 mod slot;
 mod store;
+mod venv;
 
 use std::path::PathBuf;
 
@@ -56,6 +58,17 @@ enum Command {
         node_name: String,
         #[arg(long, env = "KUBIMO_AGENT_DEFAULT_LIMIT_BYTES", default_value_t = DEFAULT_LIMIT_BYTES)]
         default_limit_bytes: u64,
+        /// Minimum kernel release required to serve slots, e.g. "6.8.0-125".
+        ///
+        /// A shared node volume makes kernel filesystem bugs cross-tenant; see
+        /// CVE-2026-64600. The patched version is distro-specific, so the
+        /// operator supplies it rather than the agent guessing.
+        #[arg(long, env = "KUBIMO_AGENT_MIN_KERNEL_VERSION")]
+        min_kernel_version: Option<String>,
+        /// Serve slots on a kernel below `--min-kernel-version`, or with no
+        /// minimum configured at all.
+        #[arg(long, env = "KUBIMO_AGENT_ALLOW_UNPATCHED_KERNEL")]
+        allow_unpatched_kernel: bool,
         /// Serve slots even when the data volume has no project-quota
         /// enforcement. For development on ext4 only: such slots have **no**
         /// capacity limit, so one workspace can fill the volume and break every
@@ -85,14 +98,18 @@ fn main() {
             socket,
             node_name,
             default_limit_bytes,
+            min_kernel_version,
+            allow_unpatched_kernel,
             allow_unquotaed_slots,
-        } => serve(
-            &args.data_root,
-            &socket,
-            node_name,
-            default_limit_bytes,
-            allow_unquotaed_slots,
-        ),
+        } => check_kernel(min_kernel_version.as_deref(), allow_unpatched_kernel).and_then(|()| {
+            serve(
+                &args.data_root,
+                &socket,
+                node_name,
+                default_limit_bytes,
+                allow_unquotaed_slots,
+            )
+        }),
     };
     if let Err(err) = result {
         tracing::error!("{err}");
@@ -152,6 +169,37 @@ fn create_slot(
     );
     println!("{}", resolved.id);
     Ok(())
+}
+
+/// Enforce the kernel floor before serving any slot.
+fn check_kernel(
+    minimum: Option<&str>,
+    allow_unpatched: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match (minimum, allow_unpatched) {
+        (Some(minimum), _) => match kernel::require_at_least(minimum) {
+            Ok(current) => {
+                tracing::info!(?current, minimum, "kernel meets the required minimum");
+                Ok(())
+            }
+            Err(err) if allow_unpatched => {
+                tracing::warn!("{err}");
+                Ok(())
+            }
+            Err(err) => Err(err.into()),
+        },
+        // No floor configured. Warn rather than refuse — the right value is
+        // distro-specific and we cannot know it — but make the gap visible
+        // instead of letting it pass silently.
+        (None, false) => {
+            tracing::warn!(
+                "no --min-kernel-version set: this node is not gated against kernel filesystem \
+                 bugs, which are cross-tenant on a shared node volume (see CVE-2026-64600)"
+            );
+            Ok(())
+        }
+        (None, true) => Ok(()),
+    }
 }
 
 fn serve(

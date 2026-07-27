@@ -149,6 +149,8 @@ pub async fn flush_slot(
     let (options, keys) = upload_inputs(slot_dir, workspace, archive, false)?;
     indexer::upload::run(
         &options,
+        // One-shot flush; the watcher keeps its own long-lived cache.
+        &indexer::fingerprint::ContentCache::new(),
         client,
         s3,
         &keys,

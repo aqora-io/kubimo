@@ -160,6 +160,8 @@ async fn main() {
             } else {
                 let _ = upload::run(
                     &args.to_options(),
+                    // One-shot: nothing to carry over between runs.
+                    &indexer::fingerprint::ContentCache::new(),
                     &client,
                     &s3,
                     &keys,
