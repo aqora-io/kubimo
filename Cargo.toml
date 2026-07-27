@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "controller",
   "api",
+  "agent",
   "json-patch-macros",
   "indexer",
   "notebook_meta",
