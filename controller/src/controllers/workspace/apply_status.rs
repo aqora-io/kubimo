@@ -2,7 +2,7 @@ use kubimo::k8s_crd_snapshot_storage::VolumeSnapshot;
 use kubimo::k8s_openapi::api::batch::v1::Job;
 use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kubimo::k8s_openapi::jiff::Timestamp;
-use kubimo::{Workspace, WorkspaceStatus, prelude::*};
+use kubimo::{Workspace, WorkspaceMode, WorkspaceStatus, prelude::*};
 
 use crate::context::Context;
 
@@ -11,6 +11,10 @@ use super::WorkspaceReconciler;
 /// `reason` of the `Ready=False` condition written when a Workspace is refused
 /// provisioning because it does not fit its budget.
 pub(crate) const BUDGET_EXCEEDED_REASON: &str = "BudgetExceeded";
+
+/// `reason` of the `Ready=False` condition written when a Workspace asks for
+/// `Pooled` mode before the node agent that implements it exists.
+pub(crate) const POOLED_UNSUPPORTED_REASON: &str = "PooledNotImplemented";
 
 impl WorkspaceReconciler {
     pub(crate) async fn apply_status(
@@ -23,12 +27,14 @@ impl WorkspaceReconciler {
         }
         let namespace = workspace.require_namespace()?;
         let name = workspace.name()?;
+        let mode = workspace.effective_mode(ctx.config.default_workspace_mode);
         let workspace =
             if let Some(job) = ctx.api_namespaced::<Job>(namespace).get_opt(name).await? {
                 update_workspace_status(
                     workspace.clone(),
                     job_last_transition_time(&job),
                     StatusKind::from_job(&job),
+                    mode,
                 )
             } else {
                 let status = if workspace.spec.clone_workspace_name.is_some() {
@@ -48,7 +54,7 @@ impl WorkspaceReconciler {
                     // Not Complete unless its job was created
                     StatusKind::JobNotComplete
                 };
-                update_workspace_status(workspace.clone(), None, status)
+                update_workspace_status(workspace.clone(), None, status, mode)
             };
         ctx.api_namespaced::<Workspace>(namespace)
             .patch_status(&workspace)
@@ -67,10 +73,36 @@ impl WorkspaceReconciler {
             return Ok(());
         }
         let namespace = workspace.require_namespace()?;
+        let mode = workspace.effective_mode(ctx.config.default_workspace_mode);
         let workspace = update_workspace_status(
             workspace.clone(),
             None,
             StatusKind::BudgetExceeded(reason.to_owned()),
+            mode,
+        );
+        ctx.api_namespaced::<Workspace>(namespace)
+            .patch_status(&workspace)
+            .await?;
+        Ok(())
+    }
+
+    /// Mark the workspace not-Ready because it asked for a storage mode this
+    /// controller cannot serve yet. Refusing explicitly keeps a `Pooled`
+    /// workspace from silently getting the dedicated path's PVC and init Job.
+    pub(crate) async fn apply_pooled_unsupported_status(
+        &self,
+        ctx: &Context,
+        workspace: &Workspace,
+    ) -> Result<(), kubimo::Error> {
+        if workspace.metadata.deletion_timestamp.is_some() {
+            return Ok(());
+        }
+        let namespace = workspace.require_namespace()?;
+        let workspace = update_workspace_status(
+            workspace.clone(),
+            None,
+            StatusKind::PooledUnsupported,
+            WorkspaceMode::Pooled,
         );
         ctx.api_namespaced::<Workspace>(namespace)
             .patch_status(&workspace)
@@ -85,6 +117,7 @@ enum StatusKind {
     JobNotComplete,
     JobComplete,
     BudgetExceeded(String),
+    PooledUnsupported,
 }
 
 impl StatusKind {
@@ -121,6 +154,7 @@ fn update_workspace_status(
     mut workspace: Workspace,
     last_transition_time: Option<Time>,
     kind: StatusKind,
+    mode: WorkspaceMode,
 ) -> Workspace {
     let last_transition_time = last_transition_time
         .or(workspace.metadata.creation_timestamp.clone())
@@ -159,6 +193,14 @@ fn update_workspace_status(
             status: "False".into(),
             type_: "Ready".into(),
         },
+        StatusKind::PooledUnsupported => Condition {
+            last_transition_time,
+            observed_generation,
+            message: "Pooled storage mode is not implemented by this controller yet".into(),
+            reason: POOLED_UNSUPPORTED_REASON.into(),
+            status: "False".into(),
+            type_: "Ready".into(),
+        },
     };
     let mut conditions = workspace
         .status
@@ -170,13 +212,20 @@ fn update_workspace_status(
     } else {
         conditions.push(ready);
     }
-    // Send only `conditions`. `storage` is owned by the indexer's field manager
-    // ("kubimo-indexer") under server-side apply; copying it into this patch would
-    // make "kubimo-controller" co-claim those fields and 409-conflict with the
+    // Send only `conditions` and `mode`. `storage` is owned by the indexer's field
+    // manager ("kubimo-indexer") under server-side apply; copying it into this patch
+    // would make "kubimo-controller" co-claim those fields and 409-conflict with the
     // indexer's writes. Omitting it (storage stays `None`, skipped on serialize)
     // leaves the indexer's value untouched on the server.
+    //
+    // `mode` is materialized here so the workspace stops depending on the
+    // operator's default. `effective_mode` already prefers `status.mode`, so
+    // re-writing it every reconcile is idempotent and self-pinning: once set,
+    // changing `KUBIMO__DEFAULT_WORKSPACE_MODE` can never re-mode this object
+    // and orphan its PVC.
     workspace.status = Some(WorkspaceStatus {
         conditions: Some(conditions),
+        mode: Some(mode),
         ..Default::default()
     });
     workspace

@@ -1,3 +1,4 @@
+use kubimo::WorkspaceMode;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -87,19 +88,62 @@ pub struct Config {
     pub cluster_issuer: Option<String>,
     #[serde(default)]
     pub runner_status: StatusCheck,
+    /// Mode given to workspaces that have not yet materialized `status.mode`.
+    /// Changing this only affects new workspaces: existing ones pin their mode
+    /// in status on first reconcile, so flipping this is reversible.
+    #[serde(default)]
+    pub default_workspace_mode: WorkspaceMode,
 }
 
 impl Config {
+    fn environment_source() -> config::Environment {
+        config::Environment::with_prefix("KUBIMO")
+            .separator("__")
+            .try_parsing(true)
+            .list_separator(",")
+            .with_list_parse_key("runner_hosts")
+    }
+
     pub fn load() -> Result<Config, config::ConfigError> {
         config::Config::builder()
-            .add_source(
-                config::Environment::with_prefix("KUBIMO")
-                    .separator("__")
-                    .try_parsing(true)
-                    .list_separator(",")
-                    .with_list_parse_key("runner_hosts"),
-            )
+            .add_source(Self::environment_source())
             .build()?
             .try_deserialize()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_from(vars: &[(&str, &str)]) -> Result<Config, config::ConfigError> {
+        let source = Config::environment_source().source(Some(
+            vars.iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        ));
+        config::Config::builder()
+            .add_source(source)
+            .build()?
+            .try_deserialize()
+    }
+
+    #[test]
+    fn default_workspace_mode_is_dedicated_when_unset() {
+        let config = load_from(&[]).unwrap();
+        assert_eq!(config.default_workspace_mode, WorkspaceMode::Dedicated);
+    }
+
+    /// The cutover switch. If this does not deserialize, flipping the default
+    /// silently does nothing.
+    #[test]
+    fn default_workspace_mode_parses_from_env() {
+        let config = load_from(&[("KUBIMO__DEFAULT_WORKSPACE_MODE", "Pooled")]).unwrap();
+        assert_eq!(config.default_workspace_mode, WorkspaceMode::Pooled);
+    }
+
+    #[test]
+    fn default_workspace_mode_rejects_unknown_value() {
+        assert!(load_from(&[("KUBIMO__DEFAULT_WORKSPACE_MODE", "Nonsense")]).is_err());
     }
 }
