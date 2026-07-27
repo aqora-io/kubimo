@@ -1,0 +1,2 @@
+!(has(oldSelf.spec.mode) && oldSelf.spec.mode == "Pooled") ||
+(has(self.spec.mode) && self.spec.mode == "Pooled")

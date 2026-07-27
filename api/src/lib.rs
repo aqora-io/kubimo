@@ -29,10 +29,11 @@ pub use crd::{
     AutoScale, Budget, BudgetResourceStatus, BudgetSpec, BudgetStatus, CacheJob, CacheJobField,
     CacheJobSpec, LogLevel, Requirement, Runner, RunnerCommand, RunnerField, RunnerIngress,
     RunnerLifecycle, RunnerSpec, RunnerStatus, RunnerTls, RunnerToken, StorageRequirement,
-    Workspace, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory, WorkspaceDirEntry,
-    WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache,
-    WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField, WorkspaceIndexer, WorkspaceIndexerPod,
-    WorkspaceRestoreFrom, WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus, all_crds,
+    Workspace, WorkspaceArchiveStatus, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory,
+    WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo,
+    WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField,
+    WorkspaceIndexer, WorkspaceIndexerPod, WorkspaceMode, WorkspaceRestoreFrom,
+    WorkspaceSlotStatus, WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus, all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;

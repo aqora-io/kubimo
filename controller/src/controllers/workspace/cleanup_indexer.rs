@@ -4,7 +4,7 @@ use kubimo::k8s_openapi::api::core::v1::{
     VolumeMount,
 };
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{Workspace, prelude::*};
+use kubimo::{Workspace, WorkspaceMode, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
@@ -111,6 +111,16 @@ impl WorkspaceReconciler {
         workspace: &Workspace,
     ) -> Result<(), kubimo::Error> {
         if workspace.spec.indexer.is_none() {
+            return Ok(());
+        }
+        // Pooled workspaces have no per-workspace PVC, so the cleanup Job's pod
+        // could never be scheduled and this finalizer would block deletion
+        // forever. There is also no indexer pod to delete: sync is the node
+        // agent's job.
+        //
+        // TODO: once the agent lands, pooled cleanup means dropping the slot and
+        // purging the S3 archive. Today the platform purges the prefix itself.
+        if workspace.effective_mode(ctx.config.default_workspace_mode) == WorkspaceMode::Pooled {
             return Ok(());
         }
         self.delete_indexer_pod_if_exists(ctx, workspace).await?;
