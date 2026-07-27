@@ -138,11 +138,12 @@ impl RunnerReconciler {
                 ..Default::default()
             },
             spec: Some(PodSpec {
-                runtime_class_name: matches!(
-                    runner.spec.command,
-                    RunnerCommand::Edit | RunnerCommand::Run
-                )
-                .then(|| "gvisor".to_string()),
+                // Every command, including Render. Render executes user
+                // notebooks just as Edit and Run do, so leaving it unsandboxed
+                // was a pre-existing gap; a shared node volume makes it much
+                // worse, since an escape reaches every other tenant's slot
+                // rather than one workspace's own PVC.
+                runtime_class_name: sandbox_runtime_class(),
                 automount_service_account_token: Some(false),
                 enable_service_links: Some(false),
                 affinity,
@@ -161,6 +162,11 @@ impl RunnerReconciler {
         };
         ctx.api_namespaced::<Pod>(namespace).patch(&pod).await
     }
+}
+
+/// Sandbox every runner, whatever its command.
+fn sandbox_runtime_class() -> Option<String> {
+    Some("gvisor".to_string())
 }
 
 /// Name of the CSI driver the node agent registers as.
@@ -340,6 +346,13 @@ mod tests {
                 workspace_volume(&runner(command.clone()), WorkspaceMode::Pooled, None, None);
             assert_eq!(volume.csi.unwrap().read_only, Some(expected), "{command:?}");
         }
+    }
+
+    /// Render executes user notebooks too, so it must be sandboxed like the
+    /// others. Regression guard: this used to be Edit/Run only.
+    #[test]
+    fn no_runner_command_is_exempt_from_the_sandbox() {
+        assert_eq!(sandbox_runtime_class().as_deref(), Some("gvisor"));
     }
 
     /// `fsGroup` on a shared node volume makes kubelet recursively chown every
