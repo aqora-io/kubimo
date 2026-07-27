@@ -40,6 +40,10 @@ const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const ATTR_WORKSPACE: &str = "workspace";
 /// Optional per-slot hard capacity limit in bytes, from `spec.storage.max`.
 const ATTR_LIMIT_BYTES: &str = "limitBytes";
+/// Bucket and key prefix of the workspace's S3 archive, from `spec.indexer`.
+/// Absent means "do not hydrate" — used by workspaces with no archive.
+const ATTR_BUCKET: &str = "bucket";
+const ATTR_KEY_PREFIX: &str = "keyPrefix";
 
 /// Owner of a slot's contents: the `me` user baked into the marimo image.
 const SLOT_UID: u32 = 1000;
@@ -91,6 +95,45 @@ pub struct KubimoNode {
     /// break every other tenant on that node. Silently degrading would be the
     /// easiest way to ship unlimited slots to production by accident.
     allow_unquotaed_slots: bool,
+    /// Built once from the process environment (AWS_*), shared across slots so
+    /// one connection pool serves every workspace on the node.
+    s3: indexer::s3::S3Client,
+    /// Kubernetes client used to refresh `WorkspaceDirectory` CRs when flushing.
+    /// `None` when the agent runs without cluster access, in which case slots
+    /// still hydrate and mount but are never pushed back.
+    client: Option<kubimo::Client>,
+}
+
+/// Give a restored tree to the runner's uid.
+///
+/// The agent writes as root, so without this the runner (uid 1000) cannot
+/// modify its own files. `fsGroup` cannot do this job: on a shared node volume
+/// kubelet would apply it to every slot on the node, not just this one.
+fn chown_tree(dir: &Path) -> std::io::Result<()> {
+    for entry in walkdir(dir)? {
+        std::os::unix::fs::chown(&entry, Some(SLOT_UID), Some(SLOT_GID))?;
+    }
+    Ok(())
+}
+
+/// Depth-first listing of `dir` and everything under it.
+///
+/// Deliberately does not follow symlinks: the tree contains tenant-controlled
+/// paths, and following a planted link would chown something outside the slot.
+fn walkdir(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut found = vec![dir.to_path_buf()];
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in std::fs::read_dir(&next)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                stack.push(path.clone());
+            }
+            found.push(path);
+        }
+    }
+    Ok(found)
 }
 
 impl KubimoNode {
@@ -99,12 +142,53 @@ impl KubimoNode {
         store: SlotStore,
         default_limit_bytes: u64,
         allow_unquotaed_slots: bool,
+        client: Option<kubimo::Client>,
     ) -> Self {
         Self {
             node_id,
             store,
             default_limit_bytes,
             allow_unquotaed_slots,
+            s3: indexer::s3::S3Client::from_env(),
+            client,
+        }
+    }
+
+    /// Push a published slot's tracked files to S3.
+    ///
+    /// Never fails the unpublish. The slot keeps its data on disk either way, so
+    /// a failed flush is recoverable — whereas refusing to unmount would leave
+    /// the pod stuck Terminating and block the node from draining.
+    async fn flush_published(&self, volume_id: &str) {
+        let Some(client) = self.client.as_ref() else {
+            return;
+        };
+        let published = match self.store.lookup_publish(volume_id) {
+            Ok(Some(published)) => published,
+            // Unknown volume: the agent restarted, or this workspace was never
+            // published by us. Nothing to flush.
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!(%err, "could not read publish record; skipping flush");
+                return;
+            }
+        };
+        // No bucket recorded means the workspace has no archive configured;
+        // there is nowhere to flush to.
+        let Some(bucket) = published.bucket.clone() else {
+            return;
+        };
+        let archive = crate::hydrate::ArchiveLocation {
+            bucket,
+            key_prefix: published.key_prefix.clone(),
+        };
+        let workspace = published.workspace;
+        let dir = self.store.layout().slot_dir(&published.slot);
+        tracing::info!(workspace, slot = %published.slot, "flushing slot to S3");
+        if let Err(err) =
+            crate::hydrate::flush_slot(&dir, &workspace, &archive, client, &self.s3).await
+        {
+            tracing::error!(%err, workspace, "flush failed; slot data is still on disk");
         }
     }
 
@@ -114,7 +198,12 @@ impl KubimoNode {
     /// re-stamping a project id on every publish would be wasted work, and
     /// re-chowning could stomp on files the tenant deliberately made
     /// more restrictive.
-    fn prepare_slot(&self, workspace: &str, limit_bytes: u64) -> Result<PathBuf, Status> {
+    async fn prepare_slot(
+        &self,
+        workspace: &str,
+        limit_bytes: u64,
+        archive: Option<&crate::hydrate::ArchiveLocation>,
+    ) -> Result<PathBuf, Status> {
         let resolved = self
             .store
             .resolve_or_create(workspace)
@@ -167,6 +256,19 @@ impl KubimoNode {
                 limit_bytes,
                 "allocated slot"
             );
+            // Only a freshly created slot is hydrated. Re-hydrating one that is
+            // already populated would overwrite the tenant's newer local edits
+            // with whatever was last synced — this is the path that makes
+            // reopening a workspace with a warm slot instant.
+            if let Some(archive) = archive {
+                let hydrated = crate::hydrate::hydrate_slot(&dir, archive, &self.s3)
+                    .await
+                    .map_err(|err| Status::internal(format!("hydrating slot: {err}")))?;
+                tracing::info!(workspace, slot = %resolved.id, hydrated, "slot hydrated");
+                // Restored files land as root; the runner is uid 1000.
+                chown_tree(&dir)
+                    .map_err(|err| Status::internal(format!("chowning hydrated slot: {err}")))?;
+            }
         }
         Ok(dir)
     }
@@ -222,7 +324,36 @@ impl Node for KubimoNode {
             })?,
         };
 
-        let slot_dir = self.prepare_slot(&workspace, limit_bytes)?;
+        let archive =
+            request
+                .volume_context
+                .get(ATTR_BUCKET)
+                .map(|bucket| crate::hydrate::ArchiveLocation {
+                    bucket: bucket.clone(),
+                    key_prefix: request.volume_context.get(ATTR_KEY_PREFIX).cloned(),
+                });
+        let slot_dir = self
+            .prepare_slot(&workspace, limit_bytes, archive.as_ref())
+            .await?;
+        if let Some(slot) = self
+            .store
+            .lookup(&workspace)
+            .map_err(|err| Status::internal(format!("looking up slot: {err}")))?
+            && let Err(err) = self.store.record_publish(
+                &request.volume_id,
+                &crate::store::PublishedSlot {
+                    workspace: workspace.clone(),
+                    slot: slot.id,
+                    bucket: archive.as_ref().map(|a| a.bucket.clone()),
+                    key_prefix: archive.as_ref().and_then(|a| a.key_prefix.clone()),
+                },
+            )
+        {
+            // Not fatal: the mount is what the pod needs. Losing the record only
+            // means the flush on unpublish is skipped, and the slot keeps the
+            // data on disk either way.
+            tracing::warn!(%err, workspace, "could not record publish; flush on stop will be skipped");
+        }
         let target = Path::new(&request.target_path);
         let mounted = crate::mount::bind(&slot_dir, target, request.readonly)
             .map_err(|err| Status::internal(format!("publishing slot: {err}")))?;
@@ -246,6 +377,10 @@ impl Node for KubimoNode {
             return Err(Status::invalid_argument("target_path is required"));
         }
         let target = Path::new(&request.target_path);
+        // Flush before unmounting: this is the durability boundary. The runner's
+        // containers have already stopped by the time kubelet calls this, so the
+        // tree is quiescent.
+        self.flush_published(&request.volume_id).await;
         let unmounted = crate::mount::unbind(target)
             .map_err(|err| Status::internal(format!("unpublishing slot: {err}")))?;
         // The slot itself deliberately survives: keeping it lets the next open
@@ -254,6 +389,7 @@ impl Node for KubimoNode {
         if unmounted {
             // kubelet creates the target directory, so it is ours to remove.
             let _ = std::fs::remove_dir(target);
+            self.store.forget_publish(&request.volume_id);
             tracing::info!(target = %target.display(), "unpublished slot");
         }
         Ok(Response::new(proto::NodeUnpublishVolumeResponse {}))
@@ -350,7 +486,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("csi.sock");
         let store = SlotStore::new(crate::slot::SlotLayout::new(dir.path()));
-        let node = KubimoNode::new("test-node".into(), store, 1024, allow_unquotaed_slots);
+        let node = KubimoNode::new("test-node".into(), store, 1024, allow_unquotaed_slots, None);
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         tokio::spawn(async move {
             tonic::transport::Server::builder()

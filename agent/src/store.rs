@@ -57,6 +57,18 @@ pub struct SlotStore {
     layout: SlotLayout,
 }
 
+/// A slot currently published to a runner pod, and where its archive lives.
+///
+/// Recorded at publish time because `NodeUnpublishVolume` receives only the
+/// volume id — not the volume attributes that carried the archive location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedSlot {
+    pub workspace: String,
+    pub slot: SlotId,
+    pub bucket: Option<String>,
+    pub key_prefix: Option<String>,
+}
+
 /// A slot resolved for a workspace, and whether this call created it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSlot {
@@ -171,6 +183,74 @@ impl SlotStore {
         Ok(())
     }
 
+    fn publish_path(&self, volume_id: &str) -> PathBuf {
+        // The volume id is kubelet-generated (`csi-<hex>`), but it still reaches
+        // us from outside, so hash it rather than trusting it as a filename.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in volume_id.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.index_dir().join(format!("vol-{hash:016x}"))
+    }
+
+    /// Remember what a published volume maps to.
+    ///
+    /// `NodeUnpublishVolume` receives only the volume id and target path — not
+    /// the volume attributes — so without this the agent could not tell which
+    /// workspace to flush when a runner goes away.
+    pub fn record_publish(
+        &self,
+        volume_id: &str,
+        published: &PublishedSlot,
+    ) -> Result<(), StoreError> {
+        validate_workspace_name(&published.workspace)?;
+        std::fs::create_dir_all(self.index_dir()).map_err(io_err("creating index dir"))?;
+        // Line-oriented rather than JSON to keep the agent's on-disk state
+        // trivially inspectable during an incident.
+        let body = format!(
+            "{}\n{}\n{}\n{}",
+            published.workspace,
+            published.slot,
+            published.bucket.as_deref().unwrap_or(""),
+            published.key_prefix.as_deref().unwrap_or(""),
+        );
+        std::fs::write(self.publish_path(volume_id), body).map_err(io_err("recording publish"))?;
+        Ok(())
+    }
+
+    /// What a published volume maps to, if it is still recorded.
+    pub fn lookup_publish(&self, volume_id: &str) -> Result<Option<PublishedSlot>, StoreError> {
+        let raw = match std::fs::read_to_string(self.publish_path(volume_id)) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io_err("reading publish record")(err)),
+        };
+        let mut lines = raw.lines();
+        let (Some(workspace), Some(slot)) = (lines.next(), lines.next()) else {
+            return Ok(None);
+        };
+        let slot = SlotId::parse(slot).map_err(|source| StoreError::CorruptIndex {
+            workspace: workspace.to_string(),
+            source,
+        })?;
+        let non_empty = |value: Option<&str>| {
+            value
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        };
+        Ok(Some(PublishedSlot {
+            workspace: workspace.to_string(),
+            slot,
+            bucket: non_empty(lines.next()),
+            key_prefix: non_empty(lines.next()),
+        }))
+    }
+
+    pub fn forget_publish(&self, volume_id: &str) {
+        let _ = std::fs::remove_file(self.publish_path(volume_id));
+    }
+
     /// Resolve the slot for `workspace`, allocating one if it has none.
     pub fn resolve_or_create(&self, workspace: &str) -> Result<ResolvedSlot, StoreError> {
         validate_workspace_name(workspace)?;
@@ -265,6 +345,42 @@ mod tests {
                 "accepted {name:?}"
             );
         }
+    }
+
+    #[test]
+    fn publish_records_round_trip() {
+        let (_dir, store) = store();
+        let slot = store.resolve_or_create("bmow-abc").unwrap();
+        let published = PublishedSlot {
+            workspace: "bmow-abc".to_string(),
+            slot: slot.id.clone(),
+            bucket: Some("bucket".to_string()),
+            key_prefix: Some("workspace/abc/".to_string()),
+        };
+        store.record_publish("csi-deadbeef", &published).unwrap();
+        assert_eq!(
+            store.lookup_publish("csi-deadbeef").unwrap().unwrap(),
+            published
+        );
+        store.forget_publish("csi-deadbeef");
+        assert!(store.lookup_publish("csi-deadbeef").unwrap().is_none());
+    }
+
+    /// Unpublishing a volume the agent never published (it restarted, or the
+    /// record was reaped) must not error — kubelet retries until it succeeds.
+    #[test]
+    fn lookup_publish_is_none_for_an_unknown_volume() {
+        let (_dir, store) = store();
+        assert!(store.lookup_publish("csi-never-seen").unwrap().is_none());
+    }
+
+    /// A volume id reaches us from outside; it must never be used as a path
+    /// component directly.
+    #[test]
+    fn publish_record_path_stays_inside_the_index() {
+        let (_dir, store) = store();
+        let path = store.publish_path("../../etc/passwd");
+        assert_eq!(path.parent().unwrap(), store.index_dir());
     }
 
     #[test]

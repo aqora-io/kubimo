@@ -6,7 +6,6 @@ use kubimo::{WorkspaceManifest, url::Url};
 use thiserror::Error;
 use tokio::{sync::Semaphore, task::JoinSet};
 
-use crate::DownloadArgs;
 use crate::disk;
 use crate::s3::{DownloadError, S3Client};
 
@@ -118,7 +117,21 @@ pub enum RestoreError {
 }
 
 /// Restore an archive into `args.directory` from its manifest in S3.
-pub async fn restore(args: &DownloadArgs, s3: &S3Client) -> Result<(), RestoreError> {
+/// Everything [`restore`] needs, without depending on the binary's clap types
+/// so the node agent can call it too.
+#[derive(Debug, Clone)]
+pub struct RestoreOptions {
+    /// Bucket holding the archive.
+    pub bucket: String,
+    pub key_prefix: Option<String>,
+    /// Where to write the restored tree.
+    pub directory: PathBuf,
+    pub max_download_concurrency: usize,
+    /// Continue past per-file download errors instead of failing the restore.
+    pub best_effort: bool,
+}
+
+pub async fn restore(args: &RestoreOptions, s3: &S3Client) -> Result<(), RestoreError> {
     let manifest_url = kubimo::manifest_url(&args.bucket, args.key_prefix.as_deref())?;
     let bytes = s3.get_bytes(&manifest_url).await?;
     let manifest: WorkspaceManifest = serde_json::from_slice(&bytes)?;
