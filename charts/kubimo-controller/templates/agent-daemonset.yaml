@@ -1,0 +1,122 @@
+{{- if .Values.agent.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "kubimo-controller.fullname" . }}-agent
+  labels:
+    {{- include "kubimo-controller.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  selector:
+    matchLabels:
+      {{- include "kubimo-controller.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent
+  template:
+    metadata:
+      labels:
+        {{- include "kubimo-controller.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: agent
+    spec:
+      # A DaemonSet rather than controller-managed pinned Pods: a bare pod
+      # pinned by nodeAffinity can never be rescheduled onto a cordoned node,
+      # and a DaemonSet gets tolerations, priorityClassName and correct
+      # autoscaler handling for free.
+      {{- with .Values.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          args:
+            - --data-root=/data
+            - serve
+            - --socket=/csi/csi.sock
+            {{- if .Values.agent.allowUnquotaedSlots }}
+            # DEVELOPMENT ONLY. Slots get no capacity limit, so one workspace
+            # can fill the node volume and break every other tenant on it.
+            - --allow-unquotaed-slots
+            {{- end }}
+          env:
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: RUST_LOG
+              value: {{ .Values.agent.rustLog | quote }}
+          securityContext:
+            # Required for mount(2), the fsxattr ioctl and quotactl_fd. This
+            # makes the agent tier-0 trusted: it can see every tenant's files.
+            privileged: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: plugin-dir
+              mountPath: /csi
+            - name: pods-dir
+              mountPath: /var/lib/kubelet/pods
+              # Bidirectional so bind mounts the agent creates propagate back
+              # out to kubelet's namespace, where the runner pod sees them.
+              mountPropagation: Bidirectional
+        - name: node-driver-registrar
+          image: "{{ .Values.agent.registrarImage }}"
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ .Values.agent.kubeletDir }}/plugins/{{ .Values.agent.driverName }}/csi.sock
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+      volumes:
+        # The node data volume, as a *generic ephemeral volume*.
+        #
+        # A DaemonSet cannot mount a per-node PVC: `claimName` is a static
+        # string and DaemonSets have no `volumeClaimTemplates`, so every node
+        # would contend for one claim. A generic ephemeral volume creates one
+        # PVC per pod (`<pod>-data`), which is exactly per-node.
+        #
+        # The alternative — the agent holding a block volume and mounting it
+        # into the host namespace — was measured on Scaleway and rejected: the
+        # volume detaches ~10s after the holding pod is deleted, leaving a mount
+        # entry whose device is gone. The path then looks mounted while every
+        # I/O returns EIO, and a replacement agent cannot mount over it. Letting
+        # kubelet own the whole lifecycle avoids that class of failure entirely.
+        #
+        # The cost is that slots do not survive replacement of the agent pod and
+        # are re-hydrated from S3. That is not an extra cost: an agent restart
+        # already invalidates every runner's bind mount on this node.
+        - name: data
+          ephemeral:
+            volumeClaimTemplate:
+              metadata:
+                labels:
+                  {{- include "kubimo-controller.selectorLabels" . | nindent 18 }}
+                  app.kubernetes.io/component: agent
+              spec:
+                accessModes: ["ReadWriteOnce"]
+                storageClassName: {{ .Values.agent.dataVolume.storageClassName }}
+                resources:
+                  requests:
+                    storage: {{ .Values.agent.dataVolume.size }}
+        - name: plugin-dir
+          hostPath:
+            path: {{ .Values.agent.kubeletDir }}/plugins/{{ .Values.agent.driverName }}
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: {{ .Values.agent.kubeletDir }}/plugins_registry
+            type: Directory
+        - name: pods-dir
+          hostPath:
+            path: {{ .Values.agent.kubeletDir }}/pods
+            type: Directory
+{{- end }}

@@ -1,0 +1,27 @@
+{{- if .Values.agent.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: {{ .Values.agent.driverName }}
+  labels:
+    {{- include "kubimo-controller.labels" . | nindent 4 }}
+spec:
+  # Slots are handed out as inline ephemeral volumes, not PersistentVolumes.
+  # This is what keeps the normal scheduler in charge: an inline volume imposes
+  # no topology constraint, so autoscaler scale-up, drain and cordon behave
+  # normally. A per-node PVC would force hostname pinning, which the
+  # cluster-autoscaler can never satisfy against its template node.
+  volumeLifecycleModes:
+    - Ephemeral
+  # The driver needs the pod's namespace and name to resolve which workspace
+  # slot to mount.
+  podInfoOnMount: true
+  # Nothing to attach: slots are directories on a volume that is already
+  # mounted on the node.
+  attachRequired: false
+  # The agent chowns exactly the slot it creates. Leaving this to kubelet would
+  # make it recursively chown the *entire* shared data volume — every slot on
+  # the node — on every pod start, which on a full node takes long enough to
+  # blow past the runner's startup probe.
+  fsGroupPolicy: None
+{{- end }}

@@ -1,0 +1,28 @@
+{{- if and .Values.agent.enabled .Values.agent.dataVolume.createStorageClass }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.agent.dataVolume.storageClassName }}
+  labels:
+    {{- include "kubimo-controller.labels" . | nindent 4 }}
+provisioner: {{ .Values.agent.dataVolume.provisioner }}
+parameters:
+  # xfs, because per-slot capacity is enforced with XFS project quotas.
+  csi.storage.k8s.io/fstype: xfs
+mountOptions:
+  # `prjquota` is accounting AND enforcement. It is also what makes statvfs()
+  # inside a project tree report the project's quota as the filesystem size,
+  # which is how a workspace sees its own limit via `df` and how the indexer
+  # reports storage usage without any changes.
+  #
+  # `pqnoenforce` would NOT do: it accounts without enforcing and disables that
+  # statvfs override.
+  #
+  # These only take effect on the filesystem's first mount (NodeStageVolume
+  # short-circuits if already staged), which is fine here because a generic
+  # ephemeral volume is always freshly provisioned.
+  - prjquota
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+{{- end }}

@@ -127,6 +127,26 @@ pub enum QuotaError {
          (is the filesystem mounted with `prjquota`?)"
     )]
     SetLimit { project_id: u32, source: io::Error },
+    #[error("reading mount options: {0}")]
+    MountOptions(String),
+}
+
+/// Whether the filesystem holding `fs_root` is mounted with project quota
+/// *enforcement*.
+///
+/// `pquota`/`prjquota` mean accounting **and** enforcement; `pqnoenforce`
+/// accounts only, and — importantly — also disables the `statvfs` override that
+/// makes a slot report its quota as its filesystem size, which is what keeps
+/// the indexer's disk-usage reporting honest. So `pqnoenforce` deliberately
+/// does not count as supported.
+pub fn project_quota_enforced(fs_root: &Path) -> Result<bool, QuotaError> {
+    let options = crate::mount::super_options_for(fs_root)
+        .map_err(|err| QuotaError::MountOptions(err.to_string()))?;
+    Ok(options.is_some_and(|options| {
+        options
+            .split(',')
+            .any(|option| option == "prjquota" || option == "pquota")
+    }))
 }
 
 /// Convert a byte limit to XFS basic blocks, rounding **up** so a slot never
