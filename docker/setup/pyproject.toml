@@ -3,7 +3,13 @@ name = "workspace"
 version = "0.1.0"
 requires-python = ">=3.10"
 
-dependencies = ["marimo[recommended,lsp]"]
+# marimo is deliberately absent. The image installs marimo[recommended,lsp] from
+# the aqora wheel into the *system* interpreter, and this venv is created with
+# --system-site-packages, so it inherits that build. Declaring marimo here made
+# `uv sync` install a second copy from PyPI which shadowed it — a ~920MB
+# duplicate that also left kernels running a different marimo (upstream) from
+# the server (the fork). Add project dependencies with `uv add`.
+dependencies = []
 
 [dependency-groups]
 dev = [
@@ -22,4 +28,10 @@ build-backend = "pdm.backend"
 
 [tool.marimo.venv]
 path = "/home/me/venv"
-writable = true
+# false, because marimo is already importable here via system-site-packages.
+# When true, marimo runs `uv pip install marimo==<server version> pyzmq==<ver>`
+# into this venv on *every* kernel start — synchronously, on the server's event
+# loop, which also serialises concurrent notebook opens. It does not gate
+# package installs: `uv add` and the Install-packages banner write here either
+# way.
+writable = false

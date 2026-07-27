@@ -33,6 +33,7 @@ use tokio::{
     task::JoinSet,
 };
 
+use crate::fingerprint::ContentCache;
 use crate::keys::{WorkspaceDirNameSet, WorkspaceFileUrlSet};
 use crate::python::{Notebook, get_marimo_notebook};
 use crate::s3::{CacheMarkers, S3Client, UploadError};
@@ -109,6 +110,8 @@ pub struct WorkerOptions {
     upload_content: bool,
     upload_permits: Arc<Semaphore>,
     keys: WorkspaceKeys,
+    /// Lets an unchanged file skip being read and HEADed entirely.
+    content_cache: ContentCache,
 }
 
 #[derive(Clone)]
@@ -333,9 +336,22 @@ impl EntryWorker {
         if !metadata.is_file() {
             return Ok(None);
         }
-        self.upload(path, size, tokio::fs::File::open(full_path).await?)
-            .await
-            .map(Some)
+        // The whole point of the fingerprint: without this, every filesystem
+        // event re-reads every file in the workspace to compute its crc32 and
+        // issues a HEAD per file, because the cache marker is only consulted
+        // *after* the read.
+        let modified = metadata.modified().ok();
+        if let Some(cached) = self.opts.content_cache.get(path, modified, size).await {
+            return Ok(Some(cached));
+        }
+        let uploaded = self
+            .upload(path, size, tokio::fs::File::open(full_path).await?)
+            .await?;
+        self.opts
+            .content_cache
+            .insert(path.to_path_buf(), modified, size, &uploaded)
+            .await;
+        Ok(Some(uploaded))
     }
 
     async fn process_file(
@@ -538,6 +554,26 @@ pub async fn process_existing_dirs(
             let Some(file) = &entry.file else {
                 continue;
             };
+            // Re-seed the *content* url first, and before the marimo check —
+            // a plain file has no marimo block and would otherwise never be
+            // re-seeded at all. Without this every restart mints a fresh random
+            // key for the same path, re-uploads the content under it, and
+            // orphans the old object forever: nothing else ever deletes it.
+            if let Some(content) = &file.content {
+                previous_urls.insert(content.url.clone());
+                if let Err(err) = urls.insert(path.clone(), &content.url) {
+                    tracing::warn!(
+                        "Error inserting workspace content url for {}: {}",
+                        path.display(),
+                        err
+                    );
+                }
+                if let Some(e_tag) = &content.e_tag
+                    && let Some(crc32) = &content.crc32
+                {
+                    cache_markers.insert(content.url.clone(), *crc32, e_tag.clone());
+                }
+            }
             let Some(marimo) = &file.marimo else {
                 continue;
             };
@@ -633,6 +669,12 @@ pub async fn clean(client: &kubimo::Client, s3: &S3Client, name: &str) {
             let Some(file) = &entry.file else {
                 continue;
             };
+            // Delete the file's content too. `clean` used to remove only the
+            // marimo meta/cache objects, so deleting a workspace left every
+            // uploaded file behind in the bucket forever.
+            if let Some(content) = &file.content {
+                futs.push(clean_url(s3, content.url.clone()).boxed());
+            }
             let Some(marimo) = &file.marimo else {
                 continue;
             };
@@ -717,6 +759,7 @@ pub struct RunResult {
 
 pub async fn run(
     args: &UploadOptions,
+    content_cache: &ContentCache,
     client: &kubimo::Client,
     s3: &S3Client,
     keys: &WorkspaceKeys,
@@ -748,6 +791,7 @@ pub async fn run(
         &mut join_set,
         rx,
         WorkerOptions {
+            content_cache: content_cache.clone(),
             s3: s3.clone(),
             directory: Arc::new(args.directory.clone()),
             max_file_size: args.max_file_size,
@@ -765,6 +809,12 @@ pub async fn run(
     let mut workspace_dirs = BTreeMap::new();
     while let Some((path, entry)) = rx.recv().await {
         let name = keys.dir_name(path.clone()).await;
+        // Content urls belong in the live set too: `previous_urls` minus this
+        // is what gets deleted from S3, so leaving content out meant a removed
+        // or renamed file's object was never swept.
+        if let Some(content) = entry.file.as_ref().and_then(|file| file.content.as_ref()) {
+            urls.insert(content.url.clone());
+        }
         if let Some(marimo) = entry.file.as_ref().and_then(|file| file.marimo.as_ref()) {
             if let Some(url) = marimo.meta_json.as_ref() {
                 urls.insert(url.url.clone());
@@ -855,6 +905,16 @@ pub async fn run(
             paths.lock().await.clone()
         }
     };
+    // Drop fingerprints for files that no longer exist, so a watcher running
+    // for days does not accumulate an entry per file ever seen. `paths` holds
+    // absolute paths (it doubles as the watch set) while the cache is keyed
+    // workspace-relative, hence the strip.
+    let live: BTreeSet<PathBuf> = paths
+        .iter()
+        .filter_map(|path| path.strip_prefix(args.directory.as_path()).ok())
+        .map(Path::to_path_buf)
+        .collect();
+    content_cache.retain_paths(&live).await;
     RunResult { names, urls, paths }
 }
 
@@ -936,6 +996,9 @@ pub async fn watch(
     mut previous_names: BTreeSet<String>,
     mut previous_urls: BTreeSet<Url>,
 ) {
+    // Lives for the whole watch, which is what makes the fingerprint useful:
+    // a per-run cache would be empty on every event and skip nothing.
+    let content_cache = ContentCache::new();
     let mut watcher = Watcher::new(
         Duration::from_millis(args.watch_debounce_millis),
         Duration::from_millis(args.watch_max_wait_millis),
@@ -943,7 +1006,16 @@ pub async fn watch(
     )
     .expect("Could not create watcher");
     loop {
-        let res = run(args, client, s3, keys, &previous_names, &previous_urls).await;
+        let res = run(
+            args,
+            &content_cache,
+            client,
+            s3,
+            keys,
+            &previous_names,
+            &previous_urls,
+        )
+        .await;
         if let Err(err) = watcher.watch(res.paths) {
             tracing::error!("Error watching paths: {err}");
         }
@@ -967,5 +1039,56 @@ pub async fn watch(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The optimisation only pays off if the fingerprint survives *between*
+    /// runs. `watch` owns one cache for its whole lifetime; a per-run cache
+    /// would be empty on every event and skip nothing, which is the bug this
+    /// guards against.
+    #[tokio::test]
+    async fn a_cache_hit_avoids_re_reading_an_unchanged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notebook.py");
+        std::fs::write(&file, b"import marimo").unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        let modified = meta.modified().ok();
+        let size = meta.len();
+
+        let cache = ContentCache::new();
+        let relative = std::path::PathBuf::from("notebook.py");
+        let content = WorkspaceDirContentUrl {
+            url: "s3://bucket/abc".parse().unwrap(),
+            crc32: Some(1),
+            e_tag: Some("e".into()),
+        };
+
+        // First pass: nothing cached, so the caller would read and upload.
+        assert!(cache.get(&relative, modified, size).await.is_none());
+        cache
+            .insert(relative.clone(), modified, size, &content)
+            .await;
+
+        // Second pass over an untouched file: served from the fingerprint, so
+        // no read and no HEAD.
+        let hit = cache.get(&relative, modified, size).await;
+        assert!(hit.is_some(), "unchanged file should hit the cache");
+        assert_eq!(hit.unwrap().url.to_string(), "s3://bucket/abc");
+
+        // Touching it invalidates.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&file, b"import marimo  # edited").unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        assert!(
+            cache
+                .get(&relative, meta.modified().ok(), meta.len())
+                .await
+                .is_none(),
+            "an edited file must miss"
+        );
     }
 }

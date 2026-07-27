@@ -33,6 +33,39 @@ spec:
       {{- with .Values.agent.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
+      initContainers:
+        # Stage the marimo image's /home/me skeleton onto the node data volume once, so each
+        # slot can take a reflink copy of it instead of the runner rebuilding
+        # ~920MB from scratch. Uses the marimo image because that is where the
+        # venv lives; the agent image has no Python.
+        - name: venv-template
+          image: "{{ .Values.agent.marimoImage }}"
+          securityContext:
+            # The marimo image runs as uid 1000, but the freshly provisioned
+            # data volume is root-owned, so the copy needs root — the same
+            # reason the dedicated path's init-dirs container runs as root.
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              dest=/data/home-template
+              # Only stage once per node volume, and stage atomically so a
+              # crashed init container never leaves a half-copied template that
+              # slots would then reflink.
+              if [ -d "$dest" ]; then
+                echo "venv template already staged"
+                exit 0
+              fi
+              rm -rf "$dest.partial"
+              cp -a /home/me "$dest.partial"
+              mv "$dest.partial" "$dest"
+              echo "staged venv template"
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
         - name: agent
           image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Chart.AppVersion }}"
@@ -41,6 +74,12 @@ spec:
             - --data-root=/data
             - serve
             - --socket=/csi/csi.sock
+            {{- with .Values.agent.minKernelVersion }}
+            - --min-kernel-version={{ . }}
+            {{- end }}
+            {{- if .Values.agent.allowUnpatchedKernel }}
+            - --allow-unpatched-kernel
+            {{- end }}
             {{- if .Values.agent.allowUnquotaedSlots }}
             # DEVELOPMENT ONLY. Slots get no capacity limit, so one workspace
             # can fill the node volume and break every other tenant on it.
