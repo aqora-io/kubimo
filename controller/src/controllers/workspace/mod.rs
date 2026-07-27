@@ -38,13 +38,14 @@ impl Reconciler for WorkspaceReconciler {
     type Error = kubimo::Error;
 
     async fn apply(&self, ctx: &Context, workspace: &Workspace) -> Result<Action, Self::Error> {
-        // The pooled data path (per-node data volume, slot CSI driver, agent
-        // hydration from S3) is not implemented yet. Refuse it explicitly:
-        // falling through would run the dedicated path and provision a
-        // per-workspace PVC plus an init Job, which is exactly what pooled mode
-        // exists to avoid, while looking like it worked.
+        // A pooled workspace owns no cluster resources of its own. Its files
+        // live in S3 and its slot is carved out of the node data volume by the
+        // agent when kubelet publishes the runner's inline volume — so there is
+        // no PVC to size, no init Job to seed a volume, and no per-workspace
+        // indexer pod. Falling through to the dedicated path would provision
+        // exactly the per-workspace volume pooled mode exists to avoid.
         if workspace.effective_mode(ctx.config.default_workspace_mode) == WorkspaceMode::Pooled {
-            self.apply_pooled_unsupported_status(ctx, workspace).await?;
+            self.apply_status(ctx, workspace).await?;
             return Ok(Action::await_change());
         }
         let (plan, current_limit) = self.plan_storage(ctx, workspace).await?;

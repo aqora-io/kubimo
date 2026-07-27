@@ -1,11 +1,13 @@
+use std::collections::BTreeMap;
+
 use kubimo::k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction,
+    CSIVolumeSource, Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction,
     PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec, Probe, Volume,
     VolumeMount,
 };
 use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{Runner, RunnerCommand, prelude::*};
+use kubimo::{Runner, RunnerCommand, Workspace, WorkspaceMode, prelude::*};
 
 use crate::Config;
 use crate::command::cmd;
@@ -23,6 +25,24 @@ impl RunnerReconciler {
         runner: &Runner,
     ) -> Result<Pod, kubimo::Error> {
         let namespace = runner.require_namespace()?;
+        // The workspace decides how storage is attached. It is guaranteed to
+        // exist here: the reconciler already gated on it being Ready.
+        let workspace = ctx
+            .api_namespaced::<Workspace>(namespace)
+            .get_opt(&runner.spec.workspace)
+            .await?;
+        let mode = workspace
+            .as_ref()
+            .map(|workspace| workspace.effective_mode(ctx.config.default_workspace_mode))
+            .unwrap_or(ctx.config.default_workspace_mode);
+        // The slot quota comes from `max`, not `min`: unused quota costs nothing
+        // on a shared volume, so sizing to the ceiling retires the disk-full
+        // failure class instead of reproducing it per slot.
+        let storage_limit_bytes = workspace
+            .as_ref()
+            .and_then(|workspace| workspace.spec.storage.as_ref())
+            .and_then(|storage| storage.max.as_ref())
+            .and_then(|max| max.to_bytes());
         let ingress_path = ingress_path(runner)?;
         let path_prefix = ingress_path.strip_suffix('/').unwrap_or(&ingress_path);
         let mut command = cmd!["bash", "/setup/start.sh", "--base-url", ingress_path,];
@@ -120,25 +140,78 @@ impl RunnerReconciler {
                 automount_service_account_token: Some(false),
                 enable_service_links: Some(false),
                 affinity,
-                security_context: Some(PodSecurityContext {
-                    fs_group: Some(1000),
-                    ..Default::default()
-                }),
+                security_context: pod_security_context(mode),
                 hostname: Some("kubimo".into()),
                 containers,
-                volumes: Some(vec![Volume {
-                    name: runner.spec.workspace.clone(),
-                    persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                        claim_name: runner.spec.workspace.clone(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }]),
+                volumes: Some(vec![workspace_volume(runner, mode, storage_limit_bytes)]),
                 ..Default::default()
             }),
             ..Default::default()
         };
         ctx.api_namespaced::<Pod>(namespace).patch(&pod).await
+    }
+}
+
+/// Name of the CSI driver the node agent registers as.
+const SLOT_CSI_DRIVER: &str = "kubimo.aqora.io";
+
+/// The volume mounted at `/home/me`.
+///
+/// `Dedicated` uses the workspace's own PVC. `Pooled` uses an **inline
+/// ephemeral** CSI volume served by the node agent, which resolves the
+/// workspace to a slot on the node's shared data volume. Inline means no
+/// PersistentVolume and therefore no topology constraint, so the scheduler
+/// stays in charge — a per-node PVC would force hostname pinning, which
+/// cluster-autoscaler can never satisfy against its template node.
+fn workspace_volume(
+    runner: &Runner,
+    mode: WorkspaceMode,
+    storage_limit_bytes: Option<u64>,
+) -> Volume {
+    let name = runner.spec.workspace.clone();
+    match mode {
+        WorkspaceMode::Dedicated => Volume {
+            name: name.clone(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: name,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        WorkspaceMode::Pooled => {
+            let mut attributes = BTreeMap::from([("workspace".to_string(), name.clone())]);
+            if let Some(limit) = storage_limit_bytes {
+                attributes.insert("limitBytes".to_string(), limit.to_string());
+            }
+            Volume {
+                name,
+                csi: Some(CSIVolumeSource {
+                    driver: SLOT_CSI_DRIVER.to_string(),
+                    // Render never mutates user data, so give it a read-only
+                    // bind and let one published version's slot be shared.
+                    read_only: Some(matches!(runner.spec.command, RunnerCommand::Render)),
+                    volume_attributes: Some(attributes),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+    }
+}
+
+/// `fsGroup` is only safe on a volume the workspace owns outright.
+///
+/// On the shared node volume kubelet would recursively chown the **entire**
+/// volume — every slot on the node — at every pod start, which blows past the
+/// runner's 90s startup probe once a node is full. The agent chowns exactly the
+/// slot it creates instead, and the runner image already runs as uid 1000.
+fn pod_security_context(mode: WorkspaceMode) -> Option<PodSecurityContext> {
+    match mode {
+        WorkspaceMode::Dedicated => Some(PodSecurityContext {
+            fs_group: Some(1000),
+            ..Default::default()
+        }),
+        WorkspaceMode::Pooled => None,
     }
 }
 

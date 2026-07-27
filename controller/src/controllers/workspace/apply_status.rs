@@ -12,9 +12,10 @@ use super::WorkspaceReconciler;
 /// provisioning because it does not fit its budget.
 pub(crate) const BUDGET_EXCEEDED_REASON: &str = "BudgetExceeded";
 
-/// `reason` of the `Ready=False` condition written when a Workspace asks for
-/// `Pooled` mode before the node agent that implements it exists.
-pub(crate) const POOLED_UNSUPPORTED_REASON: &str = "PooledNotImplemented";
+/// `reason` of the `Ready=True` condition written for a `Pooled` Workspace.
+/// Distinct from `JobComplete` so the two paths are distinguishable in logs and
+/// `kubectl get`, though the platform only reads `status`.
+pub(crate) const POOLED_READY_REASON: &str = "Ready";
 
 impl WorkspaceReconciler {
     pub(crate) async fn apply_status(
@@ -28,6 +29,23 @@ impl WorkspaceReconciler {
         let namespace = workspace.require_namespace()?;
         let name = workspace.name()?;
         let mode = workspace.effective_mode(ctx.config.default_workspace_mode);
+        if mode == WorkspaceMode::Pooled {
+            // Nothing to provision ahead of the runner: there is no PVC to bind
+            // and no init Job to complete. The slot is created on demand by the
+            // node agent when kubelet publishes the runner's inline volume.
+            //
+            // TODO: gate this on the S3 archive existing — HEAD
+            // `<keyPrefix>manifest.json`, seeding an empty manifest for a new
+            // workspace and copying the source archive for clone/restore. Until
+            // that lands a pooled workspace starts empty, which is why pooled
+            // mode is still opt-in.
+            let workspace =
+                update_workspace_status(workspace.clone(), None, StatusKind::PooledReady, mode);
+            ctx.api_namespaced::<Workspace>(namespace)
+                .patch_status(&workspace)
+                .await?;
+            return Ok(());
+        }
         let workspace =
             if let Some(job) = ctx.api_namespaced::<Job>(namespace).get_opt(name).await? {
                 update_workspace_status(
@@ -85,30 +103,6 @@ impl WorkspaceReconciler {
             .await?;
         Ok(())
     }
-
-    /// Mark the workspace not-Ready because it asked for a storage mode this
-    /// controller cannot serve yet. Refusing explicitly keeps a `Pooled`
-    /// workspace from silently getting the dedicated path's PVC and init Job.
-    pub(crate) async fn apply_pooled_unsupported_status(
-        &self,
-        ctx: &Context,
-        workspace: &Workspace,
-    ) -> Result<(), kubimo::Error> {
-        if workspace.metadata.deletion_timestamp.is_some() {
-            return Ok(());
-        }
-        let namespace = workspace.require_namespace()?;
-        let workspace = update_workspace_status(
-            workspace.clone(),
-            None,
-            StatusKind::PooledUnsupported,
-            WorkspaceMode::Pooled,
-        );
-        ctx.api_namespaced::<Workspace>(namespace)
-            .patch_status(&workspace)
-            .await?;
-        Ok(())
-    }
 }
 
 #[allow(clippy::enum_variant_names)] // redudant variants but useful if we add non-job related
@@ -117,7 +111,7 @@ enum StatusKind {
     JobNotComplete,
     JobComplete,
     BudgetExceeded(String),
-    PooledUnsupported,
+    PooledReady,
 }
 
 impl StatusKind {
@@ -193,12 +187,12 @@ fn update_workspace_status(
             status: "False".into(),
             type_: "Ready".into(),
         },
-        StatusKind::PooledUnsupported => Condition {
+        StatusKind::PooledReady => Condition {
             last_transition_time,
             observed_generation,
-            message: "Pooled storage mode is not implemented by this controller yet".into(),
-            reason: POOLED_UNSUPPORTED_REASON.into(),
-            status: "False".into(),
+            message: "Workspace is ready; its slot is created on demand".into(),
+            reason: POOLED_READY_REASON.into(),
+            status: "True".into(),
             type_: "Ready".into(),
         },
     };
