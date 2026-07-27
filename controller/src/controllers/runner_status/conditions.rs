@@ -64,44 +64,71 @@ pub(super) fn pvc_bound_condition(
 /// at "Binding volume…" (20%) in the UI forever, with no error and no log.
 /// Only the meaning changes: a slot, not a PVC.
 pub(super) fn slot_bound_condition(
-    workspace_name: &str,
-    workspace: Option<&Workspace>,
+    pod: Option<&Pod>,
     observed_generation: Option<i64>,
 ) -> Condition {
-    let (status, reason, message) = match workspace {
+    // Derived from the pod rather than from `Workspace.status.slot`, because
+    // the slot is created *by* the CSI driver during NodePublishVolume — that
+    // is, partway through pod startup. Nothing writes `status.slot` before the
+    // pod exists, so keying off it would leave this condition False forever,
+    // which the platform renders as "Binding volume…" at 20% with no error
+    // anywhere.
+    //
+    // A container cannot start until its volumes are mounted, so "some
+    // container started" is a sound proxy for "the slot is bound".
+    let (status, reason, message) = match pod {
         None => (
             "False",
-            "NotFound",
-            format!("Workspace {workspace_name:?} not found"),
+            "Pending".to_string(),
+            "Waiting for the runner pod to be created".to_string(),
         ),
-        Some(workspace) => {
-            let slot = workspace
+        Some(pod) => {
+            let statuses = pod
                 .status
                 .as_ref()
-                .and_then(|status| status.slot.as_ref());
-            match slot.map(|slot| (slot.node.as_deref(), slot.id.as_deref())) {
-                None => (
-                    "False",
-                    "Pending",
-                    "Slot has not been assigned yet".to_string(),
-                ),
-                Some((Some(node), Some(id))) => (
+                .and_then(|status| status.container_statuses.as_deref())
+                .unwrap_or_default();
+            // "Has a container *ever* started", not "is one running now".
+            //
+            // A crashlooping runner is currently Waiting, but it only got to
+            // crash because its volumes mounted. Reporting False here would
+            // render as "Binding volume…" at 20% in the platform and hide an
+            // application error behind a storage message. `restartCount` and a
+            // previous termination are the evidence that the mount succeeded.
+            let any_started = statuses.iter().any(|container| {
+                container.started.unwrap_or(false)
+                    || container.restart_count > 0
+                    || container
+                        .last_state
+                        .as_ref()
+                        .is_some_and(|state| state.terminated.is_some())
+                    || container
+                        .state
+                        .as_ref()
+                        .is_some_and(|state| state.running.is_some() || state.terminated.is_some())
+            });
+            if any_started {
+                (
                     "True",
-                    "Bound",
-                    format!("Slot {id:?} bound on node {node:?}"),
-                ),
-                // A slot that is present but missing either half is a partially
-                // written status, not a bound slot. Treating it as bound would
-                // start a runner whose data has not been hydrated.
-                Some(_) => (
-                    "False",
-                    "Pending",
-                    "Slot assignment is incomplete".to_string(),
-                ),
+                    "Bound".to_string(),
+                    "Workspace slot is mounted".to_string(),
+                )
+            } else {
+                // Surface why, so a slot that cannot be mounted (no quota
+                // support on the node, data volume full) is diagnosable instead
+                // of just being slow.
+                match container_state_detail(pod) {
+                    Some((reason, message)) => ("False", reason, message),
+                    None => (
+                        "False",
+                        "Pending".to_string(),
+                        "Waiting for the workspace slot to be mounted".to_string(),
+                    ),
+                }
             }
         }
     };
-    condition(PVC_BOUND, status, reason, message, observed_generation)
+    condition(PVC_BOUND, status, &reason, message, observed_generation)
 }
 
 pub(super) fn workspace_ready_condition(
@@ -290,65 +317,125 @@ mod tests {
         }
     }
 
-    fn workspace_with_slot(node: Option<&str>, id: Option<&str>) -> Workspace {
-        let mut workspace = Workspace::new("test", Default::default());
-        workspace.status = Some(WorkspaceStatus {
-            slot: Some(kubimo::WorkspaceSlotStatus {
-                node: node.map(ToString::to_string),
-                id: id.map(ToString::to_string),
-                quota: None,
+    fn pod_with_container(state: ContainerState, started: Option<bool>) -> Pod {
+        Pod {
+            status: Some(PodStatus {
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "runner".to_string(),
+                    state: Some(state),
+                    started,
+                    ..Default::default()
+                }]),
+                ..Default::default()
             }),
             ..Default::default()
-        });
-        workspace
+        }
     }
 
+    /// A running container proves its volumes mounted — kubelet will not start
+    /// one otherwise.
     #[test]
-    fn slot_bound_true_when_node_and_id_present() {
-        let workspace = workspace_with_slot(Some("node-a"), Some("slot-abcd"));
-        let cond = slot_bound_condition("ws", Some(&workspace), None);
+    fn slot_bound_true_once_a_container_has_started() {
+        let pod = pod_with_container(
+            ContainerState {
+                running: Some(ContainerStateRunning::default()),
+                ..Default::default()
+            },
+            Some(true),
+        );
+        let cond = slot_bound_condition(Some(&pod), None);
         assert_eq!(cond.status, "True");
         assert_eq!(cond.reason, "Bound");
     }
 
     /// The whole point of this condition: it must keep the `PvcBound` type
     /// string, because the platform treats a missing condition as unsatisfied
-    /// and would pin the runner at "Binding volume…" forever.
+    /// and would pin the runner at "Binding volume…" (20%) forever.
     #[test]
     fn slot_bound_keeps_the_pvc_bound_condition_type() {
-        let workspace = workspace_with_slot(Some("node-a"), Some("slot-abcd"));
-        assert_eq!(
-            slot_bound_condition("ws", Some(&workspace), None).type_,
-            PVC_BOUND
-        );
-        assert_eq!(slot_bound_condition("ws", None, None).type_, PVC_BOUND);
+        assert_eq!(slot_bound_condition(None, None).type_, PVC_BOUND);
+        let pod = pod_with_container(ContainerState::default(), Some(true));
+        assert_eq!(slot_bound_condition(Some(&pod), None).type_, PVC_BOUND);
     }
 
     #[test]
-    fn slot_bound_pending_when_no_slot_assigned() {
-        let workspace = Workspace::new("test", Default::default());
-        let cond = slot_bound_condition("ws", Some(&workspace), None);
+    fn slot_bound_pending_before_the_pod_exists() {
+        let cond = slot_bound_condition(None, None);
         assert_eq!(cond.status, "False");
         assert_eq!(cond.reason, "Pending");
     }
 
-    /// A half-written slot must not read as bound, or a runner would start
-    /// against data that has not been hydrated.
+    /// A container still waiting on its mount must not read as bound.
     #[test]
-    fn slot_bound_pending_when_slot_is_half_written() {
-        for (node, id) in [(Some("node-a"), None), (None, Some("slot-abcd"))] {
-            let workspace = workspace_with_slot(node, id);
-            let cond = slot_bound_condition("ws", Some(&workspace), None);
-            assert_eq!(cond.status, "False", "node={node:?} id={id:?}");
-            assert_eq!(cond.reason, "Pending", "node={node:?} id={id:?}");
-        }
+    fn slot_bound_false_while_the_container_is_waiting() {
+        let pod = pod_with_container(
+            ContainerState {
+                waiting: Some(ContainerStateWaiting {
+                    reason: Some("ContainerCreating".to_string()),
+                    message: None,
+                }),
+                ..Default::default()
+            },
+            Some(false),
+        );
+        let cond = slot_bound_condition(Some(&pod), None);
+        assert_eq!(cond.status, "False");
     }
 
+    /// A crashlooping runner has already proved its volume mounted. Reporting
+    /// the slot as unbound would show "Binding volume…" at 20% and hide the
+    /// real application error. Observed on minikube with an unhydrated slot:
+    /// `uv sync` exits 2, restartCount climbs, state is Waiting.
     #[test]
-    fn slot_bound_not_found_when_workspace_missing() {
-        let cond = slot_bound_condition("ws", None, None);
+    fn slot_stays_bound_once_a_container_has_crashlooped() {
+        let mut pod = pod_with_container(
+            ContainerState {
+                waiting: Some(ContainerStateWaiting {
+                    reason: Some("CrashLoopBackOff".to_string()),
+                    message: Some("back-off 40s restarting failed container".to_string()),
+                }),
+                ..Default::default()
+            },
+            Some(false),
+        );
+        let status = &mut pod
+            .status
+            .as_mut()
+            .unwrap()
+            .container_statuses
+            .as_mut()
+            .unwrap()[0];
+        status.restart_count = 3;
+        status.last_state = Some(ContainerState {
+            terminated: Some(ContainerStateTerminated {
+                exit_code: 2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let cond = slot_bound_condition(Some(&pod), None);
+        assert_eq!(cond.status, "True", "a crashloop is not a storage failure");
+        assert_eq!(cond.reason, "Bound");
+    }
+
+    /// A slot that cannot be mounted — no quota support, data volume full —
+    /// must surface *why*, not just look slow.
+    #[test]
+    fn slot_bound_surfaces_the_mount_failure_reason() {
+        let pod = pod_with_container(
+            ContainerState {
+                waiting: Some(ContainerStateWaiting {
+                    reason: Some("CreateContainerError".to_string()),
+                    message: Some("failed to publish volume: no project quota".to_string()),
+                }),
+                ..Default::default()
+            },
+            Some(false),
+        );
+        let cond = slot_bound_condition(Some(&pod), None);
         assert_eq!(cond.status, "False");
-        assert_eq!(cond.reason, "NotFound");
+        assert_eq!(cond.reason, "CreateContainerError");
+        assert!(cond.message.contains("project quota"));
     }
 
     fn workspace_with_ready(status: &str, reason: &str, message: &str) -> Workspace {

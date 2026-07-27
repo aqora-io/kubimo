@@ -44,9 +44,7 @@ impl RunnerStatusReconciler {
                 WorkspaceMode::Dedicated => {
                     pvc_bound_condition(workspace_name, pvc.as_ref(), generation)
                 }
-                WorkspaceMode::Pooled => {
-                    slot_bound_condition(workspace_name, workspace.as_ref(), generation)
-                }
+                WorkspaceMode::Pooled => slot_bound_condition(pod.as_ref(), generation),
             },
         );
         upsert_condition(
