@@ -320,6 +320,13 @@ impl KubimoNode {
                 limit_bytes,
                 "allocated slot"
             );
+            // Seed the venv from the node template before hydrating, so the
+            // runner does not have to build ~920MB of it from scratch. Failure
+            // is not fatal: `uv sync` will build one, just slowly.
+            match crate::venv::seed_from_template(self.store.layout().root(), &dir).await {
+                Ok(seeded) => tracing::info!(workspace, seeded, "venv template"),
+                Err(err) => tracing::warn!(%err, workspace, "could not seed venv template"),
+            }
             // Only a freshly created slot is hydrated. Re-hydrating one that is
             // already populated would overwrite the tenant's newer local edits
             // with whatever was last synced — this is the path that makes

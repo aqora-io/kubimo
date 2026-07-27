@@ -6,6 +6,7 @@
 //! second time, both share the modules here.
 
 pub mod disk;
+pub mod fingerprint;
 pub mod keys;
 pub mod manifest;
 pub mod python;
