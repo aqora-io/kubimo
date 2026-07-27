@@ -52,6 +52,8 @@ pub struct UploadOptions {
     pub watch: bool,
     pub upload_content: bool,
     pub watch_debounce_millis: u64,
+    /// Ceiling on how long a burst of events may defer a sync.
+    pub watch_max_wait_millis: u64,
     pub watch_poll_millis: u64,
     /// Name of the Workspace this directory belongs to.
     pub name: String,
@@ -936,6 +938,7 @@ pub async fn watch(
 ) {
     let mut watcher = Watcher::new(
         Duration::from_millis(args.watch_debounce_millis),
+        Duration::from_millis(args.watch_max_wait_millis),
         Duration::from_millis(args.watch_poll_millis),
     )
     .expect("Could not create watcher");
@@ -951,6 +954,7 @@ pub async fn watch(
             Err(WaitError::Closed) => {
                 watcher = Watcher::new(
                     Duration::from_millis(args.watch_debounce_millis),
+                    Duration::from_millis(args.watch_max_wait_millis),
                     Duration::from_millis(args.watch_poll_millis),
                 )
                 .expect("Could not create watcher");
