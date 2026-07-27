@@ -32,13 +32,23 @@ pub enum WaitError {
 }
 
 impl Watcher {
-    pub fn new(debounce: Duration, poll: Duration) -> notify::Result<Self> {
+    /// `max_wait` bounds how long a burst of events can defer a sync.
+    ///
+    /// Without it the trailing debounce can starve indefinitely: every new
+    /// event pushes the deadline out, so a directory that never goes quiet —
+    /// a training loop writing checkpoints, a build in a loop — is never
+    /// indexed at all. That is exactly when the data is worth keeping, so the
+    /// wait is capped rather than left open-ended.
+    pub fn new(debounce: Duration, max_wait: Duration, poll: Duration) -> notify::Result<Self> {
         let notify = Arc::new(Notify::new());
         let cloned_notify = notify.clone();
         let (tx, mut rx) = mpsc::channel::<Event>(1000);
         let debouncer = tokio::spawn(async move {
             while rx.recv().await.is_some() {
-                let sleep = tokio::time::sleep(debounce);
+                // Fixed at the first event of the burst, so resets can push the
+                // wake-up later but never past this.
+                let deadline = tokio::time::Instant::now() + max_wait;
+                let sleep = tokio::time::sleep(debounce.min(max_wait));
                 tokio::pin!(sleep);
                 loop {
                     tokio::select! {
@@ -50,7 +60,8 @@ impl Watcher {
                             if maybe.is_none() {
                                 return;
                             }
-                            sleep.as_mut().reset(tokio::time::Instant::now() + debounce);
+                            let next = tokio::time::Instant::now() + debounce;
+                            sleep.as_mut().reset(next.min(deadline));
                         }
                     }
                 }
@@ -113,5 +124,49 @@ impl Watcher {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The starvation guard, exercised against the real `Watcher`.
+    ///
+    /// Events arrive faster than the debounce and never stop. Before the
+    /// ceiling existed each one reset the timer, so `wait()` never returned and
+    /// a continuously-written workspace was never indexed — precisely when its
+    /// data is worth keeping. Short durations keep the test around a second.
+    #[tokio::test]
+    async fn a_continuous_event_stream_still_fires_within_max_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("churn");
+        std::fs::write(&file, b"0").unwrap();
+
+        let mut watcher = Watcher::new(
+            Duration::from_millis(200),
+            Duration::from_millis(600),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        watcher
+            .watch(vec![file.clone()].into_iter().collect())
+            .unwrap();
+
+        // Rewrite every 50ms: always sooner than the 200ms debounce, so without
+        // a ceiling the deadline would be pushed out forever.
+        let churn = tokio::spawn(async move {
+            for i in 0..200 {
+                let _ = std::fs::write(&file, format!("{i}"));
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+
+        let fired = tokio::time::timeout(Duration::from_secs(5), watcher.wait()).await;
+        churn.abort();
+        assert!(
+            fired.is_ok(),
+            "debouncer starved: never fired despite the max-wait ceiling"
+        );
     }
 }

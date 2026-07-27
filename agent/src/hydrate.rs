@@ -82,6 +82,8 @@ fn upload_inputs(
         // empty.
         upload_content: true,
         watch_debounce_millis: 500,
+        // A busy workspace still syncs at least every 10s.
+        watch_max_wait_millis: 10_000,
         watch_poll_millis: 60_000,
         name: workspace.to_string(),
         directory: slot_dir.join(WORKSPACE_SUBDIR),

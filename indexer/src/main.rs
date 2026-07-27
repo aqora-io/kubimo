@@ -42,6 +42,10 @@ struct UploadArgs {
     upload_content: bool,
     #[arg(long, default_value_t = 500)]
     watch_debounce_millis: u64,
+    /// Ceiling on how long a burst of events may defer a sync. Without one a
+    /// directory that never goes quiet is never indexed.
+    #[arg(long, default_value_t = 10 * 1000)]
+    watch_max_wait_millis: u64,
     #[arg(long, default_value_t = 60 * 1000)]
     watch_poll_millis: u64,
     name: String,
@@ -61,6 +65,7 @@ impl UploadArgs {
             watch: self.watch,
             upload_content: self.upload_content,
             watch_debounce_millis: self.watch_debounce_millis,
+            watch_max_wait_millis: self.watch_max_wait_millis,
             watch_poll_millis: self.watch_poll_millis,
             name: self.name.clone(),
             directory: self.directory.clone(),
