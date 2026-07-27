@@ -18,7 +18,7 @@ use kubimo::k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod, ServiceAcco
 use kubimo::k8s_openapi::api::rbac::v1::{Role, RoleBinding};
 use kubimo::kube::runtime::{Controller, controller::Action, reflector::ObjectRef, watcher};
 use kubimo::prelude::*;
-use kubimo::{Runner, Workspace};
+use kubimo::{Runner, Workspace, WorkspaceMode};
 
 use crate::backoff::default_error_policy;
 use crate::context::Context;
@@ -38,6 +38,15 @@ impl Reconciler for WorkspaceReconciler {
     type Error = kubimo::Error;
 
     async fn apply(&self, ctx: &Context, workspace: &Workspace) -> Result<Action, Self::Error> {
+        // The pooled data path (per-node data volume, slot CSI driver, agent
+        // hydration from S3) is not implemented yet. Refuse it explicitly:
+        // falling through would run the dedicated path and provision a
+        // per-workspace PVC plus an init Job, which is exactly what pooled mode
+        // exists to avoid, while looking like it worked.
+        if workspace.effective_mode(ctx.config.default_workspace_mode) == WorkspaceMode::Pooled {
+            self.apply_pooled_unsupported_status(ctx, workspace).await?;
+            return Ok(Action::await_change());
+        }
         let (plan, current_limit) = self.plan_storage(ctx, workspace).await?;
         if let Some(reason) = plan.refuse {
             self.apply_budget_status(ctx, workspace, &reason).await?;

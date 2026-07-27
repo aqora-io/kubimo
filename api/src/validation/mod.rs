@@ -38,6 +38,12 @@ pub fn workspace_restore_from_not_indexer_prefix() -> Rule {
     .field_path(".spec.restoreFrom")
 }
 
+pub fn workspace_mode_no_downgrade() -> Rule {
+    Rule::new(include_str!("./workspace_mode_no_downgrade.cel"))
+        .message("workspace mode cannot be changed back from Pooled to Dedicated")
+        .field_path(".spec.mode")
+}
+
 pub fn runner_immutable_fields() -> Rule {
     Rule::new(include_str!("./runner_immutable_fields.cel"))
         .message("workspace is immutable")
@@ -79,6 +85,7 @@ mod tests {
         test_compiles(workspace_auto_scale_bounds());
         test_compiles(workspace_restore_from_exclusive());
         test_compiles(workspace_restore_from_not_indexer_prefix());
+        test_compiles(workspace_mode_no_downgrade());
         test_compiles(budget_selector_not_empty());
         test_compiles(workspace_no_volume_with_name());
         test_compiles(runner_immutable_fields());

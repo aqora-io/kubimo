@@ -1,10 +1,10 @@
 use kubimo::k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
-use kubimo::{Runner, RunnerStatus, Workspace, prelude::*};
+use kubimo::{Runner, RunnerStatus, Workspace, WorkspaceMode, prelude::*};
 
 use super::RunnerStatusReconciler;
 use super::conditions::{
-    pod_ready_condition, pod_scheduled_condition, pvc_bound_condition, startup_complete,
-    upsert_condition, workspace_ready_condition,
+    pod_ready_condition, pod_scheduled_condition, pvc_bound_condition, slot_bound_condition,
+    startup_complete, upsert_condition, workspace_ready_condition,
 };
 use crate::context::Context;
 
@@ -30,9 +30,24 @@ impl RunnerStatusReconciler {
         )?;
         let generation = runner.metadata.generation;
         let conditions = status.conditions.get_or_insert_with(Vec::new);
+        // Pooled workspaces have no per-workspace PVC, so the dedicated
+        // condition would report `False/NotFound` forever and pin the runner at
+        // "Binding volume…" in the platform UI. Pick the source of truth that
+        // matches the mode; the condition *type* stays `PvcBound` either way.
+        let mode = workspace
+            .as_ref()
+            .map(|workspace| workspace.effective_mode(ctx.config.default_workspace_mode))
+            .unwrap_or(ctx.config.default_workspace_mode);
         upsert_condition(
             conditions,
-            pvc_bound_condition(workspace_name, pvc.as_ref(), generation),
+            match mode {
+                WorkspaceMode::Dedicated => {
+                    pvc_bound_condition(workspace_name, pvc.as_ref(), generation)
+                }
+                WorkspaceMode::Pooled => {
+                    slot_bound_condition(workspace_name, workspace.as_ref(), generation)
+                }
+            },
         );
         upsert_condition(
             conditions,

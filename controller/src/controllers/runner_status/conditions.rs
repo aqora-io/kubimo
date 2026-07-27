@@ -55,6 +55,55 @@ pub(super) fn pvc_bound_condition(
     condition(PVC_BOUND, status, reason, message, observed_generation)
 }
 
+/// The `Pooled`-mode counterpart of [`pvc_bound_condition`]: reports whether
+/// the workspace's slot on the node data volume is assigned and mountable.
+///
+/// Deliberately keeps the `PvcBound` condition *type*. The platform matches on
+/// that exact string and treats a **missing** condition as unsatisfied, so
+/// emitting a differently-named condition here would leave every runner stuck
+/// at "Binding volume…" (20%) in the UI forever, with no error and no log.
+/// Only the meaning changes: a slot, not a PVC.
+pub(super) fn slot_bound_condition(
+    workspace_name: &str,
+    workspace: Option<&Workspace>,
+    observed_generation: Option<i64>,
+) -> Condition {
+    let (status, reason, message) = match workspace {
+        None => (
+            "False",
+            "NotFound",
+            format!("Workspace {workspace_name:?} not found"),
+        ),
+        Some(workspace) => {
+            let slot = workspace
+                .status
+                .as_ref()
+                .and_then(|status| status.slot.as_ref());
+            match slot.map(|slot| (slot.node.as_deref(), slot.id.as_deref())) {
+                None => (
+                    "False",
+                    "Pending",
+                    "Slot has not been assigned yet".to_string(),
+                ),
+                Some((Some(node), Some(id))) => (
+                    "True",
+                    "Bound",
+                    format!("Slot {id:?} bound on node {node:?}"),
+                ),
+                // A slot that is present but missing either half is a partially
+                // written status, not a bound slot. Treating it as bound would
+                // start a runner whose data has not been hydrated.
+                Some(_) => (
+                    "False",
+                    "Pending",
+                    "Slot assignment is incomplete".to_string(),
+                ),
+            }
+        }
+    };
+    condition(PVC_BOUND, status, reason, message, observed_generation)
+}
+
 pub(super) fn workspace_ready_condition(
     workspace_name: &str,
     workspace: Option<&Workspace>,
@@ -239,6 +288,67 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    fn workspace_with_slot(node: Option<&str>, id: Option<&str>) -> Workspace {
+        let mut workspace = Workspace::new("test", Default::default());
+        workspace.status = Some(WorkspaceStatus {
+            slot: Some(kubimo::WorkspaceSlotStatus {
+                node: node.map(ToString::to_string),
+                id: id.map(ToString::to_string),
+                quota: None,
+            }),
+            ..Default::default()
+        });
+        workspace
+    }
+
+    #[test]
+    fn slot_bound_true_when_node_and_id_present() {
+        let workspace = workspace_with_slot(Some("node-a"), Some("slot-abcd"));
+        let cond = slot_bound_condition("ws", Some(&workspace), None);
+        assert_eq!(cond.status, "True");
+        assert_eq!(cond.reason, "Bound");
+    }
+
+    /// The whole point of this condition: it must keep the `PvcBound` type
+    /// string, because the platform treats a missing condition as unsatisfied
+    /// and would pin the runner at "Binding volume…" forever.
+    #[test]
+    fn slot_bound_keeps_the_pvc_bound_condition_type() {
+        let workspace = workspace_with_slot(Some("node-a"), Some("slot-abcd"));
+        assert_eq!(
+            slot_bound_condition("ws", Some(&workspace), None).type_,
+            PVC_BOUND
+        );
+        assert_eq!(slot_bound_condition("ws", None, None).type_, PVC_BOUND);
+    }
+
+    #[test]
+    fn slot_bound_pending_when_no_slot_assigned() {
+        let workspace = Workspace::new("test", Default::default());
+        let cond = slot_bound_condition("ws", Some(&workspace), None);
+        assert_eq!(cond.status, "False");
+        assert_eq!(cond.reason, "Pending");
+    }
+
+    /// A half-written slot must not read as bound, or a runner would start
+    /// against data that has not been hydrated.
+    #[test]
+    fn slot_bound_pending_when_slot_is_half_written() {
+        for (node, id) in [(Some("node-a"), None), (None, Some("slot-abcd"))] {
+            let workspace = workspace_with_slot(node, id);
+            let cond = slot_bound_condition("ws", Some(&workspace), None);
+            assert_eq!(cond.status, "False", "node={node:?} id={id:?}");
+            assert_eq!(cond.reason, "Pending", "node={node:?} id={id:?}");
+        }
+    }
+
+    #[test]
+    fn slot_bound_not_found_when_workspace_missing() {
+        let cond = slot_bound_condition("ws", None, None);
+        assert_eq!(cond.status, "False");
+        assert_eq!(cond.reason, "NotFound");
     }
 
     fn workspace_with_ready(status: &str, reason: &str, message: &str) -> Workspace {
