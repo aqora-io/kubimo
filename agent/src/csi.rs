@@ -117,7 +117,16 @@ pub struct KubimoNode {
 /// kubelet would apply it to every slot on the node, not just this one.
 fn chown_tree(dir: &Path) -> std::io::Result<()> {
     for entry in walkdir(dir)? {
-        std::os::unix::fs::chown(&entry, Some(SLOT_UID), Some(SLOT_GID))?;
+        // `lchown`, never `chown`: `chown` follows symlinks, and this tree is
+        // tenant-controlled. `restore` creates symlinks straight from the
+        // manifest without validating their *targets* (only the link path is
+        // checked), so a manifest entry pointing at `/etc/shadow` would have
+        // this — running as node-root — hand that file to uid 1000.
+        //
+        // `lchown` also closes the TOCTOU: swapping a file for a symlink
+        // between the walk and the chown changes nothing, because the symlink
+        // itself is what gets chowned.
+        std::os::unix::fs::lchown(&entry, Some(SLOT_UID), Some(SLOT_GID))?;
     }
     Ok(())
 }
@@ -672,6 +681,32 @@ mod tests {
             status.message().contains("prjquota"),
             "the error should say how to fix it, got: {}",
             status.message()
+        );
+    }
+
+    /// The traversal half of the symlink defence: a symlinked *directory* must
+    /// not be descended into, or the agent would walk — and chown — a tree
+    /// outside the slot entirely.
+    #[tokio::test]
+    async fn walkdir_does_not_descend_symlinked_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("secret"), b"host file").unwrap();
+
+        let slot = dir.path().join("slot");
+        std::fs::create_dir(&slot).unwrap();
+        std::fs::write(slot.join("own-file"), b"mine").unwrap();
+        std::os::unix::fs::symlink(&outside, slot.join("escape")).unwrap();
+
+        let walked = walkdir(&slot).unwrap();
+        // The symlink itself is visited (so it gets lchown'd) ...
+        assert!(walked.iter().any(|p| p.ends_with("escape")));
+        assert!(walked.iter().any(|p| p.ends_with("own-file")));
+        // ... but nothing behind it is.
+        assert!(
+            !walked.iter().any(|p| p.ends_with("secret")),
+            "walked outside the slot through a symlink: {walked:?}"
         );
     }
 
