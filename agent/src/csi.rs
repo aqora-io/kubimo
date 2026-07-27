@@ -102,6 +102,12 @@ pub struct KubimoNode {
     /// `None` when the agent runs without cluster access, in which case slots
     /// still hydrate and mount but are never pushed back.
     client: Option<kubimo::Client>,
+    /// Continuous sync task per published volume.
+    ///
+    /// Only bound slots appear here: an idle slot has no runner and cannot
+    /// change, so the watcher count on a node tracks running runners rather
+    /// than total slots.
+    watchers: std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 /// Give a restored tree to the runner's uid.
@@ -151,6 +157,55 @@ impl KubimoNode {
             allow_unquotaed_slots,
             s3: indexer::s3::S3Client::from_env(),
             client,
+            watchers: Default::default(),
+        }
+    }
+
+    /// Start continuous sync for a freshly published slot.
+    fn start_watcher(
+        &self,
+        volume_id: &str,
+        workspace: &str,
+        dir: &Path,
+        archive: &crate::hydrate::ArchiveLocation,
+    ) {
+        let Some(client) = self.client.as_ref() else {
+            return;
+        };
+        let mut watchers = match self.watchers.lock() {
+            Ok(watchers) => watchers,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if watchers.contains_key(volume_id) {
+            return;
+        }
+        match crate::hydrate::spawn_watcher(
+            dir,
+            workspace,
+            archive,
+            client.clone(),
+            self.s3.clone(),
+        ) {
+            Ok(handle) => {
+                watchers.insert(volume_id.to_string(), handle);
+                tracing::info!(workspace, "watching slot for changes");
+            }
+            Err(err) => tracing::warn!(%err, workspace, "could not start watcher; \
+                 the slot will only be flushed when its runner stops"),
+        }
+    }
+
+    /// Stop continuous sync for a volume.
+    ///
+    /// Aborted rather than gracefully stopped: a final flush follows
+    /// immediately, so anything the watcher was midway through is redone.
+    fn stop_watcher(&self, volume_id: &str) {
+        let mut watchers = match self.watchers.lock() {
+            Ok(watchers) => watchers,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(handle) = watchers.remove(volume_id) {
+            handle.abort();
         }
     }
 
@@ -354,6 +409,9 @@ impl Node for KubimoNode {
             // data on disk either way.
             tracing::warn!(%err, workspace, "could not record publish; flush on stop will be skipped");
         }
+        if let Some(archive) = archive.as_ref() {
+            self.start_watcher(&request.volume_id, &workspace, &slot_dir, archive);
+        }
         let target = Path::new(&request.target_path);
         let mounted = crate::mount::bind(&slot_dir, target, request.readonly)
             .map_err(|err| Status::internal(format!("publishing slot: {err}")))?;
@@ -377,9 +435,10 @@ impl Node for KubimoNode {
             return Err(Status::invalid_argument("target_path is required"));
         }
         let target = Path::new(&request.target_path);
-        // Flush before unmounting: this is the durability boundary. The runner's
-        // containers have already stopped by the time kubelet calls this, so the
-        // tree is quiescent.
+        // Stop watching first so the final flush is not racing an in-flight
+        // upload, then flush: the runner's containers have already stopped by
+        // the time kubelet calls this, so the tree is quiescent.
+        self.stop_watcher(&request.volume_id);
         self.flush_published(&request.volume_id).await;
         let unmounted = crate::mount::unbind(target)
             .map_err(|err| Status::internal(format!("unpublishing slot: {err}")))?;
