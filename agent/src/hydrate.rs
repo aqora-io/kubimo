@@ -52,6 +52,77 @@ pub struct ArchiveLocation {
     pub key_prefix: Option<String>,
 }
 
+/// Build the upload pipeline's inputs for a slot.
+///
+/// Shared by the one-shot flush and the continuous watcher so the two can never
+/// disagree about scope, key layout or file-size limits — a divergence there
+/// would mean the flush wrote an archive the watcher would immediately rewrite.
+fn upload_inputs(
+    slot_dir: &Path,
+    workspace: &str,
+    archive: &ArchiveLocation,
+    watch: bool,
+) -> Result<
+    (
+        indexer::upload::UploadOptions,
+        indexer::upload::WorkspaceKeys,
+    ),
+    HydrateError,
+> {
+    let options = indexer::upload::UploadOptions {
+        include_gitignored: false,
+        exclude_hidden: false,
+        max_file_size: MAX_FILE_SIZE,
+        max_upload_concurrency: DOWNLOAD_CONCURRENCY,
+        bucket: Some(archive.bucket.clone()),
+        key_prefix: archive.key_prefix.clone(),
+        watch,
+        // Without this the manifest records metadata only and the archive
+        // cannot be restored — the workspace would look backed up but hydrate
+        // empty.
+        upload_content: true,
+        watch_debounce_millis: 500,
+        watch_poll_millis: 60_000,
+        name: workspace.to_string(),
+        directory: slot_dir.join(WORKSPACE_SUBDIR),
+    };
+    let keys = indexer::upload::WorkspaceKeys::new(
+        indexer::keys::WorkspaceDirNameSet::new(workspace.to_string()),
+        indexer::keys::WorkspaceFileUrlSet::new(
+            archive.bucket.clone(),
+            archive.key_prefix.clone(),
+        )?,
+    );
+    Ok((options, keys))
+}
+
+/// Continuously sync a bound slot to S3 until the returned task is aborted.
+///
+/// Only *bound* slots get a watcher — an idle slot has no runner and cannot
+/// change — so the number of watchers on a node equals the number of running
+/// runners, which is what one indexer pod per active workspace already costs
+/// today.
+pub fn spawn_watcher(
+    slot_dir: &Path,
+    workspace: &str,
+    archive: &ArchiveLocation,
+    client: kubimo::Client,
+    s3: indexer::s3::S3Client,
+) -> Result<tokio::task::JoinHandle<()>, HydrateError> {
+    let (options, keys) = upload_inputs(slot_dir, workspace, archive, true)?;
+    Ok(tokio::spawn(async move {
+        indexer::upload::watch(
+            &options,
+            &client,
+            &s3,
+            &keys,
+            Default::default(),
+            Default::default(),
+        )
+        .await;
+    }))
+}
+
 /// Push a slot's tracked files up to S3 and refresh its `WorkspaceDirectory`
 /// CRs.
 ///
@@ -69,37 +140,20 @@ pub async fn flush_slot(
     client: &kubimo::Client,
     s3: &indexer::s3::S3Client,
 ) -> Result<(), HydrateError> {
-    let directory = slot_dir.join(WORKSPACE_SUBDIR);
-    if !directory.is_dir() {
+    if !slot_dir.join(WORKSPACE_SUBDIR).is_dir() {
         // Nothing was ever hydrated here; there is nothing to push back.
         return Ok(());
     }
-    let options = indexer::upload::UploadOptions {
-        include_gitignored: false,
-        exclude_hidden: false,
-        max_file_size: MAX_FILE_SIZE,
-        max_upload_concurrency: DOWNLOAD_CONCURRENCY,
-        bucket: Some(archive.bucket.clone()),
-        key_prefix: archive.key_prefix.clone(),
-        watch: false,
-        // Without this the manifest records metadata only and the archive
-        // cannot be restored — the workspace would look backed up but hydrate
-        // empty.
-        upload_content: true,
-        watch_debounce_millis: 500,
-        watch_poll_millis: 60_000,
-        name: workspace.to_string(),
-        directory,
-    };
-    let keys = indexer::upload::WorkspaceKeys::new(
-        indexer::keys::WorkspaceDirNameSet::new(workspace.to_string()),
-        indexer::keys::WorkspaceFileUrlSet::new(
-            archive.bucket.clone(),
-            archive.key_prefix.clone(),
-        )?,
-    );
-    let (names, urls) = (Default::default(), Default::default());
-    indexer::upload::run(&options, client, s3, &keys, &names, &urls).await;
+    let (options, keys) = upload_inputs(slot_dir, workspace, archive, false)?;
+    indexer::upload::run(
+        &options,
+        client,
+        s3,
+        &keys,
+        &Default::default(),
+        &Default::default(),
+    )
+    .await;
     Ok(())
 }
 
