@@ -1,0 +1,37 @@
+FROM rust:1.94-trixie AS build
+
+# protoc for the CSI proto, and pkg-config for the object_store TLS stack.
+RUN apt-get update && apt-get install -y wget pkg-config protobuf-compiler
+
+ARG SCCACHE_VERSION=0.9.1
+RUN ARCH="$(uname -m)-unknown-linux-musl" && \
+  wget -qO- "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${ARCH}.tar.gz" \
+  | tar xz -C /usr/local/bin --strip-components=1 "sccache-v${SCCACHE_VERSION}-${ARCH}/sccache"
+
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET
+ARG SCCACHE_REGION=auto
+
+WORKDIR /build
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+  --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+  --mount=type=cache,target=target,sharing=locked \
+  --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
+  --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
+  if [ -n "${SCCACHE_ENDPOINT:-}" ] && [ -n "${SCCACHE_BUCKET:-}" ] && [ -s /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID ]; then \
+  export RUSTC_WRAPPER=sccache; \
+  export AWS_ACCESS_KEY_ID=$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID); \
+  export AWS_SECRET_ACCESS_KEY=$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY); \
+  fi && \
+  cargo build --release -p agent && \
+  cp target/release/agent /bin/kubimo-agent
+
+FROM debian:trixie-slim
+# `mount` and `umount` are not invoked directly — the agent uses the mount(2)
+# and quotactl_fd(2) syscalls — but ca-certificates is needed to reach S3.
+RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  apt-get update && apt-get install -y ca-certificates
+COPY --from=build /bin/kubimo-agent /bin/kubimo-agent
+ENV RUST_LOG=info
+ENTRYPOINT ["kubimo-agent"]

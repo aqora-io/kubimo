@@ -37,6 +37,23 @@ target "controller" {
   ]
 }
 
+target "docker-metadata-agent" {}
+
+target "agent" {
+  inherits   = ["docker-metadata-agent"]
+  dockerfile = "docker/Dockerfile.agent"
+  context    = "."
+  args = {
+    SCCACHE_ENDPOINT = SCCACHE_ENDPOINT
+    SCCACHE_BUCKET   = SCCACHE_BUCKET
+    SCCACHE_REGION   = SCCACHE_REGION
+  }
+  secret = [
+    "id=SCCACHE_AWS_ACCESS_KEY_ID,env=SCCACHE_AWS_ACCESS_KEY_ID",
+    "id=SCCACHE_AWS_SECRET_ACCESS_KEY,env=SCCACHE_AWS_SECRET_ACCESS_KEY",
+  ]
+}
+
 target "docker-metadata-marimo" {}
 
 target "marimo" {

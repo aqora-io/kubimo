@@ -23,6 +23,8 @@ version = "0.1.34"
 dependencies = [
  "clap",
  "hyper-util",
+ "indexer",
+ "kubimo",
  "libc",
  "prost",
  "prost-types",

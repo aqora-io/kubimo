@@ -6,6 +6,7 @@
 //! the workspace is done with it.
 
 mod csi;
+mod hydrate;
 mod mount;
 mod quota;
 mod slot;
@@ -161,11 +162,28 @@ fn serve(
     allow_unquotaed_slots: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = SlotStore::new(SlotLayout::new(data_root));
-    let node = csi::KubimoNode::new(node_name, store, default_limit_bytes, allow_unquotaed_slots);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(async move {
+            // Optional: without cluster access the agent still hydrates and
+            // mounts slots, it just cannot refresh WorkspaceDirectory CRs when
+            // flushing. Degrading here rather than refusing to start keeps the
+            // storage path working if RBAC is misconfigured.
+            let client = match kubimo::Client::infer().await {
+                Ok(client) => Some(client),
+                Err(err) => {
+                    tracing::warn!(%err, "no Kubernetes access; slots will not be flushed to S3");
+                    None
+                }
+            };
+            let node = csi::KubimoNode::new(
+                node_name,
+                store,
+                default_limit_bytes,
+                allow_unquotaed_slots,
+                client,
+            );
             csi::serve(socket, node, async {
                 let _ = tokio::signal::ctrl_c().await;
                 tracing::info!("shutting down");

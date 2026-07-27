@@ -1,0 +1,52 @@
+{{- if .Values.agent.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kubimo-controller.fullname" . }}-agent
+  labels:
+    {{- include "kubimo-controller.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+---
+# NOTE: this is a deliberate privilege *concentration* relative to the dedicated
+# path, where each workspace got its own ServiceAccount and a Role scoped with
+# `resourceNames: [<workspace>]`. One agent serves every slot on its node, so it
+# necessarily needs access to every workspace it might host.
+#
+# The compensating controls are: the agent runs in its own namespace (never
+# alongside tenant workloads), it is the only thing holding S3 credentials, and
+# per-slot scoped credentials (STS AssumeRole with an `s3:prefix` condition)
+# should replace the node-wide key before this is enabled in production.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kubimo-controller.fullname" . }}-agent
+  labels:
+    {{- include "kubimo-controller.labels" . | nindent 4 }}
+rules:
+  # The file browser is served from these, so a flush must refresh them.
+  - apiGroups: ["kubimo.aqora.io"]
+    resources: ["workspacedirectories"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read the Workspace to resolve its archive; write only storage usage.
+  - apiGroups: ["kubimo.aqora.io"]
+    resources: ["workspaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kubimo.aqora.io"]
+    resources: ["workspaces/status"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kubimo-controller.fullname" . }}-agent
+  labels:
+    {{- include "kubimo-controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kubimo-controller.fullname" . }}-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kubimo-controller.fullname" . }}-agent
+    namespace: {{ .Release.Namespace }}
+{{- end }}
