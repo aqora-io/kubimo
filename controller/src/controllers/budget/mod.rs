@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::prelude::*;
+use kubimo::WorkspaceMode;
 use kubimo::k8s_openapi::api::core::v1::PersistentVolumeClaim;
 use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kubimo::k8s_openapi::jiff::Timestamp;
@@ -61,7 +62,28 @@ impl Reconciler for BudgetReconciler {
 /// except a refused Workspace reserves nothing (it has no PVC and will not
 /// provision until budget frees, so counting its minimum would inflate usage
 /// and headroom for storage that is never allocated).
-fn workspace_committed_bytes(workspace: &Workspace, pvc_request: Option<u64>) -> u64 {
+fn workspace_committed_bytes(
+    workspace: &Workspace,
+    mode: WorkspaceMode,
+    pvc_request: Option<u64>,
+) -> u64 {
+    // A pooled workspace commits nothing: its slot is carved out of a shared,
+    // overcommitted node volume, and the quota is a ceiling rather than a
+    // reservation. What it actually occupies is the honest number, and it is
+    // trustworthy — under an XFS project quota `statvfs` reports the slot's own
+    // usage, which is what the agent writes here.
+    //
+    // Deliberately not the slot quota: that is sized so a workspace does not hit
+    // a wall, so billing it would charge every workspace its ceiling.
+    if mode == WorkspaceMode::Pooled {
+        return workspace
+            .status
+            .as_ref()
+            .and_then(|status| status.storage.as_ref())
+            .and_then(|storage| storage.used.as_ref())
+            .and_then(StorageQuantity::to_bytes)
+            .unwrap_or(0);
+    }
     pvc_request
         .or_else(|| {
             if is_budget_refused(workspace) {
@@ -128,7 +150,8 @@ pub(crate) async fn sum_workspace_storage(
         if Some(name) == exclude {
             continue;
         }
-        let bytes = workspace_committed_bytes(workspace, pvc_requests.get(name).copied());
+        let mode = workspace.effective_mode(ctx.config.default_workspace_mode);
+        let bytes = workspace_committed_bytes(workspace, mode, pvc_requests.get(name).copied());
         total = total.saturating_add(bytes);
     }
     Ok(total)
@@ -280,28 +303,75 @@ mod tests {
         assert!(!is_budget_refused(&workspace_with(Some("5Gi"), None)));
     }
 
+    /// A pooled workspace commits nothing — its slot comes out of a shared,
+    /// overcommitted volume — so it is billed for what it actually occupies.
+    /// Previously it fell through to `spec.storage.min`, reporting a flat 2Gi
+    /// forever regardless of real usage.
+    #[test]
+    fn pooled_bytes_come_from_actual_usage_not_the_spec() {
+        let mut ws = workspace_with(Some("2Gi"), None);
+        ws.status.get_or_insert_default().storage = Some(kubimo::WorkspaceStorageStatus {
+            used: Some(StorageQuantity::new(gib(7) as f64, kubimo::StorageUnit::B)),
+            capacity: Some(StorageQuantity::new(gib(64) as f64, kubimo::StorageUnit::B)),
+            available: None,
+        });
+        // Not 2Gi (spec.min), and not 64Gi (the quota ceiling).
+        assert_eq!(
+            workspace_committed_bytes(&ws, WorkspaceMode::Pooled, None),
+            gib(7)
+        );
+        // A PVC request is irrelevant in Pooled — there is no PVC.
+        assert_eq!(
+            workspace_committed_bytes(&ws, WorkspaceMode::Pooled, Some(gib(2))),
+            gib(7)
+        );
+    }
+
+    /// Before the agent has reported anything, a pooled workspace contributes
+    /// nothing rather than a made-up figure.
+    #[test]
+    fn pooled_bytes_are_zero_until_usage_is_reported() {
+        let ws = workspace_with(Some("2Gi"), None);
+        assert_eq!(
+            workspace_committed_bytes(&ws, WorkspaceMode::Pooled, None),
+            0
+        );
+    }
+
     #[test]
     fn committed_bytes_prefers_pvc_request() {
         // A bound PVC always counts, even if the workspace is somehow also refused.
         let ws = workspace_with(Some("5Gi"), Some(("False", BUDGET_EXCEEDED_REASON)));
-        assert_eq!(workspace_committed_bytes(&ws, Some(gib(2))), gib(2));
+        assert_eq!(
+            workspace_committed_bytes(&ws, WorkspaceMode::Dedicated, Some(gib(2))),
+            gib(2)
+        );
     }
 
     #[test]
     fn committed_bytes_pending_reserves_min() {
         let ws = workspace_with(Some("3Gi"), None);
-        assert_eq!(workspace_committed_bytes(&ws, None), gib(3));
+        assert_eq!(
+            workspace_committed_bytes(&ws, WorkspaceMode::Dedicated, None),
+            gib(3)
+        );
     }
 
     #[test]
     fn committed_bytes_refused_reserves_nothing() {
         let ws = workspace_with(Some("3Gi"), Some(("False", BUDGET_EXCEEDED_REASON)));
-        assert_eq!(workspace_committed_bytes(&ws, None), 0);
+        assert_eq!(
+            workspace_committed_bytes(&ws, WorkspaceMode::Dedicated, None),
+            0
+        );
     }
 
     #[test]
     fn committed_bytes_no_min_is_zero() {
         let ws = workspace_with(None, None);
-        assert_eq!(workspace_committed_bytes(&ws, None), 0);
+        assert_eq!(
+            workspace_committed_bytes(&ws, WorkspaceMode::Dedicated, None),
+            0
+        );
     }
 }
