@@ -91,9 +91,11 @@ agent:
     pullPolicy: IfNotPresent
     tag: ""
   registrarImage: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.14.0
-  # Source of the staged venv template. Must match the image runners use, or
-  # they will get a venv built for a different interpreter.
-  marimoImage: ghcr.io/aqora-io/kubimo-marimo:latest
+  # Source of the staged venv template. Leave empty to follow
+  # `controller.marimoImage`, which is what runners are started with — the two
+  # must match, or slots reflink a venv built for a different interpreter than
+  # the runner runs. Only set this to pin them apart deliberately.
+  marimoImage: ""
   # Minimum kernel release required to serve slots. A shared node volume makes
   # kernel filesystem bugs cross-tenant; see CVE-2026-64600 (RefluXFS). The
   # patched release is distro-specific, so set it to your node pool's.
