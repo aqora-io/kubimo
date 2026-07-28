@@ -401,6 +401,15 @@ impl KubimoNode {
         };
         let workspace = published.workspace;
         let Some(client) = self.client_for(&published.namespace).await else {
+            // Without cluster access there is no way to refresh the directory
+            // CRs, and the upload path needs one. Say so: this is the last
+            // chance to persist whatever the watcher had not already synced.
+            tracing::error!(
+                workspace,
+                namespace = %published.namespace,
+                "no Kubernetes access for this workspace, so its final flush is being skipped; \
+                 changes since the last sync exist only on this node"
+            );
             return;
         };
         if self.workspace_is_going_away(&client, &workspace).await {

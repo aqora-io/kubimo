@@ -39,7 +39,13 @@ spec:
         # ~920MB from scratch. Uses the marimo image because that is where the
         # venv lives; the agent image has no Python.
         - name: venv-template
-          image: "{{ .Values.agent.marimoImage }}"
+          # Defaults to the runners' image, because it must equal it: this
+          # stages one venv per node that every slot reflinks, so a different
+          # image here hands runners a venv built for another interpreter.
+          # Overridable, but only deliberately. `controller` is optional in
+          # values.yaml, hence the dict guard rather than a direct lookup.
+          {{- $controller := .Values.controller | default dict }}
+          image: "{{ .Values.agent.marimoImage | default $controller.marimoImage | default "ghcr.io/aqora-io/kubimo-marimo:latest" }}"
           securityContext:
             # The marimo image runs as uid 1000, but the freshly provisioned
             # data volume is root-owned, so the copy needs root — the same
