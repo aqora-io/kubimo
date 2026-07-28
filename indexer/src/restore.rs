@@ -32,6 +32,52 @@ pub struct RestorePlan {
 pub enum PlanError {
     #[error("unsafe path in manifest: {0}")]
     UnsafePath(String),
+    #[error("manifest entry points outside the archive: {url} is not under {expected}")]
+    ForeignContent { url: String, expected: String },
+}
+
+/// Where an archive's objects are allowed to live.
+///
+/// A manifest's content urls are followed verbatim, and whoever restores holds
+/// credentials for the whole bucket — the node agent serves every workspace on
+/// its node from one client. So a manifest naming another prefix would have its
+/// objects copied into this slot, and a manifest naming another bucket would
+/// reach whatever else those credentials can see.
+///
+/// No archive legitimately does this. Both writers key their objects under the
+/// same prefix as the manifest: the indexer as `{prefix}{base32}.{ext}`
+/// (`keys.rs`), and the platform's seed as `{prefix}{relative path}`. The one
+/// case that looks like an exception isn't — a seeded workspace's own manifest
+/// sits at `workspace/{uuid}/` and points into `workspace/{uuid}/seed/`, which
+/// is still underneath it.
+///
+/// Tenants cannot write a manifest today, so this is defence in depth rather
+/// than a live hole. It is cheap here and expensive to add after something can.
+#[derive(Debug, Clone)]
+pub struct ArchiveOrigin {
+    pub bucket: String,
+    pub key_prefix: Option<String>,
+}
+
+impl ArchiveOrigin {
+    fn base(&self) -> String {
+        format!(
+            "s3://{}/{}",
+            self.bucket,
+            self.key_prefix.as_deref().unwrap_or("")
+        )
+    }
+
+    fn check(&self, url: &Url) -> Result<(), PlanError> {
+        let base = self.base();
+        if url.as_str().starts_with(&base) {
+            return Ok(());
+        }
+        Err(PlanError::ForeignContent {
+            url: url.to_string(),
+            expected: base,
+        })
+    }
 }
 
 fn safe_relative_path(path: &str) -> Result<PathBuf, PlanError> {
@@ -55,8 +101,12 @@ fn safe_entry_path(dir: &Path, name: &str) -> Result<PathBuf, PlanError> {
 
 /// Split a manifest into the filesystem operations needed to restore it. The
 /// manifest is only semi-trusted: paths escaping the target directory are
-/// rejected. Marimo meta/cache urls are ignored — they are derived artifacts.
-pub fn plan_restore(manifest: &WorkspaceManifest) -> Result<RestorePlan, PlanError> {
+/// rejected, and so are content urls escaping `origin` (see [`ArchiveOrigin`]).
+/// Marimo meta/cache urls are ignored — they are derived artifacts.
+pub fn plan_restore(
+    manifest: &WorkspaceManifest,
+    origin: &ArchiveOrigin,
+) -> Result<RestorePlan, PlanError> {
     let mut plan = RestorePlan::default();
     for directory in &manifest.directories {
         let dir_path = safe_relative_path(&directory.path)?;
@@ -77,6 +127,7 @@ pub fn plan_restore(manifest: &WorkspaceManifest) -> Result<RestorePlan, PlanErr
                 }
             } else if let Some(file) = &entry.file {
                 if let Some(content) = &file.content {
+                    origin.check(&content.url)?;
                     plan.files.push(RestoreFile {
                         path: entry_path,
                         url: content.url.clone(),
@@ -138,7 +189,13 @@ pub async fn restore(args: &RestoreOptions, s3: &S3Client) -> Result<(), Restore
     if !manifest.upload_content {
         return Err(RestoreError::NoContent);
     }
-    let plan = plan_restore(&manifest)?;
+    let plan = plan_restore(
+        &manifest,
+        &ArchiveOrigin {
+            bucket: args.bucket.clone(),
+            key_prefix: args.key_prefix.clone(),
+        },
+    )?;
 
     tokio::fs::create_dir_all(&args.directory).await?;
     let usage = disk::disk_usage(&args.directory)?;
@@ -276,6 +333,14 @@ mod tests {
         }
     }
 
+    /// Matches the bucket and (absent) prefix of `file_entry`'s content url.
+    fn origin() -> ArchiveOrigin {
+        ArchiveOrigin {
+            bucket: "bucket".to_string(),
+            key_prefix: None,
+        }
+    }
+
     fn file_entry(name: &str, with_content: bool) -> WorkspaceDirEntry {
         WorkspaceDirEntry {
             name: name.to_string(),
@@ -321,7 +386,7 @@ mod tests {
                 entries: vec![file_entry("b.txt", true)],
             },
         ]);
-        let plan = plan_restore(&manifest).unwrap();
+        let plan = plan_restore(&manifest, &origin()).unwrap();
         assert!(plan.directories.contains(&PathBuf::from("sub")));
         assert_eq!(
             plan.symlinks,
@@ -343,7 +408,7 @@ mod tests {
             path: "orphan".to_string(),
             entries: vec![file_entry("a.txt", true)],
         }]);
-        let plan = plan_restore(&manifest).unwrap();
+        let plan = plan_restore(&manifest, &origin()).unwrap();
         assert!(plan.directories.contains(&PathBuf::from("orphan")));
     }
 
@@ -354,9 +419,62 @@ mod tests {
             entries: vec![],
         }]);
         assert!(matches!(
-            plan_restore(&manifest),
+            plan_restore(&manifest, &origin()),
             Err(PlanError::UnsafePath(_))
         ));
+    }
+
+    /// Build a one-file manifest whose content url is `url`.
+    fn manifest_pointing_at(url: &str) -> WorkspaceManifest {
+        let mut entry = file_entry("a.txt", true);
+        entry.file.as_mut().unwrap().content.as_mut().unwrap().url = url.parse().unwrap();
+        manifest(vec![ManifestDirectory {
+            path: String::new(),
+            entries: vec![entry],
+        }])
+    }
+
+    /// Whoever restores holds credentials for the whole bucket, so a manifest
+    /// naming someone else's prefix would pull their objects into this slot.
+    #[test]
+    fn plan_restore_rejects_content_outside_the_archive() {
+        let origin = ArchiveOrigin {
+            bucket: "bucket".to_string(),
+            key_prefix: Some("workspace/mine/".to_string()),
+        };
+        for url in [
+            // Another tenant's prefix in the same bucket.
+            "s3://bucket/workspace/theirs/secret.py",
+            // A sibling prefix that shares a textual ancestor.
+            "s3://bucket/workspace/mine-other/secret.py",
+            // Another bucket entirely.
+            "s3://other-bucket/workspace/mine/secret.py",
+            // No prefix at all.
+            "s3://bucket/secret.py",
+        ] {
+            assert!(
+                matches!(
+                    plan_restore(&manifest_pointing_at(url), &origin),
+                    Err(PlanError::ForeignContent { .. })
+                ),
+                "expected {url} to be rejected"
+            );
+        }
+    }
+
+    /// The shape a seeded workspace's *own* manifest has: it sits at
+    /// `workspace/{uuid}/` and points into `workspace/{uuid}/seed/`. This is
+    /// what makes a never-opened pooled workspace cloneable, so the check must
+    /// not reject it.
+    #[test]
+    fn plan_restore_allows_a_seed_nested_under_the_archive() {
+        let origin = ArchiveOrigin {
+            bucket: "bucket".to_string(),
+            key_prefix: Some("workspace/mine/".to_string()),
+        };
+        let manifest = manifest_pointing_at("s3://bucket/workspace/mine/seed/readme.py");
+        let plan = plan_restore(&manifest, &origin).expect("a nested seed is legitimate");
+        assert_eq!(plan.files.len(), 1);
     }
 
     #[test]
@@ -366,7 +484,7 @@ mod tests {
             entries: vec![],
         }]);
         assert!(matches!(
-            plan_restore(&manifest),
+            plan_restore(&manifest, &origin()),
             Err(PlanError::UnsafePath(_))
         ));
     }
@@ -379,7 +497,10 @@ mod tests {
                 entries: vec![file_entry(name, true)],
             }]);
             assert!(
-                matches!(plan_restore(&manifest), Err(PlanError::UnsafePath(_))),
+                matches!(
+                    plan_restore(&manifest, &origin()),
+                    Err(PlanError::UnsafePath(_))
+                ),
                 "expected {name:?} to be rejected"
             );
         }
@@ -419,7 +540,7 @@ mod tests {
             path: "".to_string(),
             entries: vec![entry],
         }]);
-        let plan = plan_restore(&manifest).unwrap();
+        let plan = plan_restore(&manifest, &origin()).unwrap();
         assert_eq!(plan.files[0].modified, Some(modified));
     }
 }
