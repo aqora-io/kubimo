@@ -2,6 +2,10 @@
 mod api;
 #[cfg(feature = "client")]
 mod client;
+// Deliberately not behind `client`: these are the condition names consumers
+// match on, and a consumer that only reads CRs takes this crate with
+// `default-features = false`.
+pub mod conditions;
 mod crd;
 mod error;
 mod factory;

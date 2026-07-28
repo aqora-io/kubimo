@@ -89,6 +89,19 @@ impl S3Client {
         *markers = cache_markers;
     }
 
+    /// Merge `cache_markers` into the existing set instead of replacing it.
+    ///
+    /// The standalone indexer owns its client and serves one workspace, so it
+    /// can [`Self::set_cache`]. The node agent shares a single client across
+    /// every workspace on the node — `cache_markers` lives behind an `Arc`, so
+    /// replacing it there would discard the markers of every other slot each
+    /// time one was published. Markers are keyed by `(bucket, key)`, which is
+    /// globally unique, so merging is always safe.
+    pub async fn extend_cache(&self, cache_markers: CacheMarkers) {
+        let mut markers = self.cache_markers.write().await;
+        markers.extend(cache_markers);
+    }
+
     async fn bucket(&self, bucket: &str) -> object_store::Result<AmazonS3> {
         if let Some(client) = self.clients.read().await.get(bucket) {
             return Ok(client.clone());
@@ -354,6 +367,32 @@ mod tests {
     use super::*;
     use object_store::memory::InMemory;
 
+    /// The node agent shares one `S3Client` across every slot on the node, so a
+    /// per-slot cache update must not discard the other slots' markers. Keys are
+    /// `(bucket, key)`, which is globally unique, so a merge cannot conflate two
+    /// workspaces.
+    #[tokio::test]
+    async fn extending_the_cache_keeps_other_slots_markers() {
+        let client = S3Client::from_env();
+
+        let mut first = CacheMarkers::new();
+        first.insert("s3://bucket/slot-a".parse().unwrap(), 1, "etag-a".into());
+        client.extend_cache(first).await;
+
+        let mut second = CacheMarkers::new();
+        second.insert("s3://bucket/slot-b".parse().unwrap(), 2, "etag-b".into());
+        client.extend_cache(second).await;
+
+        let markers = client.cache_markers.read().await;
+        assert_eq!(markers.items.len(), 2, "second publish evicted the first");
+
+        // `set_cache` is the standalone indexer's behaviour and must stay
+        // destructive — this is the contrast the agent must avoid.
+        drop(markers);
+        client.set_cache(CacheMarkers::new()).await;
+        assert_eq!(client.cache_markers.read().await.items.len(), 0);
+    }
+
     async fn store_with(key: &str, contents: &'static [u8]) -> InMemory {
         let store = InMemory::new();
         store
@@ -433,5 +472,14 @@ impl CacheMarkers {
                 tracing::warn!("Failed to parse S3 URL for cache marker: {url}: {err}");
             }
         }
+    }
+
+    /// Take every marker from `other`, letting it win on collisions.
+    ///
+    /// Keys are `(bucket, key)` and an object's content is immutable for a given
+    /// key within a run, so a collision means both sides describe the same
+    /// object and either value is correct.
+    pub fn extend(&mut self, other: CacheMarkers) {
+        self.items.extend(other.items);
     }
 }

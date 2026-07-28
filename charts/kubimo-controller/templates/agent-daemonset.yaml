@@ -92,6 +92,13 @@ spec:
                   fieldPath: spec.nodeName
             - name: RUST_LOG
               value: {{ .Values.agent.rustLog | quote }}
+          {{- if .Values.agent.s3SecretName }}
+          # S3 credentials for hydrating and flushing workspace archives. The
+          # agent reads these via AmazonS3Builder::from_env.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.agent.s3SecretName | quote }}
+          {{- end }}
           securityContext:
             # Required for mount(2), the fsxattr ioctl and quotactl_fd. This
             # makes the agent tier-0 trusted: it can see every tenant's files.
