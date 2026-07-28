@@ -116,18 +116,24 @@ agent:
   allowUnpatchedKernel: false
   kubeletDir: /var/lib/kubelet
   rustLog: info
-  # Secret holding S3 credentials for the workspace archive bucket, mounted as
-  # envFrom. The agent is the only thing that reads or writes a pooled
-  # workspace's archive, so without this it cannot hydrate a slot (the mount
-  # fails and the runner never starts) nor flush one (logged and dropped).
+  # OPTIONAL fallback S3 credentials, mounted as envFrom.
   #
-  # Expected keys are what object_store's AmazonS3Builder::from_env reads:
-  # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT, AWS_REGION,
-  # AWS_ALLOW_HTTP. The bucket is not read from here — it comes from each
-  # workspace's spec.indexer.bucket.
+  # Normally leave this empty. A workspace's credentials reach the agent
+  # per-mount: the controller puts the Secret named by `spec.indexer.pod.envFrom`
+  # on the volume as `nodePublishSecretRef`, kubelet resolves it in the *runner
+  # pod's* namespace and hands the contents to NodePublishVolume. That is what
+  # lets one node serve workspaces from several S3 accounts at once — on a
+  # shared cluster each environment has its own bucket *and* endpoint — and it
+  # means the agent needs no access to Secrets of its own.
   #
-  # Must exist in the release namespace. Empty leaves the agent without archive
-  # access: slots still mount, but nothing is ever persisted to S3.
+  # This value is only for a cluster where every workspace lives in the same S3
+  # account and nothing sets `spec.indexer.pod`: a dev cluster, or standalone
+  # kubimo. Setting it where per-workspace credentials also exist is harmless
+  # (they take precedence) but misleading.
+  #
+  # Expected keys are what object_store reads: AWS_ACCESS_KEY_ID,
+  # AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT, AWS_REGION, AWS_ALLOW_HTTP. The bucket
+  # comes from each workspace's spec.indexer.bucket, never from here.
   s3SecretName: ""
   # Per-node data volume, provisioned as a generic ephemeral volume so each
   # DaemonSet pod gets its own PVC. Sized to the working set of the slots on a
