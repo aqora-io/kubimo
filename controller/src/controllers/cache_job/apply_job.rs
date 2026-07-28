@@ -1,14 +1,12 @@
 use kubimo::k8s_openapi::api::batch::v1::{Job, JobSpec};
-use kubimo::k8s_openapi::api::core::v1::{
-    Container, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
-    Volume, VolumeMount,
-};
+use kubimo::k8s_openapi::api::core::v1::{Container, PodSpec, PodTemplateSpec, VolumeMount};
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{CacheJob, Workspace, prelude::*};
+use kubimo::{CacheJob, Workspace, WorkspaceMode, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::indexer;
+use crate::controllers::slot_volume;
 use crate::controllers::workspace_affinity;
 use crate::resources::Resources;
 
@@ -83,25 +81,35 @@ impl CacheJobReconciler {
             .api_namespaced::<Workspace>(namespace)
             .get(workspace_name)
             .await?;
-        let should_run_indexer =
-            workspace.spec.indexer.is_some() && !indexer::is_pod_running(ctx, &workspace).await?;
-
+        // The cache job mounts the workspace exactly as a runner does. Under
+        // `Pooled` there is no per-workspace PVC to claim, so asking for one
+        // left the pod Pending forever — and took the publish flow with it,
+        // since that is what re-materializes a version's `WorkspaceDirectory`s.
+        // The workspace affinity already co-locates this with any live runner,
+        // so the two share one slot rather than racing from different nodes.
+        let mode = workspace.effective_mode(ctx.config.default_workspace_mode);
+        // Only `Dedicated` needs an indexer container here. A pooled slot is
+        // hydrated when the agent publishes this pod's volume and flushed when
+        // it unpublishes it, and that flush writes the archive *and* the
+        // `WorkspaceDirectory` CRs — which is all this container was for. Worse,
+        // it would be unschedulable: it runs under the per-workspace indexer
+        // ServiceAccount, and pooled workspaces skip `apply_indexer_rbac`, so no
+        // such account exists.
+        let should_run_indexer = mode == WorkspaceMode::Dedicated
+            && workspace.spec.indexer.is_some()
+            && !indexer::is_pod_running(ctx, &workspace).await?;
         let affinity = Some(workspace_affinity::workspace_affinity(workspace_name));
         let mut pod_spec = PodSpec {
             containers: vec![],
             affinity,
-            security_context: Some(PodSecurityContext {
-                fs_group: Some(1000),
-                ..Default::default()
-            }),
-            volumes: Some(vec![Volume {
-                name: workspace_name.clone(),
-                persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                    claim_name: workspace_name.clone(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }]),
+            security_context: slot_volume::pod_security_context(mode),
+            volumes: Some(vec![slot_volume::workspace_volume(
+                workspace_name,
+                mode,
+                // Writes `__marimo__` caches into the workspace.
+                false,
+                slot_volume::SlotSources::from_workspace(Some(&workspace)),
+            )]),
             restart_policy: Some("Never".into()),
             ..Default::default()
         };

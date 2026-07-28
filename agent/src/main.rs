@@ -10,6 +10,7 @@ mod hydrate;
 mod kernel;
 mod mount;
 mod quota;
+mod reaper;
 mod slot;
 mod store;
 mod venv;
@@ -202,6 +203,26 @@ fn check_kernel(
     }
 }
 
+/// Say so at startup when the agent has no S3 credentials.
+///
+/// `AmazonS3Builder::from_env` reads the environment without validating it, so
+/// missing credentials do not surface until a slot is actually hydrated or
+/// flushed — as a failed mount on one path and a logged-and-dropped error on
+/// the other. Neither points at the real cause, which is almost always an
+/// unset `agent.s3SecretName` or a Secret in the wrong namespace.
+fn warn_without_s3_credentials() {
+    // Matching what object_store looks for. A static credential pair is the
+    // only mechanism the chart wires up; an IAM role would set neither.
+    if std::env::var_os("AWS_ACCESS_KEY_ID").is_some() {
+        return;
+    }
+    tracing::warn!(
+        "no AWS_ACCESS_KEY_ID in the environment: slots will mount but their \
+         contents will never be hydrated from or flushed to S3. Set \
+         `agent.s3SecretName` to a Secret in this namespace."
+    );
+}
+
 fn serve(
     data_root: &std::path::Path,
     socket: &std::path::Path,
@@ -210,6 +231,8 @@ fn serve(
     allow_unquotaed_slots: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = SlotStore::new(SlotLayout::new(data_root));
+    let reaper_root = data_root.to_path_buf();
+    warn_without_s3_credentials();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -218,13 +241,42 @@ fn serve(
             // mounts slots, it just cannot refresh WorkspaceDirectory CRs when
             // flushing. Degrading here rather than refusing to start keeps the
             // storage path working if RBAC is misconfigured.
-            let client = match kubimo::Client::infer().await {
+            //
+            // `kubimo-indexer`, not the inferred default: the agent writes the
+            // same `status.storage` and `WorkspaceDirectory` fields the indexer
+            // does, and in a pooled workspace the cache job still runs an
+            // indexer container. Two managers apply-patching the same fields
+            // conflict, and server-side apply reports that as a 409 we only
+            // log. Sharing the indexer's identity makes the writes idempotent
+            // instead. It must stay distinct from the controller's
+            // `kubimo-controller`, which owns `status.mode` on the same object.
+            let client = match kubimo::Client::builder()
+                .name("kubimo-indexer")
+                .build()
+                .await
+            {
                 Ok(client) => Some(client),
                 Err(err) => {
                     tracing::warn!(%err, "no Kubernetes access; slots will not be flushed to S3");
                     None
                 }
             };
+            // Slots outlive the runners that used them — that is what makes
+            // reopening a workspace instant — so nothing on the unpublish path
+            // deletes one. Without this sweep they would accumulate on the node
+            // volume for every workspace ever opened here, including deleted
+            // ones. Needs cluster access to tell a deleted workspace from a
+            // merely idle one, so it only runs when we have a client.
+            if let Some(client) = client.clone() {
+                tokio::spawn(reaper::run(
+                    SlotStore::new(SlotLayout::new(&reaper_root)),
+                    client,
+                ));
+            } else {
+                tracing::warn!(
+                    "no Kubernetes access; slots for deleted workspaces will not be reclaimed"
+                );
+            }
             let node = csi::KubimoNode::new(
                 node_name,
                 store,

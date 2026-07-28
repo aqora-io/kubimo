@@ -122,8 +122,17 @@ RUN \
   --mount=from=build-marimo,src=/build/dist,dst=/mnt \
 <<EOF
 marimo_whl=`find /mnt -name '*.whl'`
+# Installed into the *system* interpreter, not the workspace venv, which is
+# created below with --system-site-packages and so inherits all of it. See
+# docker/setup/pyproject.toml for why the venv must not declare these itself.
+#
+# aqora is here so a workspace does not have to `uv add` it at creation: that
+# ran in an init container off an ~880MB image, on the critical path of every
+# new workspace. A workspace can still pin its own version with `uv add`, which
+# shadows this one.
 uv pip install --system \
   'marimo[recommended,lsp]'@"${marimo_whl}" \
+  "aqora[pyarrow]" \
   "ruff>=0.15.6" \
   "ty>=0.0.23" \
   "watchdog>=6.0.0" \
