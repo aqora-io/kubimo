@@ -202,3 +202,68 @@ impl WorkspaceFileKey {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keys are random, so recovering the previous mapping is the *only* thing
+    /// that keeps a path pointing at the object it already has. Without it every
+    /// mount re-uploads the whole workspace under fresh keys and orphans the old
+    /// objects, which nothing then references and nothing sweeps.
+    fn url_set() -> WorkspaceFileUrlSet {
+        WorkspaceFileUrlSet::new("bucket".into(), Some("workspace/ws/".into())).expect("url set")
+    }
+
+    #[test]
+    fn a_seeded_path_keeps_its_existing_object_key() {
+        let path = PathBuf::from("notebook.py");
+        // Whatever a previous run minted, as recorded in its directory CR.
+        let existing = url_set().get_or_insert(path.clone()).unwrap();
+
+        let mut urls = url_set();
+        urls.insert(path.clone(), &existing).expect("seed");
+
+        assert_eq!(
+            urls.get_or_insert(path).unwrap(),
+            existing,
+            "a seeded path minted a new key, orphaning its object"
+        );
+    }
+
+    /// The contrast: an unseeded set has nothing to reuse, which is exactly the
+    /// state the agent used to start every publish in.
+    #[test]
+    fn an_unseeded_path_mints_a_fresh_key() {
+        let path = PathBuf::from("notebook.py");
+        assert_ne!(
+            url_set().get_or_insert(path.clone()).unwrap(),
+            url_set().get_or_insert(path).unwrap()
+        );
+    }
+
+    /// Directory CR names have the same problem, and it is worse: duplicate CRs
+    /// for one (workspace, path) make the platform's field-selector lookup
+    /// return an arbitrary one, so the file browser can show a stale listing.
+    #[test]
+    fn a_seeded_directory_keeps_its_existing_cr_name() {
+        let mut names = WorkspaceDirNameSet::new("ws".into());
+        let path = PathBuf::from("subdir");
+
+        // Whatever the root reserved, a subdirectory's name is random.
+        let fresh = WorkspaceDirNameSet::new("ws".into()).get_or_insert(path.clone());
+        names.insert(path.clone(), &fresh).expect("seed");
+
+        assert_eq!(names.get_or_insert(path), fresh);
+    }
+
+    /// The root's name is stable even unseeded, because key 0 is reserved for
+    /// it. This is why the defect stayed invisible in a flat test workspace —
+    /// only subdirectories churned.
+    #[test]
+    fn the_root_directory_name_is_stable_without_seeding() {
+        let a = WorkspaceDirNameSet::new("ws".into()).get_or_insert(PathBuf::new());
+        let b = WorkspaceDirNameSet::new("ws".into()).get_or_insert(PathBuf::new());
+        assert_eq!(a, b);
+    }
+}

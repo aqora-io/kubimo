@@ -44,6 +44,11 @@ const ATTR_LIMIT_BYTES: &str = "limitBytes";
 /// Absent means "do not hydrate" — used by workspaces with no archive.
 const ATTR_BUCKET: &str = "bucket";
 const ATTR_KEY_PREFIX: &str = "keyPrefix";
+/// Archive to seed a never-indexed workspace from, from `spec.restoreFrom`.
+/// Read only when the workspace's own archive has no manifest, so a workspace
+/// that has ever been flushed can never be overwritten by its seed.
+const ATTR_SEED_BUCKET: &str = "seedBucket";
+const ATTR_SEED_KEY_PREFIX: &str = "seedKeyPrefix";
 
 /// Owner of a slot's contents: the `me` user baked into the marimo image.
 const SLOT_UID: u32 = 1000;
@@ -102,12 +107,26 @@ pub struct KubimoNode {
     /// `None` when the agent runs without cluster access, in which case slots
     /// still hydrate and mount but are never pushed back.
     client: Option<kubimo::Client>,
-    /// Continuous sync task per published volume.
+    /// Continuous sync task per *workspace*, not per published volume.
+    ///
+    /// A workspace can be published more than once on a node at the same time —
+    /// a cache job is deliberately co-located with a live runner by the
+    /// workspace affinity — and both mount the same slot directory. One watcher
+    /// per volume would mean two walking and uploading the same tree with
+    /// independent key sets, racing each other's `WorkspaceDirectory` writes and
+    /// orphaning objects through the sweep. So they share one, and it lives
+    /// until the last volume referencing it goes away.
     ///
     /// Only bound slots appear here: an idle slot has no runner and cannot
-    /// change, so the watcher count on a node tracks running runners rather
-    /// than total slots.
-    watchers: std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// change, so the watcher count on a node tracks running pods rather than
+    /// total slots.
+    watchers: std::sync::Mutex<std::collections::HashMap<String, Watcher>>,
+}
+
+/// A slot's sync task and the published volumes keeping it alive.
+struct Watcher {
+    handle: tokio::task::JoinHandle<()>,
+    volumes: std::collections::HashSet<String>,
 }
 
 /// Give a restored tree to the runner's uid.
@@ -171,7 +190,7 @@ impl KubimoNode {
     }
 
     /// Start continuous sync for a freshly published slot.
-    fn start_watcher(
+    async fn start_watcher(
         &self,
         volume_id: &str,
         workspace: &str,
@@ -181,40 +200,96 @@ impl KubimoNode {
         let Some(client) = self.client.as_ref() else {
             return;
         };
-        let mut watchers = match self.watchers.lock() {
-            Ok(watchers) => watchers,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if watchers.contains_key(volume_id) {
-            return;
+        // Deliberately scoped: `spawn_watcher` awaits (it reads the workspace's
+        // existing directory CRs to recover its key layout), and this is a std
+        // mutex whose guard cannot be held across that.
+        {
+            let mut watchers = self.lock_watchers();
+            if let Some(watcher) = watchers.get_mut(workspace) {
+                watcher.volumes.insert(volume_id.to_string());
+                return;
+            }
         }
-        match crate::hydrate::spawn_watcher(
+        let handle = match crate::hydrate::spawn_watcher(
             dir,
             workspace,
             archive,
             client.clone(),
             self.s3.clone(),
-        ) {
-            Ok(handle) => {
-                watchers.insert(volume_id.to_string(), handle);
-                tracing::info!(workspace, "watching slot for changes");
+        )
+        .await
+        {
+            Ok(handle) => handle,
+            Err(err) => {
+                tracing::warn!(%err, workspace, "could not start watcher; \
+                     the slot will only be flushed when its runner stops");
+                return;
             }
-            Err(err) => tracing::warn!(%err, workspace, "could not start watcher; \
-                 the slot will only be flushed when its runner stops"),
+        };
+        let mut watchers = self.lock_watchers();
+        // Re-check: dropping the lock above leaves room for another publish of
+        // the same workspace to have won the race. Keep the incumbent, since two
+        // watchers on one slot would upload it twice over.
+        if let Some(watcher) = watchers.get_mut(workspace) {
+            watcher.volumes.insert(volume_id.to_string());
+            handle.abort();
+            return;
+        }
+        watchers.insert(
+            workspace.to_string(),
+            Watcher {
+                handle,
+                volumes: std::iter::once(volume_id.to_string()).collect(),
+            },
+        );
+        tracing::info!(workspace, "watching slot for changes");
+    }
+
+    fn lock_watchers(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Watcher>> {
+        match self.watchers.lock() {
+            Ok(watchers) => watchers,
+            Err(poisoned) => poisoned.into_inner(),
         }
     }
 
-    /// Stop continuous sync for a volume.
+    /// Release one volume's claim on a workspace's watcher.
     ///
-    /// Aborted rather than gracefully stopped: a final flush follows
-    /// immediately, so anything the watcher was midway through is redone.
-    fn stop_watcher(&self, volume_id: &str) {
-        let mut watchers = match self.watchers.lock() {
-            Ok(watchers) => watchers,
-            Err(poisoned) => poisoned.into_inner(),
+    /// The watcher is aborted rather than gracefully stopped once the last
+    /// claim goes: a final flush follows immediately, so anything it was midway
+    /// through is redone.
+    fn stop_watcher(&self, volume_id: &str, workspace: &str) {
+        let mut watchers = self.lock_watchers();
+        let Some(watcher) = watchers.get_mut(workspace) else {
+            return;
         };
-        if let Some(handle) = watchers.remove(volume_id) {
-            handle.abort();
+        watcher.volumes.remove(volume_id);
+        if watcher.volumes.is_empty()
+            && let Some(watcher) = watchers.remove(workspace)
+        {
+            watcher.handle.abort();
+        }
+    }
+
+    /// Whether the workspace this slot belongs to is deleted or on its way out.
+    ///
+    /// Deleting a workspace tears down its runners, and the resulting unpublish
+    /// would otherwise flush the slot straight back into the S3 prefix the
+    /// platform had just purged — recreating a full copy of data that was meant
+    /// to be erased, with no CR left to find it by. The dedicated path has no
+    /// equivalent, because its indexer pod does not upload on SIGTERM.
+    ///
+    /// Errors count as "still there": failing to reach the API server must not
+    /// turn into silently dropping a legitimate flush.
+    async fn workspace_is_going_away(&self, client: &kubimo::Client, workspace: &str) -> bool {
+        match client.api::<kubimo::Workspace>().get_opt(workspace).await {
+            Ok(Some(found)) => found.metadata.deletion_timestamp.is_some(),
+            Ok(None) => true,
+            Err(err) => {
+                tracing::warn!(%err, workspace, "could not check whether the workspace still exists; flushing anyway");
+                false
+            }
         }
     }
 
@@ -247,6 +322,13 @@ impl KubimoNode {
             key_prefix: published.key_prefix.clone(),
         };
         let workspace = published.workspace;
+        if self.workspace_is_going_away(client, &workspace).await {
+            tracing::info!(
+                workspace,
+                "workspace is deleted or terminating; skipping flush"
+            );
+            return;
+        }
         let dir = self.store.layout().slot_dir(&published.slot);
         tracing::info!(workspace, slot = %published.slot, "flushing slot to S3");
         if let Err(err) =
@@ -267,6 +349,7 @@ impl KubimoNode {
         workspace: &str,
         limit_bytes: u64,
         archive: Option<&crate::hydrate::ArchiveLocation>,
+        seed: Option<&crate::hydrate::ArchiveLocation>,
     ) -> Result<PathBuf, Status> {
         let resolved = self
             .store
@@ -331,11 +414,27 @@ impl KubimoNode {
             // already populated would overwrite the tenant's newer local edits
             // with whatever was last synced — this is the path that makes
             // reopening a workspace with a warm slot instant.
+            let mut restored = false;
             if let Some(archive) = archive {
-                let hydrated = crate::hydrate::hydrate_slot(&dir, archive, &self.s3)
+                restored = crate::hydrate::hydrate_slot(&dir, archive, &self.s3)
                     .await
                     .map_err(|err| Status::internal(format!("hydrating slot: {err}")))?;
-                tracing::info!(workspace, slot = %resolved.id, hydrated, "slot hydrated");
+                tracing::info!(workspace, slot = %resolved.id, hydrated = restored, "slot hydrated");
+            }
+            // Fall back to the seed only when the workspace's own archive had no
+            // manifest, which is the existing signal for "never indexed". The
+            // workspace's own content always wins: re-seeding a warm workspace —
+            // one whose slot was reclaimed, or whose agent pod was replaced —
+            // would overwrite the tenant's work with the template it started
+            // from.
+            if !restored && let Some(seed) = seed {
+                let seeded = crate::hydrate::hydrate_slot(&dir, seed, &self.s3)
+                    .await
+                    .map_err(|err| Status::internal(format!("seeding slot: {err}")))?;
+                tracing::info!(workspace, slot = %resolved.id, seeded, "slot seeded");
+                restored |= seeded;
+            }
+            if restored {
                 // Restored files land as root; the runner is uid 1000.
                 chown_tree(&dir)
                     .map_err(|err| Status::internal(format!("chowning hydrated slot: {err}")))?;
@@ -403,8 +502,17 @@ impl Node for KubimoNode {
                     bucket: bucket.clone(),
                     key_prefix: request.volume_context.get(ATTR_KEY_PREFIX).cloned(),
                 });
+        // Only consulted when the workspace's own archive turns out to be
+        // empty; this is `spec.restoreFrom` reaching the agent, since a pooled
+        // workspace has no init Job to run a restore container in.
+        let seed = request.volume_context.get(ATTR_SEED_BUCKET).map(|bucket| {
+            crate::hydrate::ArchiveLocation {
+                bucket: bucket.clone(),
+                key_prefix: request.volume_context.get(ATTR_SEED_KEY_PREFIX).cloned(),
+            }
+        });
         let slot_dir = self
-            .prepare_slot(&workspace, limit_bytes, archive.as_ref())
+            .prepare_slot(&workspace, limit_bytes, archive.as_ref(), seed.as_ref())
             .await?;
         if let Some(slot) = self
             .store
@@ -426,7 +534,8 @@ impl Node for KubimoNode {
             tracing::warn!(%err, workspace, "could not record publish; flush on stop will be skipped");
         }
         if let Some(archive) = archive.as_ref() {
-            self.start_watcher(&request.volume_id, &workspace, &slot_dir, archive);
+            self.start_watcher(&request.volume_id, &workspace, &slot_dir, archive)
+                .await;
         }
         let target = Path::new(&request.target_path);
         let mounted = crate::mount::bind(&slot_dir, target, request.readonly)
@@ -454,7 +563,12 @@ impl Node for KubimoNode {
         // Stop watching first so the final flush is not racing an in-flight
         // upload, then flush: the runner's containers have already stopped by
         // the time kubelet calls this, so the tree is quiescent.
-        self.stop_watcher(&request.volume_id);
+        //
+        // The watcher is shared by every volume published for this workspace on
+        // this node, so it only actually stops once the last of them is gone.
+        if let Ok(Some(published)) = self.store.lookup_publish(&request.volume_id) {
+            self.stop_watcher(&request.volume_id, &published.workspace);
+        }
         self.flush_published(&request.volume_id).await;
         let unmounted = crate::mount::unbind(target)
             .map_err(|err| Status::internal(format!("unpublishing slot: {err}")))?;
@@ -549,6 +663,55 @@ mod tests {
     use proto::identity_client::IdentityClient;
     use proto::node_client::NodeClient;
     use tokio::net::UnixStream;
+
+    fn node() -> (tempfile::TempDir, KubimoNode) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SlotStore::new(crate::slot::SlotLayout::new(dir.path()));
+        (
+            dir,
+            KubimoNode::new("test-node".into(), store, 1024, true, None),
+        )
+    }
+
+    /// A workspace's watcher is shared by every volume published for it on this
+    /// node — a cache job is deliberately co-located with a live runner — and
+    /// must outlive all but the last of them. Two watchers on one slot would
+    /// walk and upload the same tree twice with independent key sets, racing
+    /// each other's directory writes.
+    #[tokio::test]
+    async fn a_shared_watcher_stops_only_when_its_last_volume_goes() {
+        let (_dir, node) = node();
+        let handle = tokio::spawn(std::future::pending::<()>());
+        node.lock_watchers().insert(
+            "bmow-shared".to_string(),
+            Watcher {
+                handle,
+                volumes: ["vol-runner".to_string(), "vol-cache".to_string()]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+
+        node.stop_watcher("vol-cache", "bmow-shared");
+        let watchers = node.lock_watchers();
+        let watcher = watchers
+            .get("bmow-shared")
+            .expect("the runner still needs the watcher");
+        assert!(!watcher.handle.is_finished());
+        assert_eq!(watcher.volumes.len(), 1);
+        drop(watchers);
+
+        node.stop_watcher("vol-runner", "bmow-shared");
+        assert!(!node.lock_watchers().contains_key("bmow-shared"));
+    }
+
+    /// Unpublishing a volume that was never watched must not disturb anything.
+    #[tokio::test]
+    async fn stopping_an_unknown_volume_is_a_no_op() {
+        let (_dir, node) = node();
+        node.stop_watcher("vol-unknown", "bmow-absent");
+        assert!(node.lock_watchers().is_empty());
+    }
 
     /// Start the plugin on a temp socket and hand back a connected channel.
     async fn connected() -> (tempfile::TempDir, tonic::transport::Channel) {

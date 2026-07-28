@@ -251,6 +251,99 @@ impl SlotStore {
         let _ = std::fs::remove_file(self.publish_path(volume_id));
     }
 
+    /// Every workspace this node holds a slot for.
+    ///
+    /// Read from the index rather than by listing slot directories, because a
+    /// slot's directory name is opaque — which workspace it belongs to is only
+    /// recorded in the `ws-` link.
+    pub fn workspaces(&self) -> Result<Vec<String>, StoreError> {
+        let entries = match std::fs::read_dir(self.index_dir()) {
+            Ok(entries) => entries,
+            // No index yet means no slots yet.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(io_err("listing index dir")(err)),
+        };
+        Ok(entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let workspace = name.to_str()?.strip_prefix("ws-")?;
+                // Anything failing validation was not written by us.
+                validate_workspace_name(workspace).ok()?;
+                Some(workspace.to_string())
+            })
+            .collect())
+    }
+
+    /// The workspaces that currently have at least one published volume.
+    ///
+    /// A slot in this set is mounted into a live pod, so it must never be
+    /// reclaimed however its workspace's CR looks.
+    pub fn published_workspaces(&self) -> Result<std::collections::HashSet<String>, StoreError> {
+        let entries = match std::fs::read_dir(self.index_dir()) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
+            Err(err) => return Err(io_err("listing index dir")(err)),
+        };
+        let mut published = std::collections::HashSet::new();
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // Must match `publish_path`. Getting this prefix wrong makes every
+            // slot look unpublished, and the sweep then deletes slots out from
+            // under running pods.
+            if !name.starts_with("vol-") {
+                continue;
+            }
+            if let Ok(raw) = std::fs::read_to_string(entry.path())
+                && let Some(workspace) = raw.lines().next()
+            {
+                published.insert(workspace.to_string());
+            }
+        }
+        Ok(published)
+    }
+
+    /// Drop a workspace's slot and everything indexing it.
+    ///
+    /// The project id file goes too, releasing that id: the quota limit set
+    /// against it is meaningless once no inodes carry it.
+    pub fn remove_slot(&self, workspace: &str) -> Result<bool, StoreError> {
+        validate_workspace_name(workspace)?;
+        let Some(id) = self.lookup_slot_id(workspace)? else {
+            // Nothing recorded, though the link may be a dangling leftover.
+            let _ = std::fs::remove_file(self.workspace_link(workspace));
+            return Ok(false);
+        };
+        let dir = self.layout.slot_dir(&id);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(io_err(format!("removing {}", dir.display()))(err)),
+        }
+        let _ = std::fs::remove_file(self.workspace_link(workspace));
+        let _ = std::fs::remove_file(self.project_id_path(&id));
+        Ok(true)
+    }
+
+    /// The slot id recorded for `workspace`, whether or not its directory still
+    /// exists. Unlike [`Self::lookup`] a missing directory is not treated as
+    /// "no slot", because reclaiming has to clean up the index either way.
+    fn lookup_slot_id(&self, workspace: &str) -> Result<Option<SlotId>, StoreError> {
+        let link = self.workspace_link(workspace);
+        let raw = match std::fs::read_to_string(&link) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io_err(format!("reading {}", link.display()))(err)),
+        };
+        SlotId::parse(raw.trim())
+            .map(Some)
+            .map_err(|source| StoreError::CorruptIndex {
+                workspace: workspace.to_string(),
+                source,
+            })
+    }
+
     /// Resolve the slot for `workspace`, allocating one if it has none.
     pub fn resolve_or_create(&self, workspace: &str) -> Result<ResolvedSlot, StoreError> {
         validate_workspace_name(workspace)?;

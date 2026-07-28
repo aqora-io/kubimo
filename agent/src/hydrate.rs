@@ -11,6 +11,7 @@
 //! handles manifest parsing, `..`-rejection, symlink write-through, CRC
 //! verification and partial-file cleanup.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use indexer::object_store;
@@ -52,20 +53,43 @@ pub struct ArchiveLocation {
     pub key_prefix: Option<String>,
 }
 
+/// What the previous upload of this workspace left behind.
+///
+/// The upload pipeline computes the set of objects and `WorkspaceDirectory` CRs
+/// to delete as "what was there before, minus what is there now", so an empty
+/// `previous` means nothing is ever swept.
+#[derive(Debug, Default)]
+pub struct PreviousUpload {
+    pub names: BTreeSet<String>,
+    pub urls: BTreeSet<kubimo::url::Url>,
+}
+
 /// Build the upload pipeline's inputs for a slot.
 ///
 /// Shared by the one-shot flush and the continuous watcher so the two can never
 /// disagree about scope, key layout or file-size limits — a divergence there
 /// would mean the flush wrote an archive the watcher would immediately rewrite.
-fn upload_inputs(
+///
+/// The key sets are seeded from the workspace's existing `WorkspaceDirectory`
+/// CRs rather than started empty. Content keys and directory CR names are
+/// random (`KeySet::get_or_insert`), so a fresh set means every path gets a new
+/// key on every mount: the whole workspace is re-uploaded under new keys, the
+/// previous objects are orphaned with nothing left referencing them, and a
+/// second set of directory CRs appears for the same paths. The standalone
+/// indexer avoids this by calling `process_existing_dirs` at startup; the agent
+/// has to do the same, once per publish rather than once per process.
+async fn upload_inputs(
     slot_dir: &Path,
     workspace: &str,
     archive: &ArchiveLocation,
     watch: bool,
+    client: &kubimo::Client,
+    s3: &S3Client,
 ) -> Result<
     (
         indexer::upload::UploadOptions,
         indexer::upload::WorkspaceKeys,
+        PreviousUpload,
     ),
     HydrateError,
 > {
@@ -88,14 +112,29 @@ fn upload_inputs(
         name: workspace.to_string(),
         directory: slot_dir.join(WORKSPACE_SUBDIR),
     };
-    let keys = indexer::upload::WorkspaceKeys::new(
-        indexer::keys::WorkspaceDirNameSet::new(workspace.to_string()),
-        indexer::keys::WorkspaceFileUrlSet::new(
-            archive.bucket.clone(),
-            archive.key_prefix.clone(),
-        )?,
-    );
-    Ok((options, keys))
+    let mut names = indexer::keys::WorkspaceDirNameSet::new(workspace.to_string());
+    let mut urls = indexer::keys::WorkspaceFileUrlSet::new(
+        archive.bucket.clone(),
+        archive.key_prefix.clone(),
+    )?;
+    let mut previous = PreviousUpload::default();
+    let mut cache_markers = indexer::s3::CacheMarkers::new();
+    indexer::upload::process_existing_dirs(
+        client,
+        workspace,
+        &mut names,
+        &mut urls,
+        &mut cache_markers,
+        &mut previous.names,
+        &mut previous.urls,
+    )
+    .await;
+    // Extend rather than replace: this client is shared by every slot on the
+    // node, so replacing would drop every other slot's markers.
+    s3.extend_cache(cache_markers).await;
+
+    let keys = indexer::upload::WorkspaceKeys::new(names, urls);
+    Ok((options, keys, previous))
 }
 
 /// Continuously sync a bound slot to S3 until the returned task is aborted.
@@ -104,25 +143,56 @@ fn upload_inputs(
 /// change — so the number of watchers on a node equals the number of running
 /// runners, which is what one indexer pod per active workspace already costs
 /// today.
-pub fn spawn_watcher(
+pub async fn spawn_watcher(
     slot_dir: &Path,
     workspace: &str,
     archive: &ArchiveLocation,
     client: kubimo::Client,
     s3: indexer::s3::S3Client,
 ) -> Result<tokio::task::JoinHandle<()>, HydrateError> {
-    let (options, keys) = upload_inputs(slot_dir, workspace, archive, true)?;
+    let (options, keys, previous) =
+        upload_inputs(slot_dir, workspace, archive, true, &client, &s3).await?;
+    let name = workspace.to_string();
     Ok(tokio::spawn(async move {
-        indexer::upload::watch(
-            &options,
-            &client,
-            &s3,
-            &keys,
-            Default::default(),
-            Default::default(),
-        )
-        .await;
+        // Racing the watcher against the workspace's disappearance, rather than
+        // relying on the unpublish to stop it. Deleting a workspace purges its
+        // S3 prefix, but the runner pod lingers for its termination grace
+        // period — and a shutting-down marimo still writes files. Any upload in
+        // that window recreates the prefix the platform just emptied, with no
+        // CR left to find it by. The final flush is guarded separately.
+        tokio::select! {
+            () = indexer::upload::watch(
+                &options, &client, &s3, &keys, previous.names, previous.urls,
+            ) => {}
+            () = wait_until_deleted(&client, &name) => {
+                tracing::info!(workspace = %name, "workspace deleted; stopping watcher");
+            }
+        }
     }))
+}
+
+/// How often to re-check that a watched workspace still exists.
+///
+/// Bounds how long an upload can keep recreating a purged archive. Short enough
+/// to land inside a pod's termination grace period, long enough that a node's
+/// worth of slots is a negligible request rate.
+const DELETION_POLL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Resolve once `workspace` is gone or has been marked for deletion.
+///
+/// Never resolves on API errors: losing the API server briefly must not look
+/// like a deletion and silently stop syncing a live workspace.
+async fn wait_until_deleted(client: &kubimo::Client, workspace: &str) {
+    loop {
+        tokio::time::sleep(DELETION_POLL).await;
+        match client.api::<kubimo::Workspace>().get_opt(workspace).await {
+            Ok(Some(found)) if found.metadata.deletion_timestamp.is_none() => {}
+            Ok(_) => return,
+            Err(err) => {
+                tracing::warn!(%err, workspace, "could not check whether the workspace still exists")
+            }
+        }
+    }
 }
 
 /// Push a slot's tracked files up to S3 and refresh its `WorkspaceDirectory`
@@ -146,7 +216,8 @@ pub async fn flush_slot(
         // Nothing was ever hydrated here; there is nothing to push back.
         return Ok(());
     }
-    let (options, keys) = upload_inputs(slot_dir, workspace, archive, false)?;
+    let (options, keys, previous) =
+        upload_inputs(slot_dir, workspace, archive, false, client, s3).await?;
     indexer::upload::run(
         &options,
         // One-shot flush; the watcher keeps its own long-lived cache.
@@ -154,8 +225,8 @@ pub async fn flush_slot(
         client,
         s3,
         &keys,
-        &Default::default(),
-        &Default::default(),
+        &previous.names,
+        &previous.urls,
     )
     .await;
     Ok(())

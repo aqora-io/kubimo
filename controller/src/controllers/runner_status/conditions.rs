@@ -3,12 +3,14 @@ use kubimo::k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
 use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kubimo::k8s_openapi::jiff::Timestamp;
 
-pub(super) const PVC_BOUND: &str = "PvcBound";
-pub(super) const WORKSPACE_READY: &str = "WorkspaceReady";
-pub(super) const POD_SCHEDULED: &str = "PodScheduled";
-pub(super) const POD_READY: &str = "PodReady";
-pub(super) const STARTUP_CONDITIONS: [&str; 4] =
-    [PVC_BOUND, WORKSPACE_READY, POD_SCHEDULED, POD_READY];
+// Re-exported from the api crate rather than defined here. These strings are
+// the contract consumers match on, and they treat a *missing* condition as
+// unsatisfied — so a rename that only touched the controller would pin every
+// runner at the previous phase, with no error raised anywhere. Sharing the
+// definition means a consumer can assert against it.
+pub(super) use kubimo::conditions::{
+    POD_READY, POD_SCHEDULED, PVC_BOUND, STARTUP_CONDITIONS, WORKSPACE_READY,
+};
 
 fn condition(
     type_: &str,

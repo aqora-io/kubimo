@@ -101,6 +101,19 @@ agent:
   allowUnpatchedKernel: false
   kubeletDir: /var/lib/kubelet
   rustLog: info
+  # Secret holding S3 credentials for the workspace archive bucket, mounted as
+  # envFrom. The agent is the only thing that reads or writes a pooled
+  # workspace's archive, so without this it cannot hydrate a slot (the mount
+  # fails and the runner never starts) nor flush one (logged and dropped).
+  #
+  # Expected keys are what object_store's AmazonS3Builder::from_env reads:
+  # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT, AWS_REGION,
+  # AWS_ALLOW_HTTP. The bucket is not read from here — it comes from each
+  # workspace's spec.indexer.bucket.
+  #
+  # Must exist in the release namespace. Empty leaves the agent without archive
+  # access: slots still mount, but nothing is ever persisted to S3.
+  s3SecretName: ""
   # Per-node data volume, provisioned as a generic ephemeral volume so each
   # DaemonSet pod gets its own PVC. Sized to the working set of the slots on a
   # node, not to the sum of their quotas: slot quotas are deliberately
