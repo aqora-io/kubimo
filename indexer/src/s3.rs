@@ -395,7 +395,70 @@ fn parse_s3_url(url: &Url) -> Result<(String, Key), ParseS3UrlError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object_store::aws::AmazonS3ConfigKey;
     use object_store::memory::InMemory;
+
+    /// The exact key set every environment's S3 Secret carries.
+    ///
+    /// These are the names the platform writes and the dedicated indexer
+    /// container already consumes through `envFrom`. The node agent gets the
+    /// same map from kubelet via `nodePublishSecretRef`, but as CSI secrets
+    /// rather than environment variables, so it maps the names itself.
+    ///
+    /// `AWS_ENDPOINT` is the one that matters. Every environment has its own
+    /// endpoint — staging is Scaleway, each PR preview its own MinIO — and an
+    /// unrecognised key is *ignored*, not rejected. So a name that failed to map
+    /// would not fail the mount: the client would quietly fall back to AWS's
+    /// real endpoint, and the workspace's files would go somewhere nobody looks.
+    /// `object_store` accepts both `aws_endpoint` and `aws_endpoint_url`; these
+    /// Secrets use the former.
+    #[test]
+    fn a_workspace_secret_maps_onto_the_s3_config() {
+        let client = S3Client::from_options([
+            ("AWS_ACCESS_KEY_ID", "key-id"),
+            ("AWS_SECRET_ACCESS_KEY", "secret"),
+            ("AWS_ENDPOINT", "https://minio-pr-1036.aqora-internal.io"),
+            ("AWS_REGION", "us-east-1"),
+            ("AWS_BUCKET", "aqora-pr-1036-private"),
+        ]);
+
+        let value = |key| client.builder.get_config_value(&key);
+        assert_eq!(
+            value(AmazonS3ConfigKey::Endpoint).as_deref(),
+            Some("https://minio-pr-1036.aqora-internal.io"),
+            "endpoint did not map; the agent would silently use AWS instead"
+        );
+        assert_eq!(
+            value(AmazonS3ConfigKey::AccessKeyId).as_deref(),
+            Some("key-id")
+        );
+        assert_eq!(
+            value(AmazonS3ConfigKey::SecretAccessKey).as_deref(),
+            Some("secret")
+        );
+        assert_eq!(
+            value(AmazonS3ConfigKey::Region).as_deref(),
+            Some("us-east-1")
+        );
+    }
+
+    /// A Secret is shared with other consumers and may carry keys that mean
+    /// nothing to S3. Ignoring them must not cost the ones that do.
+    #[test]
+    fn unrecognised_secret_keys_are_ignored_not_fatal() {
+        let client = S3Client::from_options([
+            ("AWS_ENDPOINT", "https://example.invalid"),
+            ("RUST_LOG", "debug"),
+            ("", "empty"),
+        ]);
+        assert_eq!(
+            client
+                .builder
+                .get_config_value(&AmazonS3ConfigKey::Endpoint)
+                .as_deref(),
+            Some("https://example.invalid"),
+        );
+    }
 
     /// The node agent shares one `S3Client` across every slot on the node, so a
     /// per-slot cache update must not discard the other slots' markers. Keys are
