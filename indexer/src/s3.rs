@@ -77,8 +77,38 @@ pub enum CacheMarkerCheckError {
 
 impl S3Client {
     pub fn from_env() -> Self {
+        Self::from_builder(AmazonS3Builder::from_env())
+    }
+
+    /// Build a client from an explicit set of `AWS_*` options.
+    ///
+    /// The node agent serves workspaces from more than one S3 account at once —
+    /// on a shared cluster each environment has its own bucket *and* its own
+    /// endpoint — so it cannot use one client built from its own process
+    /// environment. kubelet hands it the workspace's own credentials with each
+    /// `NodePublishVolume`, and this turns those into a client.
+    ///
+    /// Keys are matched case-insensitively against `object_store`'s config
+    /// names, so a Kubernetes Secret's `AWS_ACCESS_KEY_ID` works as-is.
+    /// Anything unrecognised is ignored rather than rejected: a Secret shared
+    /// with other consumers may legitimately carry keys that mean nothing here.
+    pub fn from_options<K, V>(options: impl IntoIterator<Item = (K, V)>) -> Self
+    where
+        K: AsRef<str>,
+        V: Into<String>,
+    {
+        let mut builder = AmazonS3Builder::new();
+        for (key, value) in options {
+            if let Ok(key) = key.as_ref().to_ascii_lowercase().parse() {
+                builder = builder.with_config(key, value);
+            }
+        }
+        Self::from_builder(builder)
+    }
+
+    fn from_builder(builder: AmazonS3Builder) -> Self {
         Self {
-            builder: Arc::new(AmazonS3Builder::from_env()),
+            builder: Arc::new(builder),
             clients: Arc::new(RwLock::new(BTreeMap::new())),
             cache_markers: Arc::new(RwLock::new(CacheMarkers::new())),
         }

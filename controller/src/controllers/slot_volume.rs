@@ -8,7 +8,8 @@
 use std::collections::BTreeMap;
 
 use kubimo::k8s_openapi::api::core::v1::{
-    CSIVolumeSource, PersistentVolumeClaimVolumeSource, PodSecurityContext, Volume,
+    CSIVolumeSource, LocalObjectReference, PersistentVolumeClaimVolumeSource, PodSecurityContext,
+    Volume,
 };
 use kubimo::{Workspace, WorkspaceMode};
 
@@ -29,6 +30,19 @@ pub(crate) struct SlotSources {
     /// `Dedicated`; under `Pooled` there is no init Job, so it travels to the
     /// agent and is applied only when `archive` turns out to have no manifest.
     pub seed: Option<(String, Option<String>)>,
+    /// Secret holding the workspace's S3 credentials, from
+    /// `spec.indexer.pod.envFrom` — the same one the dedicated indexer pod
+    /// mounts.
+    ///
+    /// Passed to the agent as the volume's `nodePublishSecretRef` rather than
+    /// configured on the agent itself, because a node serves workspaces from
+    /// more than one S3 account: on a shared cluster each environment has its
+    /// own bucket *and* endpoint, so a single node-level credential could only
+    /// ever serve one of them. kubelet resolves this in the *pod's* namespace,
+    /// which is where the platform already keeps the secret, and hands the
+    /// contents to `NodePublishVolume` — so the agent needs no access to
+    /// Secrets of its own.
+    pub credentials_secret: Option<String>,
 }
 
 impl SlotSources {
@@ -44,8 +58,27 @@ impl SlotSources {
             seed: workspace
                 .and_then(|workspace| workspace.spec.restore_from.as_ref())
                 .map(|restore| (restore.bucket.clone(), restore.key_prefix.clone())),
+            credentials_secret: workspace
+                .and_then(|workspace| workspace.spec.indexer.as_ref())
+                .and_then(credentials_secret_name),
         }
     }
+}
+
+/// The Secret an indexer spec pulls its S3 credentials from.
+///
+/// Takes the first `envFrom` secret reference, which is how the platform
+/// expresses this and how the dedicated indexer container consumes it. `env`
+/// entries are not considered: a `secretKeyRef` there names a single key, not
+/// the whole credential set.
+fn credentials_secret_name(indexer: &kubimo::WorkspaceIndexer) -> Option<String> {
+    indexer
+        .pod
+        .as_ref()?
+        .env_from
+        .as_ref()?
+        .iter()
+        .find_map(|source| source.secret_ref.as_ref()?.name.clone().into())
 }
 
 /// The volume mounted at `/home/me`.
@@ -76,6 +109,14 @@ pub(crate) fn workspace_volume(
             csi: Some(CSIVolumeSource {
                 driver: SLOT_CSI_DRIVER.to_string(),
                 read_only: Some(read_only),
+                // Resolved by kubelet in this pod's namespace and delivered to
+                // the agent as `NodePublishVolumeRequest.secrets`. Never put
+                // credentials in `volume_attributes`: those are stored on the
+                // Pod object and readable by anything that can read Pods.
+                node_publish_secret_ref: sources
+                    .credentials_secret
+                    .clone()
+                    .map(|name| LocalObjectReference { name }),
                 volume_attributes: Some(slot_attributes(workspace_name, sources)),
                 ..Default::default()
             }),
@@ -133,6 +174,7 @@ mod tests {
             limit_bytes: Some(2_147_483_648),
             archive: Some((Some("bucket".into()), Some("workspace/abc/".into()))),
             seed: Some(("bucket".into(), Some("workspace-template/v1/".into()))),
+            credentials_secret: Some("s3-credentials".into()),
         }
     }
 
@@ -165,6 +207,57 @@ mod tests {
             attrs.get("seedKeyPrefix").unwrap(),
             "workspace-template/v1/"
         );
+    }
+
+    /// The agent has no S3 credentials of its own — a node serves workspaces
+    /// from several S3 accounts at once — so kubelet has to hand it each
+    /// workspace's own, resolved from this ref in the *pod's* namespace.
+    #[test]
+    fn pooled_mode_names_the_workspace_credentials_secret() {
+        let volume = workspace_volume("bmow-test", WorkspaceMode::Pooled, false, sources());
+        assert_eq!(
+            volume.csi.unwrap().node_publish_secret_ref.unwrap().name,
+            "s3-credentials"
+        );
+    }
+
+    /// Volume attributes live on the Pod object, readable by anything that can
+    /// read Pods. Credentials must only ever travel via the secret ref.
+    #[test]
+    fn credentials_never_appear_in_volume_attributes() {
+        let volume = workspace_volume("bmow-test", WorkspaceMode::Pooled, false, sources());
+        let attrs = volume.csi.unwrap().volume_attributes.unwrap();
+        for (key, value) in &attrs {
+            assert!(!key.to_lowercase().contains("secret"), "{key}");
+            assert_ne!(value, "s3-credentials", "{key} leaked the secret name");
+        }
+    }
+
+    /// Derived from the same `envFrom` secret the dedicated indexer container
+    /// mounts, so the two modes read the same credentials.
+    #[test]
+    fn the_credentials_secret_comes_from_the_indexer_env_from() {
+        use kubimo::k8s_openapi::api::core::v1::{EnvFromSource, SecretEnvSource};
+
+        let indexer = kubimo::WorkspaceIndexer {
+            pod: Some(kubimo::WorkspaceIndexerPod {
+                env_from: Some(vec![EnvFromSource {
+                    secret_ref: Some(SecretEnvSource {
+                        name: "pr-1035-s3-credentials".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            credentials_secret_name(&indexer).as_deref(),
+            Some("pr-1035-s3-credentials")
+        );
+        // No pod section at all is the standalone case: nothing to reference.
+        assert!(credentials_secret_name(&kubimo::WorkspaceIndexer::default()).is_none());
     }
 
     /// A workspace with no indexer config must not get a half-specified

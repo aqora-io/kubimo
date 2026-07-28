@@ -100,9 +100,28 @@ pub struct KubimoNode {
     /// break every other tenant on that node. Silently degrading would be the
     /// easiest way to ship unlimited slots to production by accident.
     allow_unquotaed_slots: bool,
-    /// Built once from the process environment (AWS_*), shared across slots so
-    /// one connection pool serves every workspace on the node.
+    /// Fallback client, built from the process environment (AWS_*).
+    ///
+    /// Only meaningful on a cluster where every workspace lives in the same S3
+    /// account — a dev cluster, or a standalone kubimo. Anywhere the platform
+    /// runs several environments side by side, each has its own bucket *and*
+    /// endpoint, and the per-workspace credentials below are what actually
+    /// serve them.
     s3: indexer::s3::S3Client,
+    /// Whether [`Self::s3`] has any credentials at all, decided once at
+    /// startup. `AmazonS3Builder::from_env` validates nothing, so without this
+    /// an unconfigured fallback is indistinguishable from a working one until
+    /// a request fails.
+    has_env_credentials: bool,
+    /// Per-workspace S3 clients, built from the credentials kubelet delivers
+    /// with each `NodePublishVolume`.
+    ///
+    /// Retained past the publish because `NodeUnpublishVolume` carries no
+    /// secrets and that is exactly when the final flush runs. Losing this on an
+    /// agent *container* restart costs at most the final flush; an agent *pod*
+    /// replacement destroys the whole node volume anyway, since it is a generic
+    /// ephemeral volume.
+    s3_clients: std::sync::Mutex<std::collections::HashMap<String, indexer::s3::S3Client>>,
     /// Kubernetes client used to refresh `WorkspaceDirectory` CRs when flushing.
     /// `None` when the agent runs without cluster access, in which case slots
     /// still hydrate and mount but are never pushed back.
@@ -184,8 +203,50 @@ impl KubimoNode {
             default_limit_bytes,
             allow_unquotaed_slots,
             s3: indexer::s3::S3Client::from_env(),
+            has_env_credentials: std::env::var_os("AWS_ACCESS_KEY_ID").is_some(),
+            s3_clients: Default::default(),
             client,
             watchers: Default::default(),
+        }
+    }
+
+    /// Remember the credentials kubelet delivered for `workspace`.
+    fn remember_credentials(
+        &self,
+        workspace: &str,
+        secrets: &std::collections::HashMap<String, String>,
+    ) {
+        if secrets.is_empty() {
+            return;
+        }
+        let client = indexer::s3::S3Client::from_options(secrets.iter());
+        self.lock_s3_clients().insert(workspace.to_string(), client);
+    }
+
+    /// The S3 client to use for `workspace`.
+    ///
+    /// `None` means there is nowhere to read or write this workspace's archive:
+    /// no credentials arrived with the mount and the agent has none of its own.
+    /// Callers must say so rather than proceeding, because the failure is
+    /// otherwise invisible — a hydrate looks like an empty workspace and a
+    /// flush is logged and dropped.
+    fn s3_for(&self, workspace: &str) -> Option<indexer::s3::S3Client> {
+        if let Some(client) = self.lock_s3_clients().get(workspace) {
+            return Some(client.clone());
+        }
+        self.has_env_credentials.then(|| self.s3.clone())
+    }
+
+    fn forget_credentials(&self, workspace: &str) {
+        self.lock_s3_clients().remove(workspace);
+    }
+
+    fn lock_s3_clients(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, indexer::s3::S3Client>> {
+        match self.s3_clients.lock() {
+            Ok(clients) => clients,
+            Err(poisoned) => poisoned.into_inner(),
         }
     }
 
@@ -198,6 +259,13 @@ impl KubimoNode {
         archive: &crate::hydrate::ArchiveLocation,
     ) {
         let Some(client) = self.client.as_ref() else {
+            return;
+        };
+        let Some(s3) = self.s3_for(workspace) else {
+            tracing::warn!(
+                workspace,
+                "no S3 credentials for this workspace; its slot will not be synced"
+            );
             return;
         };
         // Deliberately scoped: `spawn_watcher` awaits (it reads the workspace's
@@ -215,7 +283,7 @@ impl KubimoNode {
             workspace,
             archive,
             client.clone(),
-            self.s3.clone(),
+            s3,
         )
         .await
         {
@@ -329,10 +397,21 @@ impl KubimoNode {
             );
             return;
         }
+        // `NodeUnpublishVolume` carries no secrets, so this is the credential
+        // set remembered when the volume was published. Losing it — an agent
+        // container restart between publish and unpublish — must be loud: the
+        // slot's newest work is on disk but cannot be persisted.
+        let Some(s3) = self.s3_for(&workspace) else {
+            tracing::error!(
+                workspace,
+                "no S3 credentials for this workspace, so its final flush is being skipped; \
+                 changes since the last sync exist only on this node"
+            );
+            return;
+        };
         let dir = self.store.layout().slot_dir(&published.slot);
         tracing::info!(workspace, slot = %published.slot, "flushing slot to S3");
-        if let Err(err) =
-            crate::hydrate::flush_slot(&dir, &workspace, &archive, client, &self.s3).await
+        if let Err(err) = crate::hydrate::flush_slot(&dir, &workspace, &archive, client, &s3).await
         {
             tracing::error!(%err, workspace, "flush failed; slot data is still on disk");
         }
@@ -415,8 +494,12 @@ impl KubimoNode {
             // with whatever was last synced — this is the path that makes
             // reopening a workspace with a warm slot instant.
             let mut restored = false;
-            if let Some(archive) = archive {
-                restored = crate::hydrate::hydrate_slot(&dir, archive, &self.s3)
+            // Absent credentials leave both sources unreadable; the slot starts
+            // empty rather than the mount failing, matching a workspace that
+            // genuinely has no archive.
+            let s3 = self.s3_for(workspace);
+            if let (Some(archive), Some(s3)) = (archive, s3.as_ref()) {
+                restored = crate::hydrate::hydrate_slot(&dir, archive, s3)
                     .await
                     .map_err(|err| Status::internal(format!("hydrating slot: {err}")))?;
                 tracing::info!(workspace, slot = %resolved.id, hydrated = restored, "slot hydrated");
@@ -511,6 +594,11 @@ impl Node for KubimoNode {
                 key_prefix: request.volume_context.get(ATTR_SEED_KEY_PREFIX).cloned(),
             }
         });
+        // Credentials for this workspace's archive, resolved by kubelet from the
+        // volume's `nodePublishSecretRef` in the *pod's* namespace. Recorded
+        // before anything touches S3, and kept afterwards because the matching
+        // unpublish — where the final flush happens — carries no secrets.
+        self.remember_credentials(&workspace, &request.secrets);
         let slot_dir = self
             .prepare_slot(&workspace, limit_bytes, archive.as_ref(), seed.as_ref())
             .await?;
@@ -578,7 +666,20 @@ impl Node for KubimoNode {
         if unmounted {
             // kubelet creates the target directory, so it is ours to remove.
             let _ = std::fs::remove_dir(target);
+            let published = self.store.lookup_publish(&request.volume_id).ok().flatten();
             self.store.forget_publish(&request.volume_id);
+            // Drop the cached credentials once nothing on this node is mounting
+            // the workspace any more — after the flush above, which needed them.
+            // Held any longer they would accumulate for every workspace the node
+            // has ever served.
+            if let Some(published) = published
+                && !self
+                    .store
+                    .published_workspaces()
+                    .is_ok_and(|live| live.contains(&published.workspace))
+            {
+                self.forget_credentials(&published.workspace);
+            }
             tracing::info!(target = %target.display(), "unpublished slot");
         }
         Ok(Response::new(proto::NodeUnpublishVolumeResponse {}))
