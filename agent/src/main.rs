@@ -203,26 +203,6 @@ fn check_kernel(
     }
 }
 
-/// Say so at startup when the agent has no S3 credentials.
-///
-/// `AmazonS3Builder::from_env` reads the environment without validating it, so
-/// missing credentials do not surface until a slot is actually hydrated or
-/// flushed — as a failed mount on one path and a logged-and-dropped error on
-/// the other. Neither points at the real cause, which is almost always an
-/// unset `agent.s3SecretName` or a Secret in the wrong namespace.
-fn warn_without_s3_credentials() {
-    // Matching what object_store looks for. A static credential pair is the
-    // only mechanism the chart wires up; an IAM role would set neither.
-    if std::env::var_os("AWS_ACCESS_KEY_ID").is_some() {
-        return;
-    }
-    tracing::warn!(
-        "no AWS_ACCESS_KEY_ID in the environment: slots will mount but their \
-         contents will never be hydrated from or flushed to S3. Set \
-         `agent.s3SecretName` to a Secret in this namespace."
-    );
-}
-
 fn serve(
     data_root: &std::path::Path,
     socket: &std::path::Path,
@@ -232,7 +212,6 @@ fn serve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = SlotStore::new(SlotLayout::new(data_root));
     let reaper_root = data_root.to_path_buf();
-    warn_without_s3_credentials();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
