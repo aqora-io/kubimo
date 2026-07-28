@@ -22,6 +22,9 @@ jobs:
           - name: marimo
             bake-target: marimo
             registry: ghcr.io/aqora-io/kubimo-marimo
+          - name: agent
+            bake-target: agent
+            registry: ghcr.io/aqora-io/kubimo-agent
         platform:
           - runner: ubuntu-latest
             pair: linux/amd64
@@ -98,6 +101,8 @@ jobs:
             registry: ghcr.io/aqora-io/kubimo-controller
           - name: marimo
             registry: ghcr.io/aqora-io/kubimo-marimo
+          - name: agent
+            registry: ghcr.io/aqora-io/kubimo-agent
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
