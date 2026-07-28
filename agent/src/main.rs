@@ -5,6 +5,7 @@
 //! project quota, hand it to a runner pod as a bind mount, and reclaim it when
 //! the workspace is done with it.
 
+mod clients;
 mod csi;
 mod hydrate;
 mod kernel;
@@ -45,6 +46,9 @@ enum Command {
     CreateSlot {
         #[arg(long)]
         workspace: String,
+        /// Namespace the Workspace CR lives in.
+        #[arg(long, default_value = "default")]
+        namespace: String,
         #[arg(long, default_value_t = DEFAULT_LIMIT_BYTES)]
         limit_bytes: u64,
     },
@@ -93,8 +97,9 @@ fn main() {
         }
         Command::CreateSlot {
             workspace,
+            namespace,
             limit_bytes,
-        } => create_slot(&args.data_root, &workspace, limit_bytes),
+        } => create_slot(&args.data_root, &workspace, &namespace, limit_bytes),
         Command::Serve {
             socket,
             node_name,
@@ -147,10 +152,11 @@ fn inspect(data_root: &std::path::Path) {
 fn create_slot(
     data_root: &std::path::Path,
     workspace: &str,
+    namespace: &str,
     limit_bytes: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = SlotStore::new(SlotLayout::new(data_root));
-    let resolved = store.resolve_or_create(workspace)?;
+    let resolved = store.resolve_or_create(workspace, namespace)?;
     let dir = store.layout().slot_dir(&resolved.id);
     if resolved.created {
         // Order matters: stamp the project id before anything is written,
@@ -246,10 +252,10 @@ fn serve(
             // volume for every workspace ever opened here, including deleted
             // ones. Needs cluster access to tell a deleted workspace from a
             // merely idle one, so it only runs when we have a client.
-            if let Some(client) = client.clone() {
+            if client.is_some() {
                 tokio::spawn(reaper::run(
                     SlotStore::new(SlotLayout::new(&reaper_root)),
-                    client,
+                    clients::NamespacedClients::new(true),
                 ));
             } else {
                 tracing::warn!(

@@ -64,6 +64,9 @@ pub struct SlotStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedSlot {
     pub workspace: String,
+    /// Namespace the Workspace CR lives in. Not the agent's own: it runs beside
+    /// the controller, while workspaces belong to whoever created them.
+    pub namespace: String,
     pub slot: SlotId,
     pub bucket: Option<String>,
     pub key_prefix: Option<String>,
@@ -111,10 +114,14 @@ impl SlotStore {
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(io_err(format!("reading {}", link.display()))(err)),
         };
-        let id = SlotId::parse(raw.trim()).map_err(|source| StoreError::CorruptIndex {
-            workspace: workspace.to_string(),
-            source,
-        })?;
+        // First line only: the namespace follows on the second.
+        let id =
+            SlotId::parse(raw.lines().next().unwrap_or_default().trim()).map_err(|source| {
+                StoreError::CorruptIndex {
+                    workspace: workspace.to_string(),
+                    source,
+                }
+            })?;
         // A recorded slot whose directory is gone was wiped out from under us;
         // treat it as absent so the caller allocates a fresh one rather than
         // bind-mounting a path that does not exist.
@@ -174,12 +181,26 @@ impl SlotStore {
     }
 
     /// Record that `workspace` owns `id` with `project_id`.
-    fn record(&self, workspace: &str, id: &SlotId, project_id: u32) -> Result<(), StoreError> {
+    fn record(
+        &self,
+        workspace: &str,
+        namespace: &str,
+        id: &SlotId,
+        project_id: u32,
+    ) -> Result<(), StoreError> {
         std::fs::create_dir_all(self.index_dir()).map_err(io_err("creating index dir"))?;
         std::fs::write(self.project_id_path(id), project_id.to_string())
             .map_err(io_err("writing project id"))?;
-        std::fs::write(self.workspace_link(workspace), id.as_str())
-            .map_err(io_err("writing workspace index"))?;
+        // Slot id then namespace, one per line. The namespace is recorded
+        // because a Workspace CR can only be looked up in the namespace it
+        // lives in, and the agent's own namespace is not it — the agent runs
+        // beside the controller while workspaces belong to whichever namespace
+        // created them.
+        std::fs::write(
+            self.workspace_link(workspace),
+            format!("{}\n{namespace}", id.as_str()),
+        )
+        .map_err(io_err("writing workspace index"))?;
         Ok(())
     }
 
@@ -209,11 +230,12 @@ impl SlotStore {
         // Line-oriented rather than JSON to keep the agent's on-disk state
         // trivially inspectable during an incident.
         let body = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             published.workspace,
             published.slot,
             published.bucket.as_deref().unwrap_or(""),
             published.key_prefix.as_deref().unwrap_or(""),
+            published.namespace,
         );
         std::fs::write(self.publish_path(volume_id), body).map_err(io_err("recording publish"))?;
         Ok(())
@@ -239,11 +261,14 @@ impl SlotStore {
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string)
         };
+        let bucket = non_empty(lines.next());
+        let key_prefix = non_empty(lines.next());
         Ok(Some(PublishedSlot {
             workspace: workspace.to_string(),
             slot,
-            bucket: non_empty(lines.next()),
-            key_prefix: non_empty(lines.next()),
+            bucket,
+            key_prefix,
+            namespace: non_empty(lines.next()).unwrap_or_default(),
         }))
     }
 
@@ -256,7 +281,7 @@ impl SlotStore {
     /// Read from the index rather than by listing slot directories, because a
     /// slot's directory name is opaque — which workspace it belongs to is only
     /// recorded in the `ws-` link.
-    pub fn workspaces(&self) -> Result<Vec<String>, StoreError> {
+    pub fn workspaces(&self) -> Result<Vec<(String, Option<String>)>, StoreError> {
         let entries = match std::fs::read_dir(self.index_dir()) {
             Ok(entries) => entries,
             // No index yet means no slots yet.
@@ -267,10 +292,11 @@ impl SlotStore {
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let name = entry.file_name();
-                let workspace = name.to_str()?.strip_prefix("ws-")?;
+                let workspace = name.to_str()?.strip_prefix("ws-")?.to_string();
                 // Anything failing validation was not written by us.
-                validate_workspace_name(workspace).ok()?;
-                Some(workspace.to_string())
+                validate_workspace_name(&workspace).ok()?;
+                let namespace = self.recorded_namespace(&workspace);
+                Some((workspace, namespace))
             })
             .collect())
     }
@@ -326,6 +352,21 @@ impl SlotStore {
         Ok(true)
     }
 
+    /// The namespace recorded for `workspace`, if the index carries one.
+    ///
+    /// Absent for slots written before the namespace was recorded. Callers must
+    /// treat that as "unknown" rather than guessing: guessing wrong means
+    /// looking a Workspace up in a namespace it does not live in, which reads
+    /// as "deleted".
+    fn recorded_namespace(&self, workspace: &str) -> Option<String> {
+        let raw = std::fs::read_to_string(self.workspace_link(workspace)).ok()?;
+        raw.lines()
+            .nth(1)
+            .map(str::trim)
+            .filter(|namespace| !namespace.is_empty())
+            .map(ToString::to_string)
+    }
+
     /// The slot id recorded for `workspace`, whether or not its directory still
     /// exists. Unlike [`Self::lookup`] a missing directory is not treated as
     /// "no slot", because reclaiming has to clean up the index either way.
@@ -336,7 +377,7 @@ impl SlotStore {
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(io_err(format!("reading {}", link.display()))(err)),
         };
-        SlotId::parse(raw.trim())
+        SlotId::parse(raw.lines().next().unwrap_or_default().trim())
             .map(Some)
             .map_err(|source| StoreError::CorruptIndex {
                 workspace: workspace.to_string(),
@@ -345,7 +386,11 @@ impl SlotStore {
     }
 
     /// Resolve the slot for `workspace`, allocating one if it has none.
-    pub fn resolve_or_create(&self, workspace: &str) -> Result<ResolvedSlot, StoreError> {
+    pub fn resolve_or_create(
+        &self,
+        workspace: &str,
+        namespace: &str,
+    ) -> Result<ResolvedSlot, StoreError> {
         validate_workspace_name(workspace)?;
         if let Some(existing) = self.lookup(workspace)? {
             return Ok(existing);
@@ -353,7 +398,7 @@ impl SlotStore {
         let id = SlotId::generate();
         let project_id = self.allocate_project_id()?;
         std::fs::create_dir_all(self.layout.slot_dir(&id)).map_err(io_err("creating slot dir"))?;
-        self.record(workspace, &id, project_id)?;
+        self.record(workspace, namespace, &id, project_id)?;
         Ok(ResolvedSlot {
             id,
             project_id,
@@ -375,9 +420,9 @@ mod tests {
     #[test]
     fn resolve_is_stable_for_the_same_workspace() {
         let (_dir, store) = store();
-        let first = store.resolve_or_create("bmow-abc").unwrap();
+        let first = store.resolve_or_create("bmow-abc", "platform").unwrap();
         assert!(first.created);
-        let second = store.resolve_or_create("bmow-abc").unwrap();
+        let second = store.resolve_or_create("bmow-abc", "platform").unwrap();
         assert!(!second.created, "second call should reuse the slot");
         assert_eq!(first.id, second.id);
         assert_eq!(first.project_id, second.project_id);
@@ -386,8 +431,8 @@ mod tests {
     #[test]
     fn distinct_workspaces_get_distinct_slots_and_project_ids() {
         let (_dir, store) = store();
-        let a = store.resolve_or_create("bmow-a").unwrap();
-        let b = store.resolve_or_create("bmow-b").unwrap();
+        let a = store.resolve_or_create("bmow-a", "platform").unwrap();
+        let b = store.resolve_or_create("bmow-b", "platform").unwrap();
         assert_ne!(a.id, b.id);
         assert_ne!(a.project_id, b.project_id);
     }
@@ -401,7 +446,9 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for i in 0..25 {
             let store = SlotStore::new(SlotLayout::new(dir.path()));
-            let slot = store.resolve_or_create(&format!("bmow-{i}")).unwrap();
+            let slot = store
+                .resolve_or_create(&format!("bmow-{i}"), "platform")
+                .unwrap();
             assert!(seen.insert(slot.project_id), "reused {}", slot.project_id);
         }
         assert_eq!(seen.len(), 25);
@@ -413,9 +460,9 @@ mod tests {
     #[test]
     fn wiped_slot_directory_is_treated_as_absent() {
         let (_dir, store) = store();
-        let first = store.resolve_or_create("bmow-abc").unwrap();
+        let first = store.resolve_or_create("bmow-abc", "platform").unwrap();
         std::fs::remove_dir_all(store.layout().slot_dir(&first.id)).unwrap();
-        let second = store.resolve_or_create("bmow-abc").unwrap();
+        let second = store.resolve_or_create("bmow-abc", "platform").unwrap();
         assert!(second.created);
         assert_ne!(first.id, second.id);
     }
@@ -434,7 +481,7 @@ mod tests {
             "nul\0byte",
         ] {
             assert!(
-                store().1.resolve_or_create(name).is_err(),
+                store().1.resolve_or_create(name, "platform").is_err(),
                 "accepted {name:?}"
             );
         }
@@ -443,9 +490,13 @@ mod tests {
     #[test]
     fn publish_records_round_trip() {
         let (_dir, store) = store();
-        let slot = store.resolve_or_create("bmow-abc").unwrap();
+        let slot = store.resolve_or_create("bmow-abc", "platform").unwrap();
         let published = PublishedSlot {
             workspace: "bmow-abc".to_string(),
+            // The unpublish path has no volume attributes to re-read, so the
+            // namespace has to survive the round trip or the final flush goes
+            // looking for the workspace in the wrong one.
+            namespace: "platform".to_string(),
             slot: slot.id.clone(),
             bucket: Some("bucket".to_string()),
             key_prefix: Some("workspace/abc/".to_string()),
@@ -481,7 +532,7 @@ mod tests {
         let (_dir, store) = store();
         assert!(
             store
-                .resolve_or_create("bmow-019e82b3-1234-7abc-8def-0123456789ab")
+                .resolve_or_create("bmow-019e82b3-1234-7abc-8def-0123456789ab", "platform")
                 .is_ok()
         );
     }

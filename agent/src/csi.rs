@@ -49,6 +49,14 @@ const ATTR_KEY_PREFIX: &str = "keyPrefix";
 /// that has ever been flushed can never be overwritten by its seed.
 const ATTR_SEED_BUCKET: &str = "seedBucket";
 const ATTR_SEED_KEY_PREFIX: &str = "seedKeyPrefix";
+/// Namespace of the pod being mounted, supplied by kubelet because the
+/// `CSIDriver` sets `podInfoOnMount`.
+///
+/// The agent needs it because a Workspace CR is namespaced and does *not* live
+/// in the agent's own namespace — the agent runs beside the controller, while
+/// workspaces belong to whoever created them. Looking one up in the wrong
+/// namespace returns "not found", which every caller here reads as "deleted".
+const ATTR_POD_NAMESPACE: &str = "csi.storage.k8s.io/pod.namespace";
 
 /// Owner of a slot's contents: the `me` user baked into the marimo image.
 const SLOT_UID: u32 = 1000;
@@ -122,10 +130,10 @@ pub struct KubimoNode {
     /// replacement destroys the whole node volume anyway, since it is a generic
     /// ephemeral volume.
     s3_clients: std::sync::Mutex<std::collections::HashMap<String, indexer::s3::S3Client>>,
-    /// Kubernetes client used to refresh `WorkspaceDirectory` CRs when flushing.
-    /// `None` when the agent runs without cluster access, in which case slots
-    /// still hydrate and mount but are never pushed back.
-    client: Option<kubimo::Client>,
+    /// Kubernetes clients scoped to each workspace's own namespace. Everything
+    /// downstream — the indexer's `WorkspaceDirectory` writes, `status.storage`
+    /// patches, and every existence check — depends on getting this right.
+    clients: crate::clients::NamespacedClients,
     /// Continuous sync task per *workspace*, not per published volume.
     ///
     /// A workspace can be published more than once on a node at the same time —
@@ -205,9 +213,13 @@ impl KubimoNode {
             s3: indexer::s3::S3Client::from_env(),
             has_env_credentials: std::env::var_os("AWS_ACCESS_KEY_ID").is_some(),
             s3_clients: Default::default(),
-            client,
+            clients: crate::clients::NamespacedClients::new(client.is_some()),
             watchers: Default::default(),
         }
+    }
+
+    async fn client_for(&self, namespace: &str) -> Option<kubimo::Client> {
+        self.clients.get(namespace).await
     }
 
     /// Remember the credentials kubelet delivered for `workspace`.
@@ -255,10 +267,11 @@ impl KubimoNode {
         &self,
         volume_id: &str,
         workspace: &str,
+        namespace: &str,
         dir: &Path,
         archive: &crate::hydrate::ArchiveLocation,
     ) {
-        let Some(client) = self.client.as_ref() else {
+        let Some(client) = self.client_for(namespace).await else {
             return;
         };
         let Some(s3) = self.s3_for(workspace) else {
@@ -367,9 +380,6 @@ impl KubimoNode {
     /// a failed flush is recoverable — whereas refusing to unmount would leave
     /// the pod stuck Terminating and block the node from draining.
     async fn flush_published(&self, volume_id: &str) {
-        let Some(client) = self.client.as_ref() else {
-            return;
-        };
         let published = match self.store.lookup_publish(volume_id) {
             Ok(Some(published)) => published,
             // Unknown volume: the agent restarted, or this workspace was never
@@ -390,7 +400,10 @@ impl KubimoNode {
             key_prefix: published.key_prefix.clone(),
         };
         let workspace = published.workspace;
-        if self.workspace_is_going_away(client, &workspace).await {
+        let Some(client) = self.client_for(&published.namespace).await else {
+            return;
+        };
+        if self.workspace_is_going_away(&client, &workspace).await {
             tracing::info!(
                 workspace,
                 "workspace is deleted or terminating; skipping flush"
@@ -411,7 +424,7 @@ impl KubimoNode {
         };
         let dir = self.store.layout().slot_dir(&published.slot);
         tracing::info!(workspace, slot = %published.slot, "flushing slot to S3");
-        if let Err(err) = crate::hydrate::flush_slot(&dir, &workspace, &archive, client, &s3).await
+        if let Err(err) = crate::hydrate::flush_slot(&dir, &workspace, &archive, &client, &s3).await
         {
             tracing::error!(%err, workspace, "flush failed; slot data is still on disk");
         }
@@ -426,13 +439,14 @@ impl KubimoNode {
     async fn prepare_slot(
         &self,
         workspace: &str,
+        namespace: &str,
         limit_bytes: u64,
         archive: Option<&crate::hydrate::ArchiveLocation>,
         seed: Option<&crate::hydrate::ArchiveLocation>,
     ) -> Result<PathBuf, Status> {
         let resolved = self
             .store
-            .resolve_or_create(workspace)
+            .resolve_or_create(workspace, namespace)
             .map_err(|err| Status::internal(format!("resolving slot: {err}")))?;
         let dir = self.store.layout().slot_dir(&resolved.id);
         if resolved.created {
@@ -594,13 +608,33 @@ impl Node for KubimoNode {
                 key_prefix: request.volume_context.get(ATTR_SEED_KEY_PREFIX).cloned(),
             }
         });
+        // Supplied by kubelet because the CSIDriver sets podInfoOnMount. Every
+        // Workspace/WorkspaceDirectory lookup below is namespaced, and the
+        // agent's own namespace is the wrong one.
+        let namespace = request
+            .volume_context
+            .get(ATTR_POD_NAMESPACE)
+            .cloned()
+            .ok_or_else(|| {
+                Status::invalid_argument(format!(
+                    "volume attribute {ATTR_POD_NAMESPACE:?} is required; the CSIDriver must set \
+                     podInfoOnMount"
+                ))
+            })?;
+
         // Credentials for this workspace's archive, resolved by kubelet from the
         // volume's `nodePublishSecretRef` in the *pod's* namespace. Recorded
         // before anything touches S3, and kept afterwards because the matching
         // unpublish — where the final flush happens — carries no secrets.
         self.remember_credentials(&workspace, &request.secrets);
         let slot_dir = self
-            .prepare_slot(&workspace, limit_bytes, archive.as_ref(), seed.as_ref())
+            .prepare_slot(
+                &workspace,
+                &namespace,
+                limit_bytes,
+                archive.as_ref(),
+                seed.as_ref(),
+            )
             .await?;
         if let Some(slot) = self
             .store
@@ -610,6 +644,7 @@ impl Node for KubimoNode {
                 &request.volume_id,
                 &crate::store::PublishedSlot {
                     workspace: workspace.clone(),
+                    namespace: namespace.clone(),
                     slot: slot.id,
                     bucket: archive.as_ref().map(|a| a.bucket.clone()),
                     key_prefix: archive.as_ref().and_then(|a| a.key_prefix.clone()),
@@ -622,8 +657,14 @@ impl Node for KubimoNode {
             tracing::warn!(%err, workspace, "could not record publish; flush on stop will be skipped");
         }
         if let Some(archive) = archive.as_ref() {
-            self.start_watcher(&request.volume_id, &workspace, &slot_dir, archive)
-                .await;
+            self.start_watcher(
+                &request.volume_id,
+                &workspace,
+                &namespace,
+                &slot_dir,
+                archive,
+            )
+            .await;
         }
         let target = Path::new(&request.target_path);
         let mounted = crate::mount::bind(&slot_dir, target, request.readonly)
@@ -940,9 +981,12 @@ mod tests {
             .node_publish_volume(proto::NodePublishVolumeRequest {
                 volume_id: "csi-abc".into(),
                 target_path: "/tmp/kubimo-test-target-quota".into(),
-                volume_context: [(ATTR_WORKSPACE.to_string(), "bmow-abc".to_string())]
-                    .into_iter()
-                    .collect(),
+                volume_context: [
+                    (ATTR_WORKSPACE.to_string(), "bmow-abc".to_string()),
+                    (ATTR_POD_NAMESPACE.to_string(), "platform".to_string()),
+                ]
+                .into_iter()
+                .collect(),
                 ..Default::default()
             })
             .await
@@ -951,6 +995,32 @@ mod tests {
         assert!(
             status.message().contains("prjquota"),
             "the error should say how to fix it, got: {}",
+            status.message()
+        );
+    }
+
+    /// Every Workspace lookup the agent makes is namespaced, and its own
+    /// namespace is the wrong one — so refusing the mount is far better than
+    /// proceeding and reading a live workspace as deleted, which skips its
+    /// flush and makes its slot look reclaimable.
+    #[tokio::test]
+    async fn publish_requires_the_pod_namespace() {
+        let (_dir, channel) = connected().await;
+        let status = NodeClient::new(channel)
+            .node_publish_volume(proto::NodePublishVolumeRequest {
+                volume_id: "csi-abc".into(),
+                target_path: "/tmp/kubimo-test-target-ns".into(),
+                volume_context: [(ATTR_WORKSPACE.to_string(), "bmow-abc".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            status.message().contains("podInfoOnMount"),
+            "the error should name the CSIDriver setting that supplies it, got: {}",
             status.message()
         );
     }

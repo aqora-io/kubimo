@@ -13,6 +13,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use crate::clients::NamespacedClients;
 use crate::store::SlotStore;
 
 /// How often to sweep.
@@ -22,10 +23,10 @@ use crate::store::SlotStore;
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Sweep until the process exits.
-pub async fn run(store: SlotStore, client: kubimo::Client) {
+pub async fn run(store: SlotStore, clients: NamespacedClients) {
     loop {
         tokio::time::sleep(SWEEP_INTERVAL).await;
-        match sweep(&store, &client).await {
+        match sweep(&store, &clients).await {
             Ok(0) => {}
             Ok(reclaimed) => tracing::info!(reclaimed, "reclaimed slots"),
             Err(err) => tracing::warn!(%err, "slot sweep failed"),
@@ -36,7 +37,7 @@ pub async fn run(store: SlotStore, client: kubimo::Client) {
 /// One pass. Returns how many slots were reclaimed.
 async fn sweep(
     store: &SlotStore,
-    client: &kubimo::Client,
+    clients: &NamespacedClients,
 ) -> Result<usize, crate::store::StoreError> {
     let workspaces = store.workspaces()?;
     if workspaces.is_empty() {
@@ -44,8 +45,8 @@ async fn sweep(
     }
     let published = store.published_workspaces()?;
     let mut reclaimed = 0;
-    for workspace in workspaces {
-        if !should_reclaim(client, &workspace, &published).await {
+    for (workspace, namespace) in workspaces {
+        if !should_reclaim(clients, &workspace, namespace.as_deref(), &published).await {
             continue;
         }
         match store.remove_slot(&workspace) {
@@ -67,13 +68,29 @@ async fn sweep(
 /// false. The cost of keeping a slot too long is disk; the cost of dropping one
 /// too early is a tenant's unflushed work.
 async fn should_reclaim(
-    client: &kubimo::Client,
+    clients: &NamespacedClients,
     workspace: &str,
+    namespace: Option<&str>,
     published: &HashSet<String>,
 ) -> bool {
     if published.contains(workspace) {
         return false;
     }
+    // A Workspace CR is namespaced, and the agent's own namespace is not the
+    // one it lives in. Without knowing which, a lookup returns "not found" for
+    // a perfectly live workspace — and acting on that would delete a tenant's
+    // slot. Slots recorded before the namespace was tracked have none, so they
+    // are kept rather than guessed at.
+    let Some(namespace) = namespace else {
+        tracing::warn!(
+            workspace,
+            "no namespace recorded for this slot; keeping it rather than risking a live workspace"
+        );
+        return false;
+    };
+    let Some(client) = clients.get(namespace).await else {
+        return false;
+    };
     match client.api::<kubimo::Workspace>().get_opt(workspace).await {
         Ok(None) => true,
         Ok(Some(_)) => false,
@@ -100,17 +117,23 @@ mod tests {
         let (_dir, store) = store();
         assert!(store.workspaces().unwrap().is_empty());
 
-        store.resolve_or_create("bmow-one").unwrap();
-        store.resolve_or_create("bmow-two").unwrap();
+        store.resolve_or_create("bmow-one", "platform").unwrap();
+        store.resolve_or_create("bmow-two", "platform").unwrap();
         let mut found = store.workspaces().unwrap();
         found.sort();
-        assert_eq!(found, vec!["bmow-one", "bmow-two"]);
+        assert_eq!(
+            found,
+            vec![
+                ("bmow-one".to_string(), Some("platform".to_string())),
+                ("bmow-two".to_string(), Some("platform".to_string())),
+            ]
+        );
     }
 
     #[test]
     fn removing_a_slot_clears_its_directory_and_index() {
         let (_dir, store) = store();
-        let resolved = store.resolve_or_create("bmow-gone").unwrap();
+        let resolved = store.resolve_or_create("bmow-gone", "platform").unwrap();
         let slot_dir = store.layout().slot_dir(&resolved.id);
         assert!(slot_dir.is_dir());
 
@@ -120,6 +143,22 @@ mod tests {
         // And the workspace looks brand new again, rather than pointing at a
         // slot that no longer exists.
         assert!(store.lookup("bmow-gone").unwrap().is_none());
+    }
+
+    /// The namespace has to survive in the index, because the reaper runs long
+    /// after the mount that supplied it — and without it a Workspace lookup
+    /// goes to the agent's own namespace, finds nothing, and reads as deleted.
+    #[test]
+    fn the_index_remembers_which_namespace_a_workspace_lives_in() {
+        let (_dir, store) = store();
+        store.resolve_or_create("bmow-ns", "some-tenant").unwrap();
+        assert_eq!(
+            store.workspaces().unwrap(),
+            vec![("bmow-ns".to_string(), Some("some-tenant".to_string()))]
+        );
+        // And the slot itself still resolves: the namespace is a second line,
+        // not something that corrupts the id on the first.
+        assert!(store.lookup("bmow-ns").unwrap().is_some());
     }
 
     #[test]
@@ -135,7 +174,7 @@ mod tests {
     #[test]
     fn a_slot_is_pinned_while_any_volume_is_published() {
         let (_dir, store) = store();
-        let resolved = store.resolve_or_create("bmow-live").unwrap();
+        let resolved = store.resolve_or_create("bmow-live", "platform").unwrap();
         assert!(!store.published_workspaces().unwrap().contains("bmow-live"));
 
         store
@@ -143,6 +182,7 @@ mod tests {
                 "csi-abc",
                 &crate::store::PublishedSlot {
                     workspace: "bmow-live".into(),
+                    namespace: "platform".into(),
                     slot: resolved.id,
                     bucket: None,
                     key_prefix: None,
