@@ -86,6 +86,9 @@ spec:
             {{- if .Values.agent.allowUnpatchedKernel }}
             - --allow-unpatched-kernel
             {{- end }}
+            # Always rendered, never guarded: 0 is a meaningful value here and
+            # Go templates treat it as absent.
+            - --idle-slot-ttl-secs={{ .Values.agent.idleSlotTtlSeconds }}
             {{- if .Values.agent.allowUnquotaedSlots }}
             # DEVELOPMENT ONLY. Slots get no capacity limit, so one workspace
             # can fill the node volume and break every other tenant on it.

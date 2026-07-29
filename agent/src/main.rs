@@ -17,6 +17,7 @@ mod store;
 mod venv;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
@@ -80,6 +81,23 @@ enum Command {
         /// other tenant on the node.
         #[arg(long, env = "KUBIMO_AGENT_ALLOW_UNQUOTAED_SLOTS")]
         allow_unquotaed_slots: bool,
+        /// How long an idle, flushed slot is kept before it is dropped.
+        ///
+        /// A slot outlives its runner so reopening a workspace is instant, but a
+        /// workspace that goes idle and is then scheduled onto another node
+        /// leaves this one behind forever — nothing else collects a slot whose
+        /// workspace still exists. Eviction treats it as what it is: a cache
+        /// whose contents are already in S3, costing one re-hydrate on next use.
+        ///
+        /// Only ever applied to slots this node has actually flushed, so a
+        /// failed or skipped flush keeps the only copy on disk regardless of
+        /// age. Set to 0 to disable eviction entirely.
+        #[arg(
+            long,
+            env = "KUBIMO_AGENT_IDLE_SLOT_TTL_SECS",
+            default_value_t = reaper::DEFAULT_IDLE_TTL.as_secs(),
+        )]
+        idle_slot_ttl_secs: u64,
     },
 }
 
@@ -107,6 +125,7 @@ fn main() {
             min_kernel_version,
             allow_unpatched_kernel,
             allow_unquotaed_slots,
+            idle_slot_ttl_secs,
         } => check_kernel(min_kernel_version.as_deref(), allow_unpatched_kernel).and_then(|()| {
             serve(
                 &args.data_root,
@@ -114,6 +133,7 @@ fn main() {
                 node_name,
                 default_limit_bytes,
                 allow_unquotaed_slots,
+                Duration::from_secs(idle_slot_ttl_secs),
             )
         }),
     };
@@ -215,6 +235,7 @@ fn serve(
     node_name: String,
     default_limit_bytes: u64,
     allow_unquotaed_slots: bool,
+    idle_slot_ttl: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = SlotStore::new(SlotLayout::new(data_root));
     let reaper_root = data_root.to_path_buf();
@@ -256,6 +277,7 @@ fn serve(
                 tokio::spawn(reaper::run(
                     SlotStore::new(SlotLayout::new(&reaper_root)),
                     clients::NamespacedClients::new(true),
+                    idle_slot_ttl,
                 ));
             } else {
                 tracing::warn!(
