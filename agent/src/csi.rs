@@ -433,6 +433,15 @@ impl KubimoNode {
         };
         let dir = self.store.layout().slot_dir(&published.slot);
         tracing::info!(workspace, slot = %published.slot, "flushing slot to S3");
+        // Drop any previous marker *before* attempting, so failing here can
+        // never leave a stale one behind. A slot can be mounted twice at once —
+        // a cache job beside a runner — and the first unpublish marks it while
+        // the second mount carries on writing; if that mount's own flush then
+        // failed, an untouched marker would read as permission to evict work
+        // that never reached S3.
+        if let Err(err) = self.store.clear_flushed(&workspace) {
+            tracing::warn!(%err, workspace, "could not clear the flush marker");
+        }
         if let Err(err) = crate::hydrate::flush_slot(&dir, &workspace, &archive, &client, &s3).await
         {
             tracing::error!(%err, workspace, "flush failed; slot data is still on disk");
