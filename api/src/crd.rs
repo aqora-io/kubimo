@@ -14,7 +14,7 @@ use url::Url;
 use crate::selector::Selector;
 use crate::validation::{
     budget_selector_not_empty, log_level, runner_immutable_fields, runner_max_cpu_greater_than_min,
-    runner_max_memory_greater_than_min, workspace_auto_scale_bounds,
+    runner_max_memory_greater_than_min, workspace_auto_scale_bounds, workspace_clone_not_pooled,
     workspace_max_storage_greater_than_min, workspace_mode_no_downgrade,
     workspace_no_volume_with_name, workspace_restore_from_exclusive,
     workspace_restore_from_not_indexer_prefix,
@@ -198,6 +198,7 @@ pub struct WorkspaceRestoreFrom {
     validation = workspace_restore_from_exclusive(),
     validation = workspace_restore_from_not_indexer_prefix(),
     validation = workspace_mode_no_downgrade(),
+    validation = workspace_clone_not_pooled(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSpec {
@@ -732,6 +733,36 @@ mod tests {
     fn workspace_crd_has_mode_downgrade_validation() {
         let crd = serde_json::to_string(&Workspace::crd()).unwrap();
         assert!(crd.contains("cannot be changed back from Pooled to Dedicated"));
+    }
+
+    /// `cloneWorkspaceName` is implemented only for `Dedicated` — `apply_pvc`
+    /// and `apply_job` are its only readers and neither runs under `Pooled`.
+    /// Before this rule the field was accepted and ignored, so a cloned pooled
+    /// workspace came up empty with nothing reporting a problem.
+    ///
+    /// The expression is asserted rather than just the message because its shape
+    /// is the contract: it must fire only when the mode is *explicitly* Pooled,
+    /// so that a Dedicated workspace can still clone and a spec without a mode
+    /// is not rejected on a guess about the operator's default.
+    #[test]
+    fn workspace_crd_refuses_clone_under_pooled() {
+        let crd = serde_json::to_string(&Workspace::crd()).unwrap();
+        assert!(
+            crd.contains("cloneWorkspaceName is not supported for Pooled workspaces"),
+            "the rule is missing from the generated CRD"
+        );
+
+        let expression = include_str!("./validation/workspace_clone_not_pooled.cel");
+        // Explicitly Pooled + a clone is the rejected combination...
+        assert!(expression.contains("self.spec.mode == \"Pooled\""));
+        assert!(expression.contains("has(self.spec.cloneWorkspaceName)"));
+        // ...and `has(self.spec.mode)` is what keeps a mode-less spec valid, so
+        // the rule never rejects on an assumption about the operator default.
+        assert!(
+            expression.contains("has(self.spec.mode)"),
+            "a spec without a mode must not be rejected: CEL cannot see \
+             KUBIMO__DEFAULT_WORKSPACE_MODE, so that case stays uncaught by design"
+        );
     }
 
     #[test]
