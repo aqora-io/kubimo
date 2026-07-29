@@ -150,6 +150,15 @@ agent:
   # project-quota enforcement, which means slots have NO capacity limit and one
   # workspace can fill the volume for every other tenant on the node.
   allowUnquotaedSlots: false
+  # How long an idle, flushed slot is kept before the reaper drops it. A slot is
+  # a cache — its contents are already in S3 — so eviction costs one re-hydrate
+  # on next use, and only slots this node has actually flushed are eligible.
+  # 0 disables eviction, trading disk for never paying that re-hydrate.
+  #
+  # Spelled out here rather than left empty for the agent to default, because
+  # `with`/`if` treat 0 as absent in Go templates: an operator setting 0 to turn
+  # eviction off would have got the 24h default instead, silently.
+  idleSlotTtlSeconds: 86400
   nodeSelector: {}
   tolerations: []
   priorityClassName: ""

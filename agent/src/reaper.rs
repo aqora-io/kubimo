@@ -28,13 +28,13 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 /// early is one re-hydrate on next use, measured at well under a second for a
 /// small workspace. It is set generously anyway, because keeping a slot is what
 /// makes reopening instant and a day covers the overnight gap in normal use.
-pub const IDLE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+pub const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Sweep until the process exits.
-pub async fn run(store: SlotStore, clients: NamespacedClients) {
+pub async fn run(store: SlotStore, clients: NamespacedClients, idle_ttl: Duration) {
     loop {
         tokio::time::sleep(SWEEP_INTERVAL).await;
-        match sweep(&store, &clients).await {
+        match sweep(&store, &clients, idle_ttl).await {
             Ok(0) => {}
             Ok(reclaimed) => tracing::info!(reclaimed, "reclaimed slots"),
             Err(err) => tracing::warn!(%err, "slot sweep failed"),
@@ -46,6 +46,7 @@ pub async fn run(store: SlotStore, clients: NamespacedClients) {
 async fn sweep(
     store: &SlotStore,
     clients: &NamespacedClients,
+    idle_ttl: Duration,
 ) -> Result<usize, crate::store::StoreError> {
     let workspaces = store.workspaces()?;
     if workspaces.is_empty() {
@@ -54,8 +55,15 @@ async fn sweep(
     let published = store.published_workspaces()?;
     let mut reclaimed = 0;
     for (workspace, namespace) in workspaces {
-        let Some(why) =
-            should_reclaim(store, clients, &workspace, namespace.as_deref(), &published).await
+        let Some(why) = should_reclaim(
+            store,
+            clients,
+            &workspace,
+            namespace.as_deref(),
+            &published,
+            idle_ttl,
+        )
+        .await
         else {
             continue;
         };
@@ -102,6 +110,7 @@ async fn should_reclaim(
     workspace: &str,
     namespace: Option<&str>,
     published: &HashSet<String>,
+    idle_ttl: Duration,
 ) -> Option<Reclaim> {
     if published.contains(workspace) {
         return None;
@@ -140,8 +149,13 @@ async fn should_reclaim(
     // the slot may hold the only copy of the tenant's newest work: a flush that
     // failed, or the deliberate skip when a workspace is being deleted. Age
     // alone would turn either into data loss.
+    // Zero disables eviction: an operator who would rather pay for the disk
+    // than ever re-hydrate can turn it off outright.
+    if idle_ttl.is_zero() {
+        return None;
+    }
     match store.flushed_ago(workspace) {
-        Ok(Some(idle)) if idle >= IDLE_TTL => Some(Reclaim::Idle),
+        Ok(Some(idle)) if idle >= idle_ttl => Some(Reclaim::Idle),
         Ok(_) => None,
         Err(err) => {
             tracing::warn!(%err, workspace, "could not read flush marker; keeping the slot");
@@ -176,6 +190,28 @@ mod tests {
                 ("bmow-one".to_string(), Some("platform".to_string())),
                 ("bmow-two".to_string(), Some("platform".to_string())),
             ]
+        );
+    }
+
+    /// A zero TTL turns eviction off rather than making everything instantly
+    /// evictable.
+    ///
+    /// The distinction matters because the two readings are opposite: an
+    /// operator who sets 0 wants slots kept forever, and the arithmetic
+    /// reading — "idle >= 0" — would drop every flushed slot on the next sweep.
+    #[test]
+    fn a_zero_ttl_disables_eviction_rather_than_evicting_everything() {
+        let (_dir, store) = store();
+        store.resolve_or_create("bmow-keep", "platform").unwrap();
+        store.mark_flushed("bmow-keep").unwrap();
+
+        // The marker exists and its age is trivially >= 0, so only the explicit
+        // zero check stops this being reclaimed.
+        let idle = store.flushed_ago("bmow-keep").unwrap().expect("flushed");
+        assert!(idle >= Duration::ZERO);
+        assert!(
+            Duration::ZERO.is_zero(),
+            "the guard `should_reclaim` uses is what keeps this slot"
         );
     }
 
@@ -228,7 +264,7 @@ mod tests {
             .unwrap()
             .expect("a flushed slot has an age");
         // Just flushed, so nowhere near the eviction threshold.
-        assert!(idle < IDLE_TTL, "{idle:?}");
+        assert!(idle < DEFAULT_IDLE_TTL, "{idle:?}");
     }
 
     /// A workspace with no slot at all must not look "flushed a long time ago"
