@@ -36,6 +36,29 @@ where
     apply_crds(&client).await;
 
     let ns_api = client.api_global::<Namespace>();
+    // A namespace from a previous run may still be Terminating, and creating
+    // objects in one that is fails. The names are fixed per test, so running
+    // the suite twice in a row — or retrying a flake in CI — hits this reliably
+    // enough to look like a real failure. Wait it out rather than racing it.
+    for attempt in 0..60 {
+        match ns_api.get_opt(ns_name).await {
+            Ok(Some(existing))
+                if existing
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.phase.as_deref())
+                    == Some("Terminating") =>
+            {
+                assert!(
+                    attempt < 59,
+                    "namespace {ns_name} was still Terminating after 60s"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            _ => break,
+        }
+    }
+
     let mut ns = Namespace::default();
     ns.metadata.name = Some(ns_name.to_string());
     ns_api.patch(&ns).await.expect("Failed to create namespace");
@@ -201,6 +224,171 @@ async fn test_agent_status_survives_indexer_writes() {
                 .and_then(|storage| storage.used)
                 .map(|used| used.to_string()),
             Some("300".to_string())
+        );
+    })
+    .await;
+}
+
+/// Build a spec with a storage requirement, leaving everything else default.
+fn spec_with_storage(min: Option<&str>, max: Option<&str>) -> WorkspaceSpec {
+    WorkspaceSpec {
+        storage: Some(kubimo::StorageRequirement {
+            min: min.map(|q| q.parse().expect("a quantity")),
+            max: max.map(|q| q.parse().expect("a quantity")),
+            auto: None,
+        }),
+        ..Default::default()
+    }
+}
+
+/// The CRD's CEL rules, exercised against a real API server.
+///
+/// These are otherwise only checked by asserting the generated CRD *contains*
+/// the rule, which says nothing about what it means. That gap is not
+/// hypothetical: `workspace_max_storage_greater_than_min` compared with a
+/// strict `isGreaterThan` while promising "greater than or equal to", so
+/// `min == max` — a Pooled workspace, whose slot quota is fixed — was refused at
+/// admission. The rule was present, its message was right, and every unit test
+/// passed. Only an API server evaluates the expression.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_storage_validation_accepts_equal_min_and_max() {
+    with_namespace("test-cel-storage", |client, ns| async move {
+        let workspaces = client.api_namespaced::<Workspace>(&ns);
+
+        // A workspace that does not grow: its floor is its ceiling.
+        let mut equal = Workspace::new("test-equal", spec_with_storage(Some("64Gi"), Some("64Gi")));
+        equal.metadata.namespace = Some(ns.clone());
+        workspaces
+            .patch(&equal)
+            .await
+            .expect("min == max must be accepted; the rule promises >=, not >");
+
+        // Room to grow is still fine.
+        let mut wider = Workspace::new("test-wider", spec_with_storage(Some("2Gi"), Some("64Gi")));
+        wider.metadata.namespace = Some(ns.clone());
+        workspaces.patch(&wider).await.expect("min < max");
+
+        // A ceiling below the floor is still nonsense and must be refused.
+        let mut inverted = Workspace::new(
+            "test-inverted",
+            spec_with_storage(Some("64Gi"), Some("2Gi")),
+        );
+        inverted.metadata.namespace = Some(ns.clone());
+        assert!(
+            workspaces.patch(&inverted).await.is_err(),
+            "max < min must be rejected"
+        );
+    })
+    .await;
+}
+
+/// `cloneWorkspaceName` is implemented only for `Dedicated` — its readers are
+/// the workspace reconciler's `apply_pvc` and `apply_job`, neither of which
+/// runs under `Pooled`. Before the rule existed the field was accepted and then
+/// ignored, and the workspace came up with an empty slot: the CR applied, the
+/// runner went Ready, and the user's notebook was simply absent.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_clone_is_refused_for_pooled_workspaces() {
+    with_namespace("test-cel-clone", |client, ns| async move {
+        let workspaces = client.api_namespaced::<Workspace>(&ns);
+
+        let mut pooled = Workspace::new(
+            "test-pooled-clone",
+            WorkspaceSpec {
+                mode: Some(kubimo::WorkspaceMode::Pooled),
+                clone_workspace_name: Some("bmow-source".to_string()),
+                ..Default::default()
+            },
+        );
+        pooled.metadata.namespace = Some(ns.clone());
+        assert!(
+            workspaces.patch(&pooled).await.is_err(),
+            "cloneWorkspaceName under Pooled is read by nothing and must be refused, \
+             not silently ignored"
+        );
+
+        // Dedicated really does clone the PVC, so it stays legal.
+        let mut dedicated = Workspace::new(
+            "test-dedicated-clone",
+            WorkspaceSpec {
+                mode: Some(kubimo::WorkspaceMode::Dedicated),
+                clone_workspace_name: Some("bmow-source".to_string()),
+                ..Default::default()
+            },
+        );
+        dedicated.metadata.namespace = Some(ns.clone());
+        workspaces
+            .patch(&dedicated)
+            .await
+            .expect("Dedicated clones the source PVC and must still be allowed");
+    })
+    .await;
+}
+
+/// Restoring from an archive and cloning a PVC are two ways to seed the same
+/// workspace, and doing both would race.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_restore_from_and_clone_are_mutually_exclusive() {
+    with_namespace("test-cel-exclusive", |client, ns| async move {
+        let workspaces = client.api_namespaced::<Workspace>(&ns);
+        let mut both = Workspace::new(
+            "test-both",
+            WorkspaceSpec {
+                mode: Some(kubimo::WorkspaceMode::Dedicated),
+                clone_workspace_name: Some("bmow-source".to_string()),
+                restore_from: Some(kubimo::WorkspaceRestoreFrom {
+                    bucket: "some-bucket".to_string(),
+                    key_prefix: Some("workspace/other/".to_string()),
+                    pod: None,
+                }),
+                ..Default::default()
+            },
+        );
+        both.metadata.namespace = Some(ns.clone());
+        assert!(
+            workspaces.patch(&both).await.is_err(),
+            "restoreFrom and cloneWorkspaceName must not both be set"
+        );
+    })
+    .await;
+}
+
+/// A workspace's mode is permanent once chosen. Pooled has no PVC, so going
+/// back to Dedicated would leave it with nowhere to put its files — the CEL
+/// rule refuses the transition rather than letting a reconcile discover it.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_pooled_cannot_be_downgraded_to_dedicated() {
+    with_namespace("test-cel-downgrade", |client, ns| async move {
+        let workspaces = client.api_namespaced::<Workspace>(&ns);
+
+        let mut pooled = Workspace::new(
+            "test-downgrade",
+            WorkspaceSpec {
+                mode: Some(kubimo::WorkspaceMode::Pooled),
+                ..Default::default()
+            },
+        );
+        pooled.metadata.namespace = Some(ns.clone());
+        workspaces
+            .patch(&pooled)
+            .await
+            .expect("creating a Pooled workspace");
+
+        let mut downgraded = Workspace::new(
+            "test-downgrade",
+            WorkspaceSpec {
+                mode: Some(kubimo::WorkspaceMode::Dedicated),
+                ..Default::default()
+            },
+        );
+        downgraded.metadata.namespace = Some(ns.clone());
+        assert!(
+            workspaces.patch(&downgraded).await.is_err(),
+            "Pooled -> Dedicated must be refused"
         );
     })
     .await;
