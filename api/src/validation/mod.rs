@@ -1,5 +1,12 @@
 use kube::core::Rule;
 
+/// `max >= min`, expressed as "min is not greater than max".
+///
+/// Written that way because the quantity library offers only `isGreaterThan`
+/// and `isLessThan`, with no `>=`. Comparing `max.isGreaterThan(min)` instead
+/// would be strict, which contradicts the message and refuses `min == max` — a
+/// legitimate spec for a workspace that does not grow. It did: a `Pooled`
+/// workspace, whose slot quota is fixed, was rejected at admission.
 pub fn workspace_max_storage_greater_than_min() -> Rule {
     Rule::new(include_str!("./workspace_max_storage_greater_than_min.cel"))
         .message("workspace max storage must be greater than or equal to min storage")
