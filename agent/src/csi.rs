@@ -436,6 +436,18 @@ impl KubimoNode {
         if let Err(err) = crate::hydrate::flush_slot(&dir, &workspace, &archive, &client, &s3).await
         {
             tracing::error!(%err, workspace, "flush failed; slot data is still on disk");
+            return;
+        }
+        // Only now is the slot safe to treat as a cache. The reaper refuses to
+        // evict a slot without this marker, precisely so a failed flush — or
+        // the deliberate skip above when a workspace is being deleted — keeps
+        // the only copy of the tenant's newest work on disk.
+        if let Err(err) = self.store.mark_flushed(&workspace) {
+            tracing::warn!(
+                %err,
+                workspace,
+                "could not record the flush; the slot will be kept rather than evicted"
+            );
         }
     }
 
@@ -445,6 +457,46 @@ impl KubimoNode {
     /// re-stamping a project id on every publish would be wasted work, and
     /// re-chowning could stomp on files the tenant deliberately made
     /// more restrictive.
+    /// Record where a pooled workspace actually lives, on the CR.
+    ///
+    /// Without this, the only way to find out which node holds a workspace's
+    /// slot, what its id is, or where its archive sits, is to read agent logs on
+    /// every node — which is exactly what debugging pooled mode has meant so
+    /// far. Best-effort: this is diagnostics, and failing it must never fail a
+    /// mount that is otherwise fine.
+    ///
+    /// `lastSyncedAt` is deliberately not set here. It means "this content
+    /// reached S3", which is only true after a flush, and claiming it at publish
+    /// time would make an unflushed slot look durable.
+    async fn publish_slot_status(
+        &self,
+        workspace: &str,
+        namespace: &str,
+        slot: &crate::store::ResolvedSlot,
+        limit_bytes: u64,
+        archive: Option<&crate::hydrate::ArchiveLocation>,
+    ) {
+        let Some(client) = self.client_for(namespace).await else {
+            return;
+        };
+        let mut patch = kubimo::Workspace::new(workspace, Default::default());
+        patch.status = Some(kubimo::WorkspaceStatus {
+            slot: Some(kubimo::WorkspaceSlotStatus {
+                node: Some(self.node_id.clone()),
+                id: Some(slot.id.to_string()),
+                quota: Some(indexer::disk::storage_quantity(limit_bytes)),
+            }),
+            archive: archive.map(|archive| kubimo::WorkspaceArchiveStatus {
+                key_prefix: archive.key_prefix.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        if let Err(err) = client.api::<kubimo::Workspace>().patch_status(&patch).await {
+            tracing::warn!(%err, workspace, "could not record slot status");
+        }
+    }
+
     /// Fill a freshly created slot from the workspace's own archive, falling
     /// back to its seed.
     ///
@@ -694,7 +746,10 @@ impl Node for KubimoNode {
             .store
             .lookup(&workspace)
             .map_err(|err| Status::internal(format!("looking up slot: {err}")))?
-            && let Err(err) = self.store.record_publish(
+        {
+            self.publish_slot_status(&workspace, &namespace, &slot, limit_bytes, archive.as_ref())
+                .await;
+            if let Err(err) = self.store.record_publish(
                 &request.volume_id,
                 &crate::store::PublishedSlot {
                     workspace: workspace.clone(),
@@ -703,12 +758,12 @@ impl Node for KubimoNode {
                     bucket: archive.as_ref().map(|a| a.bucket.clone()),
                     key_prefix: archive.as_ref().and_then(|a| a.key_prefix.clone()),
                 },
-            )
-        {
-            // Not fatal: the mount is what the pod needs. Losing the record only
-            // means the flush on unpublish is skipped, and the slot keeps the
-            // data on disk either way.
-            tracing::warn!(%err, workspace, "could not record publish; flush on stop will be skipped");
+            ) {
+                // Not fatal: the mount is what the pod needs. Losing the record
+                // only means the flush on unpublish is skipped, and the slot
+                // keeps the data on disk either way.
+                tracing::warn!(%err, workspace, "could not record publish; flush on stop will be skipped");
+            }
         }
         if let Some(archive) = archive.as_ref() {
             self.start_watcher(
