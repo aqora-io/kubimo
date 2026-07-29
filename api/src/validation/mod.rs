@@ -44,6 +44,27 @@ pub fn workspace_mode_no_downgrade() -> Rule {
         .field_path(".spec.mode")
 }
 
+/// `cloneWorkspaceName` is only implemented for `Dedicated`.
+///
+/// Its only consumers are the workspace reconciler's `apply_pvc`, which clones
+/// the source PVC through a VolumeSnapshot, and `apply_job` — neither of which
+/// runs under `Pooled`, where there is no PVC to clone. So the field was
+/// accepted and then read by nothing, and the workspace came up with an empty
+/// slot: the CR applied, the runner went Ready, and the user's files were simply
+/// absent. That cost a workspace its notebook on 2026-07-29, with no error
+/// anywhere. Under `Pooled`, cloning is expressed as a `restoreFrom` pointing at
+/// the source's archive instead.
+///
+/// Only catches an *explicitly* Pooled spec: a workspace that omits `spec.mode`
+/// and inherits a Pooled operator default still slips through, because CEL
+/// cannot see `KUBIMO__DEFAULT_WORKSPACE_MODE`. Setting the mode explicitly is
+/// what makes this enforceable at all — one more reason for clients to do so.
+pub fn workspace_clone_not_pooled() -> Rule {
+    Rule::new(include_str!("./workspace_clone_not_pooled.cel"))
+        .message("cloneWorkspaceName is not supported for Pooled workspaces; use restoreFrom")
+        .field_path(".spec.cloneWorkspaceName")
+}
+
 pub fn runner_immutable_fields() -> Rule {
     Rule::new(include_str!("./runner_immutable_fields.cel"))
         .message("workspace is immutable")
