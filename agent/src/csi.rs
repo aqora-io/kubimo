@@ -476,7 +476,13 @@ impl KubimoNode {
         limit_bytes: u64,
         archive: Option<&crate::hydrate::ArchiveLocation>,
     ) {
-        let Some(client) = self.client_for(namespace).await else {
+        // A manager of its own, not the indexer's. Server-side apply gives a
+        // manager exactly the fields its last apply contained, so the indexer's
+        // `status.storage` patches — which never mention slot or archive —
+        // would relinquish them, and the API server would drop what was written
+        // here moments earlier. No error is reported on either side; the fields
+        // simply stay empty, which is what they did.
+        let Some(client) = self.clients.get_for_slot_status(namespace).await else {
             return;
         };
         let mut patch = kubimo::Workspace::new(workspace, Default::default());
