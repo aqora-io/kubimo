@@ -768,6 +768,19 @@ pub async fn run(
 ) -> RunResult {
     let git_dir = match get_relative_git_dir(&args.directory).await {
         Ok(git_dir) => Some(git_dir),
+        // `git` is simply absent from the marimo image, so this fires on every
+        // upload cycle — once or twice a second while a workspace is active.
+        // That is a property of the image, not a problem to report, and at warn
+        // level it drowns out the events that are. A workspace with no git dir
+        // is likewise ordinary. Anything else is still worth seeing.
+        Err(GitDirError::Command(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!("No git available; skipping git metadata");
+            None
+        }
+        Err(err @ GitDirError::Status(..)) => {
+            tracing::debug!("Not a git repository; skipping git metadata: {err}");
+            None
+        }
         Err(err) => {
             tracing::warn!("Could not get git dir: {}", err);
             None
