@@ -6,6 +6,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::slot::{SlotId, SlotIdError, SlotLayout};
 
@@ -101,8 +102,54 @@ impl SlotStore {
         self.index_dir().join(format!("projid-{id}"))
     }
 
+    /// Marker recording that this slot's contents reached S3.
+    ///
+    /// Deliberately node-local rather than read from `status.archive`: that
+    /// field is per-*workspace*, and the case this exists for is a workspace
+    /// holding slots on two nodes at once. Whichever node flushed last would own
+    /// the timestamp, so trusting it could evict the other node's slot on the
+    /// strength of a flush that never covered it.
+    fn flushed_path(&self, id: &SlotId) -> PathBuf {
+        self.index_dir().join(format!("flushed-{id}"))
+    }
+
     fn counter_path(&self) -> PathBuf {
         self.index_dir().join("next-project-id")
+    }
+
+    /// Record that `workspace`'s slot has been flushed to S3.
+    ///
+    /// The file's mtime is the timestamp; nothing reads its contents. Only
+    /// called after a flush actually succeeded, which is what lets the reaper
+    /// treat the slot as a cache it may drop.
+    pub fn mark_flushed(&self, workspace: &str) -> Result<(), StoreError> {
+        validate_workspace_name(workspace)?;
+        let Some(id) = self.lookup_slot_id(workspace)? else {
+            return Ok(());
+        };
+        let path = self.flushed_path(&id);
+        std::fs::write(&path, b"").map_err(io_err(format!("writing {}", path.display())))?;
+        Ok(())
+    }
+
+    /// How long ago `workspace`'s slot was last flushed.
+    ///
+    /// `None` means it has never been flushed successfully, which callers must
+    /// read as "not safe to drop": the slot may hold the only copy of the
+    /// tenant's newest work. A marker whose mtime is in the future — a clock
+    /// step — also yields `None` rather than a bogus age.
+    pub fn flushed_ago(&self, workspace: &str) -> Result<Option<Duration>, StoreError> {
+        validate_workspace_name(workspace)?;
+        let Some(id) = self.lookup_slot_id(workspace)? else {
+            return Ok(None);
+        };
+        let Ok(meta) = std::fs::metadata(self.flushed_path(&id)) else {
+            return Ok(None);
+        };
+        Ok(meta
+            .modified()
+            .ok()
+            .and_then(|at| std::time::SystemTime::now().duration_since(at).ok()))
     }
 
     /// Look up the slot recorded for `workspace`, if any.
@@ -349,6 +396,7 @@ impl SlotStore {
         }
         let _ = std::fs::remove_file(self.workspace_link(workspace));
         let _ = std::fs::remove_file(self.project_id_path(&id));
+        let _ = std::fs::remove_file(self.flushed_path(&id));
         Ok(true)
     }
 

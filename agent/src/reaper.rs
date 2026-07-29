@@ -22,6 +22,14 @@ use crate::store::SlotStore;
 /// reflinked) and expensive to lose, so this is deliberately unhurried.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
+/// How long a flushed, unpublished slot is kept before being dropped.
+///
+/// This is a cache eviction policy, not a deadline: the only cost of dropping
+/// early is one re-hydrate on next use, measured at well under a second for a
+/// small workspace. It is set generously anyway, because keeping a slot is what
+/// makes reopening instant and a day covers the overnight gap in normal use.
+pub const IDLE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Sweep until the process exits.
 pub async fn run(store: SlotStore, clients: NamespacedClients) {
     loop {
@@ -46,13 +54,24 @@ async fn sweep(
     let published = store.published_workspaces()?;
     let mut reclaimed = 0;
     for (workspace, namespace) in workspaces {
-        if !should_reclaim(clients, &workspace, namespace.as_deref(), &published).await {
+        let Some(why) =
+            should_reclaim(store, clients, &workspace, namespace.as_deref(), &published).await
+        else {
             continue;
-        }
+        };
         match store.remove_slot(&workspace) {
             Ok(true) => {
                 reclaimed += 1;
-                tracing::info!(workspace, "reclaimed slot for deleted workspace");
+                match why {
+                    Reclaim::Deleted => {
+                        tracing::info!(workspace, "reclaimed slot for deleted workspace")
+                    }
+                    Reclaim::Idle => tracing::info!(
+                        workspace,
+                        "reclaimed idle slot; its contents are in S3 and it will re-hydrate on \
+                         next use"
+                    ),
+                }
             }
             Ok(false) => {}
             Err(err) => tracing::warn!(%err, workspace, "could not reclaim slot"),
@@ -61,20 +80,31 @@ async fn sweep(
     Ok(reclaimed)
 }
 
-/// Whether `workspace`'s slot can be dropped.
+/// Why a slot was dropped, for the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reclaim {
+    /// The workspace is gone.
+    Deleted,
+    /// The workspace is alive but has not used this slot in a long time, and
+    /// everything in it is already in S3.
+    Idle,
+}
+
+/// Whether `workspace`'s slot can be dropped, and why.
 ///
 /// Deliberately biased towards keeping: every uncertain case — a published
-/// slot, an unreachable API server, a workspace that still exists — returns
-/// false. The cost of keeping a slot too long is disk; the cost of dropping one
-/// too early is a tenant's unflushed work.
+/// slot, an unreachable API server, a slot that has never flushed — returns
+/// `None`. The cost of keeping a slot too long is disk; the cost of dropping
+/// one too early is a tenant's unflushed work.
 async fn should_reclaim(
+    store: &SlotStore,
     clients: &NamespacedClients,
     workspace: &str,
     namespace: Option<&str>,
     published: &HashSet<String>,
-) -> bool {
+) -> Option<Reclaim> {
     if published.contains(workspace) {
-        return false;
+        return None;
     }
     // A Workspace CR is namespaced, and the agent's own namespace is not the
     // one it lives in. Without knowing which, a lookup returns "not found" for
@@ -86,17 +116,36 @@ async fn should_reclaim(
             workspace,
             "no namespace recorded for this slot; keeping it rather than risking a live workspace"
         );
-        return false;
+        return None;
     };
-    let Some(client) = clients.get(namespace).await else {
-        return false;
-    };
-    match client.api::<kubimo::Workspace>().get_opt(workspace).await {
-        Ok(None) => true,
-        Ok(Some(_)) => false,
+    let client = clients.get(namespace).await?;
+    let alive = match client.api::<kubimo::Workspace>().get_opt(workspace).await {
+        Ok(None) => false,
+        Ok(Some(_)) => true,
         Err(err) => {
             tracing::warn!(%err, workspace, "could not check workspace; keeping its slot");
-            false
+            return None;
+        }
+    };
+    if !alive {
+        return Some(Reclaim::Deleted);
+    }
+    // The workspace still exists, but this node's slot may be a leftover: a
+    // workspace that goes idle and is then reopened can be scheduled onto a
+    // different node, and nothing else ever collects the copy it left behind.
+    // Treating an idle slot as a cache is what pooled mode already assumes —
+    // S3 is the source of truth, and a dropped slot costs one re-hydrate.
+    //
+    // Only ever for a slot this node has actually flushed. Without that marker
+    // the slot may hold the only copy of the tenant's newest work: a flush that
+    // failed, or the deliberate skip when a workspace is being deleted. Age
+    // alone would turn either into data loss.
+    match store.flushed_ago(workspace) {
+        Ok(Some(idle)) if idle >= IDLE_TTL => Some(Reclaim::Idle),
+        Ok(_) => None,
+        Err(err) => {
+            tracing::warn!(%err, workspace, "could not read flush marker; keeping the slot");
+            None
         }
     }
 }
@@ -127,6 +176,56 @@ mod tests {
                 ("bmow-one".to_string(), Some("platform".to_string())),
                 ("bmow-two".to_string(), Some("platform".to_string())),
             ]
+        );
+    }
+
+    /// The flush marker is what makes idle eviction safe, so its absence has to
+    /// mean "keep". A slot that never flushed — because the flush failed, or
+    /// because it was deliberately skipped for a workspace being deleted — holds
+    /// the only copy of the tenant's newest work.
+    #[test]
+    fn a_slot_that_never_flushed_reports_no_age() {
+        let (_dir, store) = store();
+        store.resolve_or_create("bmow-fresh", "platform").unwrap();
+        assert_eq!(store.flushed_ago("bmow-fresh").unwrap(), None);
+
+        store.mark_flushed("bmow-fresh").unwrap();
+        let idle = store
+            .flushed_ago("bmow-fresh")
+            .unwrap()
+            .expect("a flushed slot has an age");
+        // Just flushed, so nowhere near the eviction threshold.
+        assert!(idle < IDLE_TTL, "{idle:?}");
+    }
+
+    /// A workspace with no slot at all must not look "flushed a long time ago"
+    /// and tempt the sweep into acting on it.
+    #[test]
+    fn an_unknown_workspace_reports_no_age() {
+        let (_dir, store) = store();
+        assert_eq!(store.flushed_ago("bmow-nothing").unwrap(), None);
+        // Marking one that does not exist is a no-op rather than an error: the
+        // slot may have been reclaimed between the flush and this call.
+        store.mark_flushed("bmow-nothing").unwrap();
+        assert_eq!(store.flushed_ago("bmow-nothing").unwrap(), None);
+    }
+
+    /// Reclaiming drops the marker with everything else, so a workspace that
+    /// gets a fresh slot later starts out unflushed rather than inheriting a
+    /// stale "safe to evict" from its predecessor.
+    #[test]
+    fn reclaiming_clears_the_flush_marker() {
+        let (_dir, store) = store();
+        store.resolve_or_create("bmow-cycle", "platform").unwrap();
+        store.mark_flushed("bmow-cycle").unwrap();
+        assert!(store.flushed_ago("bmow-cycle").unwrap().is_some());
+
+        assert!(store.remove_slot("bmow-cycle").unwrap());
+        store.resolve_or_create("bmow-cycle", "platform").unwrap();
+        assert_eq!(
+            store.flushed_ago("bmow-cycle").unwrap(),
+            None,
+            "a new slot must not inherit the old one's flush marker"
         );
     }
 
