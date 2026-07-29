@@ -1,0 +1,1 @@
+!(has(self.spec.mode) && self.spec.mode == "Pooled") || !has(self.spec.cloneWorkspaceName)
