@@ -179,6 +179,39 @@ mod tests {
         );
     }
 
+    /// A flush that fails must leave no marker, even if an earlier one
+    /// succeeded.
+    ///
+    /// A slot can be mounted twice at once — a cache job beside a runner. The
+    /// first unpublish flushes and marks while the second mount carries on
+    /// writing, so by the time that mount ends the marker is already there and
+    /// stale. Clearing it when a flush is *attempted*, rather than when a slot
+    /// is published, is what makes the marker mean "the last flush succeeded":
+    /// the failing path then leaves nothing behind, and the reaper keeps a slot
+    /// whose newest work never reached S3.
+    #[test]
+    fn a_failed_flush_leaves_no_marker_from_an_earlier_success() {
+        let (_dir, store) = store();
+        store.resolve_or_create("bmow-remount", "platform").unwrap();
+
+        // First mount ends: flush succeeds and marks the slot.
+        store.mark_flushed("bmow-remount").unwrap();
+        assert!(store.flushed_ago("bmow-remount").unwrap().is_some());
+
+        // Second mount ends: the flush is attempted — clearing first — and
+        // fails, so `mark_flushed` is never reached.
+        store.clear_flushed("bmow-remount").unwrap();
+        assert_eq!(
+            store.flushed_ago("bmow-remount").unwrap(),
+            None,
+            "a stale marker would let the reaper evict unflushed work"
+        );
+
+        // Clearing when there is nothing to clear is not an error: every flush
+        // attempt does it, including the first.
+        store.clear_flushed("bmow-remount").unwrap();
+    }
+
     /// The flush marker is what makes idle eviction safe, so its absence has to
     /// mean "keep". A slot that never flushed — because the flush failed, or
     /// because it was deliberately skipped for a workspace being deleted — holds

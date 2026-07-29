@@ -132,6 +132,27 @@ impl SlotStore {
         Ok(())
     }
 
+    /// Forget that `workspace`'s slot was flushed, because it is about to
+    /// change.
+    ///
+    /// Called on every publish, so the marker means "flushed *and* untouched
+    /// since" rather than merely "flushed at some point". Without it a slot
+    /// mounted twice — a cache job beside a runner — keeps the marker written
+    /// when the first mount ended, and if the second one's final flush then
+    /// fails, the reaper would read a stale marker as permission to evict work
+    /// that never reached S3.
+    pub fn clear_flushed(&self, workspace: &str) -> Result<(), StoreError> {
+        validate_workspace_name(workspace)?;
+        let Some(id) = self.lookup_slot_id(workspace)? else {
+            return Ok(());
+        };
+        match std::fs::remove_file(self.flushed_path(&id)) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(io_err(format!("clearing flush marker for {id}"))(err)),
+        }
+    }
+
     /// How long ago `workspace`'s slot was last flushed.
     ///
     /// `None` means it has never been flushed successfully, which callers must
