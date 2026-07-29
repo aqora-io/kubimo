@@ -445,6 +445,51 @@ impl KubimoNode {
     /// re-stamping a project id on every publish would be wasted work, and
     /// re-chowning could stomp on files the tenant deliberately made
     /// more restrictive.
+    /// Fill a freshly created slot from the workspace's own archive, falling
+    /// back to its seed.
+    ///
+    /// Returns whether anything was written. Split out from [`Self::prepare_slot`]
+    /// so its failure can be handled in one place: a half-hydrated slot has to be
+    /// discarded, or the retry inherits it and publishes it empty.
+    async fn hydrate_new_slot(
+        &self,
+        workspace: &str,
+        slot: &crate::slot::SlotId,
+        dir: &Path,
+        archive: Option<&crate::hydrate::ArchiveLocation>,
+        seed: Option<&crate::hydrate::ArchiveLocation>,
+        s3: Option<&indexer::s3::S3Client>,
+    ) -> Result<bool, Status> {
+        let Some(s3) = s3 else {
+            return Ok(false);
+        };
+        let mut restored = false;
+        if let Some(archive) = archive {
+            restored = crate::hydrate::hydrate_slot(dir, archive, s3)
+                .await
+                .map_err(|err| Status::internal(format!("hydrating slot: {err}")))?;
+            tracing::info!(workspace, slot = %slot, hydrated = restored, "slot hydrated");
+        }
+        // Fall back to the seed only when the workspace's own archive had no
+        // manifest, which is the existing signal for "never indexed". The
+        // workspace's own content always wins: re-seeding a warm workspace —
+        // one whose slot was reclaimed, or whose agent pod was replaced — would
+        // overwrite the tenant's work with the template it started from.
+        //
+        // Note this uses the *workspace's* client, not the agent's own. The
+        // agent has no credentials of its own since they became per-workspace,
+        // so reading the seed through `self.s3` sent it to the instance
+        // metadata service looking for some, and every clone failed to mount.
+        if !restored && let Some(seed) = seed {
+            let seeded = crate::hydrate::hydrate_slot(dir, seed, s3)
+                .await
+                .map_err(|err| Status::internal(format!("seeding slot: {err}")))?;
+            tracing::info!(workspace, slot = %slot, seeded, "slot seeded");
+            restored |= seeded;
+        }
+        Ok(restored)
+    }
+
     async fn prepare_slot(
         &self,
         workspace: &str,
@@ -516,31 +561,31 @@ impl KubimoNode {
             // already populated would overwrite the tenant's newer local edits
             // with whatever was last synced — this is the path that makes
             // reopening a workspace with a warm slot instant.
-            let mut restored = false;
             // Absent credentials leave both sources unreadable; the slot starts
             // empty rather than the mount failing, matching a workspace that
             // genuinely has no archive.
             let s3 = self.s3_for(workspace);
-            if let (Some(archive), Some(s3)) = (archive, s3.as_ref()) {
-                restored = crate::hydrate::hydrate_slot(&dir, archive, s3)
-                    .await
-                    .map_err(|err| Status::internal(format!("hydrating slot: {err}")))?;
-                tracing::info!(workspace, slot = %resolved.id, hydrated = restored, "slot hydrated");
+            let hydrated = self
+                .hydrate_new_slot(workspace, &resolved.id, &dir, archive, seed, s3.as_ref())
+                .await;
+            // A failed hydration must not leave the slot behind. Hydration only
+            // runs for a freshly created slot, so kubelet's retry would find one
+            // already present, skip hydration entirely, and publish an *empty*
+            // workspace — turning one transient S3 error into permanent, silent
+            // data loss whose only trace is a mount error that then succeeds.
+            // Dropping the slot makes the retry start over.
+            if hydrated.is_err()
+                && let Err(err) = self.store.remove_slot(workspace)
+            {
+                tracing::error!(
+                    %err,
+                    workspace,
+                    slot = %resolved.id,
+                    "could not drop a slot whose hydration failed; a retry will \
+                     publish it empty"
+                );
             }
-            // Fall back to the seed only when the workspace's own archive had no
-            // manifest, which is the existing signal for "never indexed". The
-            // workspace's own content always wins: re-seeding a warm workspace —
-            // one whose slot was reclaimed, or whose agent pod was replaced —
-            // would overwrite the tenant's work with the template it started
-            // from.
-            if !restored && let Some(seed) = seed {
-                let seeded = crate::hydrate::hydrate_slot(&dir, seed, &self.s3)
-                    .await
-                    .map_err(|err| Status::internal(format!("seeding slot: {err}")))?;
-                tracing::info!(workspace, slot = %resolved.id, seeded, "slot seeded");
-                restored |= seeded;
-            }
-            if restored {
+            if hydrated? {
                 // Restored files land as root; the runner is uid 1000.
                 chown_tree(&dir)
                     .map_err(|err| Status::internal(format!("chowning hydrated slot: {err}")))?;
