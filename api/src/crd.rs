@@ -206,6 +206,17 @@ pub struct WorkspaceSpec {
     /// existing objects keep their current behaviour; the operator's
     /// `KUBIMO__DEFAULT_WORKSPACE_MODE` only applies to workspaces that have
     /// not yet materialized `status.mode`.
+    ///
+    /// Skipped when unset, unlike its neighbours, because this one is an enum:
+    /// the generated schema lists the permitted values, and an explicit `null`
+    /// is not among them. Serializing it anyway made every spec built from
+    /// `Default` — which is what the integration tests and any client that
+    /// fills in only the fields it cares about produce — rejected outright with
+    /// "Unsupported value: null". Nullable object fields tolerate it, so the
+    /// breakage arrived with this field and went unnoticed while those tests
+    /// were ignored. Omitting it also avoids claiming the field under
+    /// server-side apply, the same reason the status structs skip theirs.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<WorkspaceMode>,
     pub storage: Option<StorageRequirement>,
     /// DEPRECATED: only honoured in `Dedicated` mode. `Pooled` workspaces have
