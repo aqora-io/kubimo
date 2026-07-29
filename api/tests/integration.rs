@@ -112,3 +112,96 @@ async fn test_create_runner_for_workspace() {
     })
     .await;
 }
+
+/// The agent's status fields must survive the indexer's status writes.
+///
+/// `status.slot` and `status.archive` are written by the node agent;
+/// `status.storage` is written by the indexer, repeatedly, for the life of a
+/// runner. Under server-side apply a manager owns exactly the fields its last
+/// apply contained, so a manager that omits a field *relinquishes* it — and the
+/// indexer's patches never mention slot or archive.
+///
+/// Writing all three under one identity therefore had the API server delete the
+/// slot status seconds after the agent wrote it, with no error on either side.
+/// This asserts the property that prevents it: the two managers own disjoint
+/// fields and neither can revoke the other's.
+///
+/// `skip_serializing_if` on those structs is a different guard — it stops a
+/// manager writing an explicit `null` over someone else's field. It cannot stop
+/// a manager silently dropping its own.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_agent_status_survives_indexer_writes() {
+    with_namespace("test-status-managers", |client, ns| async move {
+        let workspaces = client.api_namespaced::<Workspace>(&ns);
+        workspaces
+            .patch(&Workspace::new(TEST_WORKSPACE, WorkspaceSpec::default()))
+            .await
+            .expect("Failed to create workspace");
+
+        // The agent records where the slot lives, under its own identity.
+        let agent = Client::builder()
+            .name("kubimo-agent")
+            .namespace(&ns)
+            .build()
+            .await
+            .expect("Failed to build an agent client");
+        let mut from_agent = Workspace::new(TEST_WORKSPACE, WorkspaceSpec::default());
+        from_agent.status = Some(kubimo::WorkspaceStatus {
+            slot: Some(kubimo::WorkspaceSlotStatus {
+                node: Some("node-1".to_string()),
+                id: Some("slot-abc".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        agent
+            .api_namespaced::<Workspace>(&ns)
+            .patch_status(&from_agent)
+            .await
+            .expect("agent failed to write slot status");
+
+        // The indexer then reports usage, repeatedly, never mentioning the slot.
+        let indexer = Client::builder()
+            .name("kubimo-indexer")
+            .namespace(&ns)
+            .build()
+            .await
+            .expect("Failed to build an indexer client");
+        for used in ["100", "200", "300"] {
+            let mut from_indexer = Workspace::new(TEST_WORKSPACE, WorkspaceSpec::default());
+            from_indexer.status = Some(kubimo::WorkspaceStatus {
+                storage: Some(kubimo::WorkspaceStorageStatus {
+                    used: Some(used.parse().expect("a quantity")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            indexer
+                .api_namespaced::<Workspace>(&ns)
+                .patch_status(&from_indexer)
+                .await
+                .expect("indexer failed to write storage status");
+        }
+
+        let found = workspaces
+            .get(TEST_WORKSPACE)
+            .await
+            .expect("Failed to read workspace back");
+        let status = found.status.expect("status is set");
+        let slot = status
+            .slot
+            .expect("the agent's slot status was deleted by the indexer's writes");
+        assert_eq!(slot.id.as_deref(), Some("slot-abc"));
+        assert_eq!(slot.node.as_deref(), Some("node-1"));
+        // ...and the indexer's own field still updates.
+        assert_eq!(
+            status
+                .storage
+                .and_then(|storage| storage.used)
+                .map(|used| used.to_string()),
+            Some("300".to_string())
+        );
+    })
+    .await;
+}
