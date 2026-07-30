@@ -1,0 +1,3 @@
+[tool.marimo.venv]
+path = "/home/me/venv"
+writable = true

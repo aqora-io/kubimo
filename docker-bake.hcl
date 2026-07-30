@@ -16,7 +16,7 @@ variable "MARIMO_GIT" {
 }
 
 group "default" {
-  targets = ["marimo", "controller"]
+  targets = ["marimo", "conda-marimo", "controller"]
 }
 
 target "docker-metadata-controller" {}
@@ -55,9 +55,11 @@ target "agent" {
 }
 
 target "docker-metadata-marimo" {}
+target "docker-metadata-conda-marimo" {}
 
 target "marimo" {
   inherits = ["docker-metadata-marimo"]
+  target = "uv"
   dockerfile = "docker/Dockerfile.marimo"
   context = "."
   # platforms = [BAKE_LOCAL_PLATFORM]
@@ -71,4 +73,9 @@ target "marimo" {
     "id=SCCACHE_AWS_ACCESS_KEY_ID,env=SCCACHE_AWS_ACCESS_KEY_ID",
     "id=SCCACHE_AWS_SECRET_ACCESS_KEY,env=SCCACHE_AWS_SECRET_ACCESS_KEY",
   ]
+}
+
+target "conda-marimo" {
+  inherits = ["marimo", "docker-metadata-conda-marimo"]
+  target = "micromamba"
 }
