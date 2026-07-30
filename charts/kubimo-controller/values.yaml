@@ -24,6 +24,12 @@ image:
 #       method: ServiceDns
 #       # host: https://kubimo.org
 #     intervalSecs: 10
+#   # Storage mode for workspaces that do not set spec.mode: Dedicated (a PVC each) or
+#   # Pooled (a slot on the shared per-node volume, which needs agent.enabled). Only
+#   # affects newly created workspaces — every workspace pins its mode into status.mode
+#   # on first reconcile, so flipping back changes what is created next and migrates
+#   # nothing. Requires the node agent to be running before it is set to Pooled.
+#   defaultWorkspaceMode: Dedicated
 
 crds:
   enabled: true
