@@ -106,6 +106,9 @@ spec:
             - --data-root=/data
             - serve
             - --socket=/csi/csi.sock
+            # Where the stale-mount sweep looks for published slots. Must match the
+            # hostPath above, since that is where kubelet publishes them.
+            - --kubelet-pods-dir={{ .Values.agent.kubeletDir }}/pods
             {{- with .Values.agent.minKernelVersion }}
             - --min-kernel-version={{ . }}
             {{- end }}
@@ -159,7 +162,12 @@ spec:
             - name: plugin-dir
               mountPath: /csi
             - name: pods-dir
-              mountPath: /var/lib/kubelet/pods
+              # Mounted at the *same* path it has on the host, deliberately.
+              # `NodePublishVolume` hands us kubelet's `target_path`, which is a host
+              # path under `kubeletDir`, and the agent operates on it directly — so the
+              # two must agree. Mounting it anywhere else makes every publish fail on a
+              # path that does not exist inside the container.
+              mountPath: {{ .Values.agent.kubeletDir }}/pods
               # Bidirectional so bind mounts the agent creates propagate back
               # out to kubelet's namespace, where the runner pod sees them.
               mountPropagation: Bidirectional
