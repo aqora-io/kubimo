@@ -693,6 +693,13 @@ impl Node for KubimoNode {
         request: Request<proto::NodePublishVolumeRequest>,
     ) -> Result<Response<proto::NodePublishVolumeResponse>, Status> {
         let request = request.into_inner();
+        // Refuse once shutdown has begun. Publishing here would hand a runner a slot on
+        // a data volume that is about to be destroyed — manufacturing exactly the wedged
+        // mount this shutdown is draining to avoid. kubelet retries with backoff, so the
+        // pod simply waits until the replacement agent answers.
+        if self.store.is_draining() {
+            return Err(Status::unavailable("node agent is draining"));
+        }
         if request.target_path.is_empty() {
             return Err(Status::invalid_argument("target_path is required"));
         }

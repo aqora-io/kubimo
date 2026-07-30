@@ -34,6 +34,20 @@ rules:
   - apiGroups: ["kubimo.aqora.io"]
     resources: ["workspaces/status"]
     verbs: ["get", "patch", "update"]
+  {{- if .Values.agent.drain.enabled }}
+  # Shutdown drain: the agent deletes the pods holding its slots so that kubelet calls
+  # NodeUnpublishVolume while this agent can still flush and unmount them.
+  #
+  # Cluster-scoped because runner pods live in tenant namespaces, and a spec.nodeName
+  # field selector still requires a cluster-wide list. RBAC cannot express "only pods on
+  # my node", so this is genuinely broader than the drain needs. It is a small increment
+  # on an already tier-0 component — the agent is privileged on the node and can read
+  # every tenant's files — but `delete` on any pod cluster-wide is the sharpest verb
+  # here, so it is scoped to the drain being enabled at all.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
