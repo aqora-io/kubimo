@@ -344,6 +344,30 @@ impl SlotStore {
         let _ = std::fs::remove_file(self.publish_path(volume_id));
     }
 
+    /// Drop every publish record naming `workspace`.
+    ///
+    /// A record is keyed by volume id, so a workspace that was published, unpublished
+    /// and republished can have left more than one behind. Any that survives makes
+    /// [`Self::published_workspaces`] report the workspace as mounted forever, which
+    /// stops the reaper reclaiming its slot for as long as this data volume lives.
+    fn forget_publishes_for(&self, workspace: &str) {
+        let Ok(entries) = std::fs::read_dir(self.index_dir()) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.starts_with("vol-") {
+                continue;
+            }
+            if std::fs::read_to_string(entry.path())
+                .is_ok_and(|raw| raw.lines().next() == Some(workspace))
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
     /// Every workspace this node holds a slot for.
     ///
     /// Read from the index rather than by listing slot directories, because a
@@ -404,6 +428,9 @@ impl SlotStore {
     /// against it is meaningless once no inodes carry it.
     pub fn remove_slot(&self, workspace: &str) -> Result<bool, StoreError> {
         validate_workspace_name(workspace)?;
+        // Before anything else, and on both exits: a leaked publish record outlives the
+        // slot it names and would make this workspace look permanently mounted.
+        self.forget_publishes_for(workspace);
         let Some(id) = self.lookup_slot_id(workspace)? else {
             // Nothing recorded, though the link may be a dangling leftover.
             let _ = std::fs::remove_file(self.workspace_link(workspace));
@@ -603,6 +630,47 @@ mod tests {
             store
                 .resolve_or_create("bmow-019e82b3-1234-7abc-8def-0123456789ab", "platform")
                 .is_ok()
+        );
+    }
+
+    fn publish(store: &SlotStore, volume_id: &str, workspace: &str, slot: SlotId) {
+        store
+            .record_publish(
+                volume_id,
+                &PublishedSlot {
+                    workspace: workspace.to_string(),
+                    namespace: "platform".to_string(),
+                    slot,
+                    bucket: None,
+                    key_prefix: None,
+                },
+            )
+            .unwrap();
+    }
+
+    /// The reaper keeps any workspace named in `published_workspaces`, unconditionally.
+    /// So a publish record that outlives its slot does not merely leak a small file — it
+    /// disables reclamation for that workspace for as long as the data volume lives.
+    #[test]
+    fn removing_a_slot_drops_its_publish_records() {
+        let (_dir, store) = store();
+        let mine = store.resolve_or_create("bmow-abc", "platform").unwrap();
+        let theirs = store.resolve_or_create("bmow-xyz", "platform").unwrap();
+        // Two records for one workspace: republishing under a new volume id is normal.
+        publish(&store, "vol-one", "bmow-abc", mine.id.clone());
+        publish(&store, "vol-two", "bmow-abc", mine.id.clone());
+        publish(&store, "vol-other", "bmow-xyz", theirs.id.clone());
+
+        store.remove_slot("bmow-abc").unwrap();
+
+        let published = store.published_workspaces().unwrap();
+        assert!(
+            !published.contains("bmow-abc"),
+            "a surviving record would pin this workspace as published forever"
+        );
+        assert!(
+            published.contains("bmow-xyz"),
+            "another workspace's record must be left alone"
         );
     }
 }
