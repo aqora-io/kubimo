@@ -9,3 +9,7 @@ target "docker-metadata-controller" {
 target "docker-metadata-marimo" {
   tags = ["ghcr.io/aqora-io/kubimo-marimo:${TAG}"]
 }
+
+target "docker-metadata-marimo-conda" {
+  tags = ["ghcr.io/aqora-io/kubimo-marimo-conda:${TAG}"]
+}

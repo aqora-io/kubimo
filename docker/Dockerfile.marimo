@@ -99,7 +99,7 @@ RUN \
 EOF
 
 # actual image deployed to production
-FROM ghcr.io/astral-sh/uv:0.10.11-python3.12-trixie-slim
+FROM ghcr.io/astral-sh/uv:0.10.11-python3.12-trixie-slim AS base
 SHELL ["/bin/bash", "-xeuo", "pipefail", "-c"]
 ARG USER=me
 
@@ -154,6 +154,9 @@ COPY --from=build-indexer /bin/indexer /app/indexer
 
 USER ${USER}
 WORKDIR /home/${USER}/workspace
+
+FROM base AS uv
+
 ENV VIRTUAL_ENV="/home/${USER}/venv" \
     UV_PROJECT="/home/${USER}/workspace" \
     UV_PROJECT_ENVIRONMENT="/home/${USER}/venv" \
@@ -168,3 +171,37 @@ RUN \
 EOF
 
 CMD ["uv", "run", "python"]
+
+# download micromamba
+FROM scratch AS micromamba-arm64
+ARG MICROMAMBA_VERSION=2.8.1-1
+ARG MICROMAMBA_CHKSUM=sha256:49aa29008cafa6cd6027ebd643fc43ca32c20740e60b0a05378c4e5bb837c217
+ADD --checksum=${MICROMAMBA_CHKSUM} --chmod=u=rwx,go=rx https://github.com/mamba-org/micromamba-releases/releases/download/${MICROMAMBA_VERSION}/micromamba-linux-aarch64 /mnt/micromamba
+
+FROM scratch AS micromamba-amd64
+ARG MICROMAMBA_VERSION=2.8.1-1
+ARG MICROMAMBA_CHKSUM=sha256:77b7790ec97f64581118f103585b175df4306f95829b0fa6bfe4a19cc88a1182
+ADD --checksum=${MICROMAMBA_CHKSUM} --chmod=u=rwx,go=rx https://github.com/mamba-org/micromamba-releases/releases/download/${MICROMAMBA_VERSION}/micromamba-linux-64 /mnt/micromamba
+
+FROM micromamba-${TARGETARCH} AS micromamba-installer
+
+FROM base AS miniconda
+
+COPY --from=micromamba-installer /mnt/micromamba /usr/local/bin/micromamba
+ENV MAMBA_ROOT_PREFIX="/home/${USER}/.local/share/micromamba"
+ENV MAMBA_EXE="/usr/local/bin/micromamba"
+RUN <<EOF
+mkdir -p /home/${USER}/.local/share/micromamba /home/${USER}/.local/bin
+ln -s /usr/local/bin/micromamba /home/${USER}/.local/bin/mamba
+ln -s /usr/local/bin/micromamba /home/${USER}/.local/bin/conda
+EOF
+ENV PATH="/home/${USER}/.local/bin:${PATH}"
+
+COPY --chown=${USER} docker/setup/conda-environment.yaml environment.yaml
+COPY --chown=${USER} docker/setup/conda-pyproject.toml pyproject.toml
+RUN micromamba create --yes -p "/home/${USER}/venv" --file environment.yaml
+ENV PATH="/home/${USER}/venv/bin:${PATH}"
+ENV CONDA_PREFIX="/home/${USER}/venv"
+ENV CONDA_DEFAULT_ENV="/home/${USER}/venv"
+
+CMD /home/${USER}/venv/bin/python3

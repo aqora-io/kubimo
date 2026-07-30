@@ -22,6 +22,9 @@ jobs:
           - name: marimo
             bake-target: marimo
             registry: ghcr.io/aqora-io/kubimo-marimo
+          - name: marimo-conda
+            bake-target: marimo-conda
+            registry: ghcr.io/aqora-io/kubimo-marimo-conda
           - name: agent
             bake-target: agent
             registry: ghcr.io/aqora-io/kubimo-agent
@@ -103,6 +106,8 @@ jobs:
             registry: ghcr.io/aqora-io/kubimo-controller
           - name: marimo
             registry: ghcr.io/aqora-io/kubimo-marimo
+          - name: marimo-conda
+            registry: ghcr.io/aqora-io/kubimo-marimo-conda
           - name: agent
             registry: ghcr.io/aqora-io/kubimo-agent
     steps:

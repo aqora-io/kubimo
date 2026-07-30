@@ -101,6 +101,27 @@ uv_sync_workspace() {
   uv sync --no-install-package marimo
 }
 
+mamba_update_workspace() {
+  if [[ -f environment.yaml ]]; then
+    # `environment.yaml` here may contain output of:
+    #   micromamba env export
+    # but it may also be user-generated
+    environment="environment.yaml"
+  elif [[ -f lock.txt ]]; then
+    # `lock.txt` here will contain output of:
+    #   micromamba env export --explicit
+    # this file isn't usually user-generated
+    environment="lock.txt"
+  else
+    return
+  fi
+
+  /usr/local/bin/micromamba env update --yes \
+    --prefix "$CONDA_PREFIX" \
+    --prune \
+    --file "$environment"
+}
+
 is_marimo_venv_configured() {
   python3 -c '
 import sys, tomllib
@@ -128,7 +149,11 @@ if [[ "$CMD" == "edit" ]]; then
   # are not yet installed, and opening a notebook in it shows marimo's
   # "Install packages" banner. Recoverable, and the same banner users already
   # get for genuinely missing packages.
-  uv_sync_workspace &
+  if [[ -n "$UV_PROJECT" ]]; then
+    uv_sync_workspace &
+  elif [[ -n "$CONDA_PREFIX" ]]; then
+    mamba_update_workspace
+  fi
   ensure_marimo_venv_config
   exec marimo \
     "${common_flags[@]}" \
@@ -144,7 +169,11 @@ if [[ "$CMD" == "edit" ]]; then
 
 elif [[ "$CMD" == "run" ]]; then
   # Same reasoning as `edit` above.
-  uv_sync_workspace &
+  if [[ -n "$UV_PROJECT" ]]; then
+    uv_sync_workspace &
+  elif [[ -n "$CONDA_PREFIX" ]]; then
+    mamba_update_workspace
+  fi
   ensure_marimo_venv_config
   exec marimo \
     "${common_flags[@]}" \
@@ -177,7 +206,11 @@ elif [[ "$CMD" == "render" ]]; then
   exec marimo-ssr serve "${argv[@]}" "$directory"
 
 elif [[ "$CMD" == "cache" ]]; then
-  uv_sync_workspace
+  if [[ -n "$UV_PROJECT" ]]; then
+    uv_sync_workspace
+  elif [[ -n "$CONDA_PREFIX" ]]; then
+    mamba_update_workspace
+  fi
   exec "$VIRTUAL_ENV/bin/python3" /app/cache.py \
     --include-code "${common_flags[@]}"
 

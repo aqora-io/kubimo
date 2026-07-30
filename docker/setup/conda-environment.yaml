@@ -1,0 +1,5 @@
+name: marimo
+channels:
+  - conda-forge
+dependencies:
+  - marimo
