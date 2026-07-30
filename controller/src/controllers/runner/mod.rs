@@ -68,16 +68,39 @@ impl Reconciler for RunnerReconciler {
             Some(_) => {}
         }
 
-        futures::future::try_join_all([
+        let applied = futures::future::try_join_all([
             self.apply_owner_reference(ctx, runner).boxed(),
             self.apply_pod(ctx, runner).map_ok(|_| ()).boxed(),
             self.apply_service(ctx, runner).map_ok(|_| ()).boxed(),
             self.apply_ingress(ctx, runner).map_ok(|_| ()).boxed(),
         ])
-        .await?;
+        .await;
+
+        // Recreating the pod while the previous one is still Terminating is a 409, and a
+        // transient one: the name frees up as soon as it finishes. Left to propagate it
+        // would log an error on every recycle and every manual pod delete, which is
+        // exactly when someone is reading the logs.
+        if let Err(err) = applied {
+            if is_already_exists(&err) {
+                return Ok(Action::requeue(Duration::from_secs(2)));
+            }
+            return Err(err);
+        }
 
         Ok(Action::await_change())
     }
+}
+
+/// A 409 from the API server, i.e. the object still exists under this name.
+///
+/// For a pod being recreated after a delete this is transient — the name frees up once
+/// the previous one finishes terminating — so it should requeue rather than surface as a
+/// reconcile failure.
+fn is_already_exists(err: &kubimo::Error) -> bool {
+    matches!(
+        err,
+        kubimo::Error::Kube(kubimo::kube::Error::Api(status)) if status.code == 409
+    )
 }
 
 pub(crate) fn is_workspace_ready(workspace: &Workspace) -> bool {
