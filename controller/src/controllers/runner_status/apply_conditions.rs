@@ -8,22 +8,15 @@ use super::conditions::{
 };
 use crate::context::Context;
 
-/// What the startup pass observed, handed back so the caller need not re-fetch it.
-pub(super) struct Startup {
-    /// True once every startup condition is True.
-    pub complete: bool,
-    pub pod: Option<Pod>,
-    pub mode: WorkspaceMode,
-}
-
 impl RunnerStatusReconciler {
-    /// Updates the runner's startup progress conditions.
+    /// Updates the runner's startup progress conditions. Returns true once
+    /// all of them are True.
     pub(super) async fn apply_startup_conditions(
         &self,
         ctx: &Context,
         runner: &Runner,
         status: &mut RunnerStatus,
-    ) -> kubimo::Result<Startup> {
+    ) -> kubimo::Result<bool> {
         let namespace = runner.require_namespace()?;
         let name = runner.name()?;
         let workspace_name = runner.spec.workspace.as_str();
@@ -63,10 +56,6 @@ impl RunnerStatusReconciler {
             pod_scheduled_condition(pod.as_ref(), generation),
         );
         upsert_condition(conditions, pod_ready_condition(pod.as_ref(), generation));
-        Ok(Startup {
-            complete: startup_complete(conditions),
-            pod,
-            mode,
-        })
+        Ok(startup_complete(conditions))
     }
 }

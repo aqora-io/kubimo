@@ -65,20 +65,6 @@ where
             .await?)
     }
 
-    /// Merge-patch: sets the fields present in `patch` and leaves everything else alone.
-    ///
-    /// Use this to add a single annotation or label. [`Self::patch`] is server-side
-    /// apply, so it would relinquish every field this manager owns but did not send,
-    /// and [`Self::patch_json`]'s `add` returns 422 when the parent map does not exist
-    /// yet — a merge patch creates it.
-    #[tracing::instrument(level = "debug", skip(self), ret, err)]
-    pub async fn patch_merge(&self, name: &str, patch: serde_json::Value) -> Result<T> {
-        Ok(self
-            .inner
-            .patch(name, &self.patch_params(), &Patch::Merge(patch))
-            .await?)
-    }
-
     #[tracing::instrument(level = "debug", skip(self), ret, err)]
     pub async fn patch_json(&self, name: &str, patch: json_patch::Patch) -> Result<T> {
         Ok(self
