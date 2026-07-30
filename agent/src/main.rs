@@ -15,6 +15,7 @@ mod quota;
 mod reaper;
 mod slot;
 mod store;
+mod sweep;
 mod venv;
 
 use std::path::PathBuf;
@@ -401,6 +402,8 @@ fn serve(
                     None
                 }
             };
+            let sweep_node_name = node_name.clone();
+            let kubelet_pods_dir = std::path::PathBuf::from(sweep::DEFAULT_KUBELET_PODS_DIR);
             // Slots outlive the runners that used them — that is what makes
             // reopening a workspace instant — so nothing on the unpublish path
             // deletes one. Without this sweep they would accumulate on the node
@@ -412,6 +415,11 @@ fn serve(
                     SlotStore::new(SlotLayout::new(&reaper_root)),
                     clients::NamespacedClients::new(true),
                     idle_slot_ttl,
+                    client.clone().map(|client| reaper::StaleMountSweep {
+                        client,
+                        node_name: sweep_node_name,
+                        pods_dir: kubelet_pods_dir,
+                    }),
                 ));
             } else {
                 tracing::warn!(

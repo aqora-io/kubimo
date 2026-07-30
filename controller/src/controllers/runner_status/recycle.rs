@@ -16,18 +16,17 @@
 //! sync. That trade — a restart losing seconds of work, against a session wedged
 //! indefinitely — is the whole justification for the module.
 
-// Landed ahead of its call site: this predicate deletes user-visible pods, so it is
-// reviewed and tested on its own before anything acts on it. The reconciler wiring, and
-// the removal of this allow, is the immediate follow-up.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use kubimo::WorkspaceMode;
 use kubimo::k8s_openapi::api::core::v1::Pod;
 use kubimo::k8s_openapi::jiff::Timestamp;
 
+use kubimo::{Runner, prelude::*};
+
 use super::conditions::container_state_detail;
+use crate::config::RecyclePolicy;
+use crate::context::Context;
 
 /// Annotations recorded on the **Runner**, not the pod: the pod is recreated under the
 /// same name, so a pod annotation would vanish with the thing it is meant to remember.
@@ -54,35 +53,6 @@ const DEAD_MOUNT_MARKERS: &[&str] = &[
 pub(super) struct Wedge {
     pub reason: String,
     pub message: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "snake_case", default)]
-pub(super) struct RecyclePolicy {
-    pub enabled: bool,
-    /// How long the wedge must persist before acting.
-    ///
-    /// This is the guard against the case that is *invisible* in container status: a
-    /// genuinely new pod on a node whose agent is not up yet fails as a `FailedMount`
-    /// event, with the container stuck `ContainerCreating` and no message at all. That
-    /// is the normal state during every agent rollout. Only a message-bearing signature
-    /// can trigger a recycle, and only after it has outlasted a plausible rollout.
-    pub dwell_secs: i64,
-    pub cooldown_secs: i64,
-    /// After this many recycles the runner is left broken on purpose, so a permanently
-    /// bad node surfaces as an error the user can see rather than an endless restart.
-    pub max_recycles: u32,
-}
-
-impl Default for RecyclePolicy {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            dwell_secs: 120,
-            cooldown_secs: 600,
-            max_recycles: 3,
-        }
-    }
 }
 
 /// The wedge signature, read straight from container state.
@@ -169,6 +139,57 @@ pub(super) fn should_recycle(
     }
 
     Some(wedge)
+}
+
+/// Record the recycle on the Runner, then delete the pod.
+///
+/// That order matters and is not interchangeable: a crash between the two costs one
+/// skipped recycle, which is harmless, while the reverse would let a controller restart
+/// re-delete the same pod forever. The annotations are what make `max_recycles` and the
+/// cooldown mean anything across restarts.
+pub(super) async fn recycle_pod(
+    ctx: &Context,
+    runner: &Runner,
+    pod: &Pod,
+    wedge: &Wedge,
+) -> kubimo::Result<()> {
+    let namespace = runner.require_namespace()?;
+    let runner_name = runner.name()?;
+    let pod_name = pod.name()?;
+    let count = runner
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|map| map.get(RECYCLED_COUNT))
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .unwrap_or(0)
+        + 1;
+
+    ctx.api_for(runner)?
+        .patch_merge(
+            runner_name,
+            serde_json::json!({
+                "metadata": { "annotations": {
+                    RECYCLED_POD_UID: pod.metadata.uid.clone().unwrap_or_default(),
+                    RECYCLED_AT: Timestamp::now().to_string(),
+                    RECYCLED_COUNT: count.to_string(),
+                }}
+            }),
+        )
+        .await?;
+
+    tracing::warn!(
+        runner = runner_name,
+        pod = pod_name,
+        reason = wedge.reason,
+        message = wedge.message,
+        recycle_count = count,
+        "recycling a runner whose slot mount is dead; work since the agent died is lost"
+    );
+    ctx.api_namespaced::<Pod>(namespace)
+        .delete(pod_name)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
