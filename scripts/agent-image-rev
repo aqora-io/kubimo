@@ -1,0 +1,101 @@
+#!/bin/sh
+# Resolve the git revision that defines the agent image's contents.
+#
+# The agent image is tagged by its own source (`src-<rev>`) rather than by the release
+# version, so that a controller-only release renders a byte-identical DaemonSet pod
+# template and Kubernetes does not roll the agent. That matters because replacing the
+# agent destroys the node's data volume and restarts every runner on the node — see
+# charts/kubimo-controller/templates/agent-daemonset.yaml.
+#
+# The path list is deliberately generous: it is every workspace member *except*
+# controller/, plus the build inputs. Over-including a path costs an unnecessary roll;
+# under-including one ships a stale agent against a newer controller. Only the second is
+# dangerous, so err toward including.
+#
+# This is a content hash rather than a git revision on purpose. A release commit bumps
+# `[workspace.package] version` in Cargo.toml and every workspace member's version in
+# Cargo.lock — both are agent inputs — so `git log -1 -- <paths>` would move on every
+# release and the agent would roll anyway. The workspace version is normalized out
+# below; nothing else is.
+#
+#   agent-image-rev            print the hash
+#   agent-image-rev --check    verify the path list still covers the agent
+set -eu
+
+AGENT_PATHS="agent api indexer notebook_meta json-patch-macros k8s-crd-snapshot-storage Cargo.toml Cargo.lock docker/Dockerfile.agent"
+
+# The one member deliberately excluded. If the agent ever depends on it, the whole
+# scheme is unsound: a controller change would alter agent behaviour without moving
+# the tag.
+EXCLUDED_MEMBER="controller"
+
+check() {
+    status=0
+
+    # 1. Every workspace member except the excluded one must be hashed. This is what
+    #    catches a newly added crate: without it, a new member the agent depends on
+    #    would silently never trigger a roll.
+    members=$(cargo metadata --format-version 1 --no-deps \
+        | jq -r '.workspace_root as $root
+                 | .packages[]
+                 | (.manifest_path | rtrimstr("/Cargo.toml") | ltrimstr($root + "/"))')
+
+    for member in $members; do
+        [ "$member" = "$EXCLUDED_MEMBER" ] && continue
+        case " $AGENT_PATHS " in
+            *" $member "*) ;;
+            *)
+                echo "error: workspace member '$member' is not in AGENT_PATHS." >&2
+                echo "       Add it, or the agent image will not be rebuilt when it changes." >&2
+                status=1
+                ;;
+        esac
+    done
+
+    # 2. The agent must not depend on the excluded member, directly or transitively.
+    excluded_pkg=$(cargo metadata --format-version 1 --no-deps \
+        | jq -r --arg root "$EXCLUDED_MEMBER" '.workspace_root as $wr
+                 | .packages[]
+                 | select((.manifest_path | rtrimstr("/Cargo.toml") | ltrimstr($wr + "/")) == $root)
+                 | .name')
+
+    if [ -n "$excluded_pkg" ] \
+        && cargo tree --package agent --edges normal,build --prefix none 2>/dev/null \
+        | grep -qx "$excluded_pkg v.*"; then
+        echo "error: agent depends on '$excluded_pkg', which is excluded from AGENT_PATHS." >&2
+        echo "       A controller-only change could then alter the agent without moving its tag." >&2
+        status=1
+    fi
+
+    [ "$status" -eq 0 ] && echo "agent image path list is consistent"
+    return "$status"
+}
+
+rev() {
+    version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+    [ -n "$version" ] || {
+        echo "error: could not read [workspace.package] version from Cargo.toml" >&2
+        exit 1
+    }
+    # Match the quoted version only, so a coincidental substring elsewhere is untouched.
+    escaped=$(printf '%s' "$version" | sed 's/[].[^$*\\/]/\\&/g')
+
+    {
+        git ls-files -- $AGENT_PATHS | sort | while IFS= read -r file; do
+            # Name as well as content, so a rename or deletion moves the hash.
+            echo "$file"
+            case "$file" in
+                Cargo.toml | Cargo.lock)
+                    sed "s/\"$escaped\"/\"0.0.0-normalized\"/g" "$file"
+                    ;;
+                *) cat "$file" ;;
+            esac
+        done
+    } | sha256sum | cut -c1-16
+}
+
+case "${1:-}" in
+    --check) check ;;
+    "") rev ;;
+    *) echo "usage: $0 [--check]" >&2; exit 2 ;;
+esac
