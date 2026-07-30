@@ -30,9 +30,33 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 /// makes reopening instant and a day covers the overnight gap in normal use.
 pub const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// What the dead-mount sweep needs. `None` when the agent has no cluster access, since
+/// it cannot list or delete pods without it.
+pub struct StaleMountSweep {
+    pub client: kubimo::Client,
+    pub node_name: String,
+    pub pods_dir: std::path::PathBuf,
+}
+
 /// Sweep until the process exits.
-pub async fn run(store: SlotStore, clients: NamespacedClients, idle_ttl: Duration) {
+///
+/// The dead-mount sweep shares this cadence rather than running its own loop — both are
+/// unhurried background passes over the same node — but it runs *first* and without
+/// waiting, because a replacement agent starting up is exactly when the node is most
+/// likely to be carrying runners stranded on a volume that no longer exists.
+pub async fn run(
+    store: SlotStore,
+    clients: NamespacedClients,
+    idle_ttl: Duration,
+    stale_mounts: Option<StaleMountSweep>,
+) {
     loop {
+        if let Some(config) = stale_mounts.as_ref()
+            && let Err(err) =
+                crate::sweep::run(&config.client, &config.node_name, &config.pods_dir).await
+        {
+            tracing::warn!(%err, "dead-mount sweep failed");
+        }
         tokio::time::sleep(SWEEP_INTERVAL).await;
         match sweep(&store, &clients, idle_ttl).await {
             Ok(0) => {}
