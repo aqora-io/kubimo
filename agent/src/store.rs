@@ -117,6 +117,24 @@ impl SlotStore {
         self.index_dir().join("next-project-id")
     }
 
+    /// Set while this agent is shutting down, so it stops accepting new publishes.
+    ///
+    /// Deliberately on the data volume rather than in `/tmp` or memory: the volume dies
+    /// with the agent pod, so the marker cannot survive into the replacement agent and
+    /// wedge it shut. It is self-clearing by construction.
+    fn draining_path(&self) -> PathBuf {
+        self.index_dir().join("draining")
+    }
+
+    pub fn mark_draining(&self) -> Result<(), StoreError> {
+        std::fs::create_dir_all(self.index_dir()).map_err(io_err("creating index dir"))?;
+        std::fs::write(self.draining_path(), b"").map_err(io_err("marking draining"))
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.draining_path().exists()
+    }
+
     /// Record that `workspace`'s slot has been flushed to S3.
     ///
     /// The file's mtime is the timestamp; nothing reads its contents. Only

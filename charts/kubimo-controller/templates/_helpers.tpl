@@ -51,6 +51,23 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Fail the render if the drain cannot finish inside the pod's grace period.
+
+Getting this wrong is silent and harmful: kubelet SIGKILLs the agent part-way through
+the drain, leaving some slots flushed and unmounted and others abandoned on a volume that
+is about to detach. Refusing to render beats discovering it during an upgrade.
+*/}}
+{{- define "kubimo-controller.validateDrain" -}}
+{{- $drain := .Values.agent.drain -}}
+{{- if not (gt (int $drain.terminationGracePeriodSeconds) (int $drain.timeoutSeconds)) -}}
+{{- fail (printf "agent.drain.terminationGracePeriodSeconds (%v) must exceed agent.drain.timeoutSeconds (%v), or the drain is cut off mid-flush" $drain.terminationGracePeriodSeconds $drain.timeoutSeconds) -}}
+{{- end -}}
+{{- if not (gt (int $drain.timeoutSeconds) (int $drain.runnerGracePeriodSeconds)) -}}
+{{- fail (printf "agent.drain.timeoutSeconds (%v) must exceed agent.drain.runnerGracePeriodSeconds (%v), or the drain cannot outlast the pods it deletes" $drain.timeoutSeconds $drain.runnerGracePeriodSeconds) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "kubimo-controller.serviceAccountName" -}}

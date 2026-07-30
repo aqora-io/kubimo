@@ -115,6 +115,22 @@ agent:
     # Overrides sourceTag. Empty means follow sourceTag, then the chart appVersion.
     tag: ""
   registrarImage: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.14.0
+  # Shutdown drain. Replacing an agent pod destroys the node data volume, and every
+  # runner still holding a slot is left on a mount whose device has detached — reads
+  # return EIO and the newest work never reaches S3. The drain deletes those pods first,
+  # while the agent can still serve NodeUnpublishVolume, so each slot flushes and
+  # unmounts cleanly and the runner is recreated against the replacement agent.
+  #
+  # Best-effort: a node crash or SIGKILL skips it. It fixes planned replacements, which
+  # is every deploy.
+  drain:
+    enabled: true
+    # The three are ordered: terminationGracePeriodSeconds > timeoutSeconds >
+    # runnerGracePeriodSeconds. The chart refuses to render otherwise, because a drain
+    # truncated mid-flush leaves some slots flushed and some not.
+    timeoutSeconds: 120
+    runnerGracePeriodSeconds: 10
+    terminationGracePeriodSeconds: 150
   # Source of the staged venv template. Leave empty to follow
   # `controller.marimoImage`, which is what runners are started with — the two
   # must match, or slots reflink a venv built for a different interpreter than
