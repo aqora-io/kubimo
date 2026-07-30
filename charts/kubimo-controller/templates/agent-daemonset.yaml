@@ -74,7 +74,7 @@ spec:
               mountPath: /data
       containers:
         - name: agent
-          image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Values.agent.image.sourceTag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
           args:
             - --data-root=/data

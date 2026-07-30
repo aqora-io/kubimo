@@ -89,6 +89,15 @@ agent:
   image:
     repository: ghcr.io/aqora-io/kubimo-agent
     pullPolicy: IfNotPresent
+    # Written by CI at release time to `src-<hash>`, hashed over the agent's own
+    # sources — every workspace member except controller/, plus the build inputs.
+    # See scripts/agent-image-rev.
+    #
+    # This exists so a controller-only release renders a byte-identical DaemonSet and
+    # Kubernetes does not roll the agent: replacing an agent pod destroys the node's
+    # data volume and restarts every runner on it. Generated — do not hand-edit.
+    sourceTag: ""
+    # Overrides sourceTag. Empty means follow sourceTag, then the chart appVersion.
     tag: ""
   registrarImage: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.14.0
   # Source of the staged venv template. Leave empty to follow

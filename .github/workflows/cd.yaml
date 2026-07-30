@@ -104,6 +104,14 @@ jobs:
           - name: agent
             registry: ghcr.io/aqora-io/kubimo-agent
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      # Tags the agent image by its own source, so a controller-only release leaves the
+      # DaemonSet pod template unchanged and Kubernetes does not roll the agent.
+      - name: Agent source hash
+        id: rev
+        if: matrix.image.name == 'agent'
+        run: echo "rev=$(./scripts/agent-image-rev)" >> "$GITHUB_OUTPUT"
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
@@ -129,6 +137,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            ${{ matrix.image.name == 'agent' && format('type=raw,value=src-{0}', steps.rev.outputs.rev) || '' }}
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
@@ -159,6 +168,21 @@ jobs:
       - name: Print CRDs
         run: |
           cargo run --package kubimo --example print_crds -- --helm-if .Values.crds.enabled > charts/kubimo-controller/templates/crds.json
+      # Pin the agent to its source hash rather than the chart appVersion, so a
+      # controller-only release renders an unchanged DaemonSet pod template. Rolling the
+      # agent destroys the node data volume and restarts every runner on that node.
+      - name: Pin agent image to its source hash
+        run: |
+          set -eu
+          values=charts/kubimo-controller/values.yaml
+          # Fail loudly rather than silently pinning nothing if the key moves or is renamed.
+          if [ "$(grep -c '^    sourceTag: ""$' "$values")" -ne 1 ]; then
+            echo "error: expected exactly one empty agent.image.sourceTag in $values" >&2
+            exit 1
+          fi
+          rev=$(./scripts/agent-image-rev)
+          sed -i "s|^    sourceTag: \"\"$|    sourceTag: \"src-${rev}\"|" "$values"
+          grep -n 'sourceTag:' "$values"
       - name: Configure Git
         run: |
           git config user.name "$GITHUB_ACTOR"

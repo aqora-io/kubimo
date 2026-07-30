@@ -22,6 +22,11 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      # The agent image is tagged by its own source; this asserts the hashed path list
+      # still covers every crate the agent depends on. Missing one ships a stale agent
+      # against a newer controller.
+      - name: Agent image path list
+        run: ./scripts/agent-image-rev --check
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
