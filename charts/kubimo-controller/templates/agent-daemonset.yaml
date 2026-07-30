@@ -33,6 +33,13 @@ spec:
       {{- with .Values.agent.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
+      {{- if .Values.agent.drain.enabled }}
+      {{- include "kubimo-controller.validateDrain" . }}
+      # Must exceed agent.drain.timeoutSeconds: preStop runs inside this budget, and a
+      # drain cut off part-way leaves some slots flushed and some not — worse than not
+      # draining at all. The helper above enforces the relationship.
+      terminationGracePeriodSeconds: {{ .Values.agent.drain.terminationGracePeriodSeconds }}
+      {{- end }}
       initContainers:
         # Stage the marimo image's /home/me skeleton onto the node data volume once, so each
         # slot can take a reflink copy of it instead of the runner rebuilding
@@ -72,6 +79,25 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+        # A *native* sidecar (an initContainer with restartPolicy: Always), not a regular
+        # container. The registrar removes its socket from plugins_registry on SIGTERM
+        # and kubelet then deregisters the driver. Regular containers are terminated
+        # concurrently, so mid-drain there could be no plugin left for kubelet to call
+        # NodeUnpublishVolume on — the drain would delete the pods and lose every flush,
+        # which is strictly worse than not draining. Native sidecars are terminated only
+        # after all regular containers, so registration outlives the agent's preStop.
+        # Requires Kubernetes >= 1.29.
+        - name: node-driver-registrar
+          image: "{{ .Values.agent.registrarImage }}"
+          restartPolicy: Always
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ .Values.agent.kubeletDir }}/plugins/{{ .Values.agent.driverName }}/csi.sock
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
       containers:
         - name: agent
           image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Values.agent.image.sourceTag | default .Chart.AppVersion }}"
@@ -108,6 +134,21 @@ spec:
             - secretRef:
                 name: {{ .Values.agent.s3SecretName | quote }}
           {{- end }}
+          {{- if .Values.agent.drain.enabled }}
+          # Delete the pods holding this node's slots *before* the agent stops serving,
+          # so kubelet's NodeUnpublishVolume — which flushes each slot to S3 and unmounts
+          # it — can still reach us. Without this, replacing the agent leaves every
+          # runner on a mount whose device has detached, with its newest work unflushed.
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - kubimo-agent
+                  - --data-root=/data
+                  - drain
+                  - --timeout-secs={{ .Values.agent.drain.timeoutSeconds }}
+                  - --runner-grace-secs={{ .Values.agent.drain.runnerGracePeriodSeconds }}
+          {{- end }}
           securityContext:
             # Required for mount(2), the fsxattr ioctl and quotactl_fd. This
             # makes the agent tier-0 trusted: it can see every tenant's files.
@@ -122,16 +163,6 @@ spec:
               # Bidirectional so bind mounts the agent creates propagate back
               # out to kubelet's namespace, where the runner pod sees them.
               mountPropagation: Bidirectional
-        - name: node-driver-registrar
-          image: "{{ .Values.agent.registrarImage }}"
-          args:
-            - --csi-address=/csi/csi.sock
-            - --kubelet-registration-path={{ .Values.agent.kubeletDir }}/plugins/{{ .Values.agent.driverName }}/csi.sock
-          volumeMounts:
-            - name: plugin-dir
-              mountPath: /csi
-            - name: registration-dir
-              mountPath: /registration
       volumes:
         # The node data volume, as a *generic ephemeral volume*.
         #

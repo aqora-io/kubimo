@@ -7,6 +7,7 @@
 
 mod clients;
 mod csi;
+mod drain;
 mod hydrate;
 mod kernel;
 mod mount;
@@ -99,6 +100,35 @@ enum Command {
         )]
         idle_slot_ttl_secs: u64,
     },
+    /// Delete the pods holding this node's slots, then wait for kubelet to unpublish
+    /// them. Invoked from the DaemonSet's `preStop` hook.
+    ///
+    /// Runs *before* the agent stops serving, which is the whole point: kubelet's
+    /// `NodeUnpublishVolume` is what flushes a slot to S3 and unmounts it cleanly, and
+    /// it can only reach an agent that is still alive. Without this, replacing the agent
+    /// leaves every runner on a dead mount with its newest work unflushed.
+    Drain {
+        /// Name of the node this agent runs on.
+        #[arg(long, env = "KUBE_NODE_NAME")]
+        node_name: String,
+        /// Give up after this long. Must stay below the pod's
+        /// `terminationGracePeriodSeconds`, or the drain is cut off mid-flush — leaving
+        /// some slots flushed and some not, which is worse than not draining at all.
+        #[arg(long, env = "KUBIMO_AGENT_DRAIN_TIMEOUT_SECS", default_value_t = 120)]
+        timeout_secs: u64,
+        /// How often to re-check whether every volume has been unpublished.
+        #[arg(long, default_value_t = 2)]
+        poll_interval_secs: u64,
+        /// Grace period given to each deleted pod. Nested inside our own budget, so it
+        /// must be comfortably smaller. marimo has nothing to persist on SIGTERM — the
+        /// flush is the agent's job — so this only needs to cover process teardown.
+        #[arg(
+            long,
+            env = "KUBIMO_AGENT_DRAIN_RUNNER_GRACE_SECS",
+            default_value_t = 10
+        )]
+        runner_grace_secs: u64,
+    },
 }
 
 fn main() {
@@ -136,6 +166,18 @@ fn main() {
                 Duration::from_secs(idle_slot_ttl_secs),
             )
         }),
+        Command::Drain {
+            node_name,
+            timeout_secs,
+            poll_interval_secs,
+            runner_grace_secs,
+        } => drain_node(
+            &args.data_root,
+            &node_name,
+            Duration::from_secs(timeout_secs),
+            Duration::from_secs(poll_interval_secs),
+            runner_grace_secs,
+        ),
     };
     if let Err(err) = result {
         tracing::error!("{err}");
@@ -167,6 +209,63 @@ fn inspect(data_root: &std::path::Path) {
         }
         Err(err) => tracing::warn!(%err, "no slots directory yet"),
     }
+}
+
+/// Resolves when the process is asked to stop.
+///
+/// SIGTERM as well as SIGINT: kubelet sends **SIGTERM**, so waiting only on `ctrl_c()`
+/// means the agent never shuts down gracefully and is always SIGKILLed at the end of the
+/// termination grace period. That was survivable while the grace period was the 30s
+/// default; with the drain's longer budget it would stall every agent replacement for
+/// the full period, long after the drain had finished its work.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(err) => {
+                tracing::error!(%err, "cannot listen for SIGTERM; falling back to SIGINT only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// `preStop` entry point; see [`drain`].
+///
+/// Exits 0 on a clean drain *and* on timeout — both are expected outcomes that the logs
+/// distinguish. A non-zero exit is reserved for genuine misconfiguration (no cluster
+/// access, RBAC denied), so a `FailedPreStopHook` event means something an operator has
+/// to fix rather than something that merely took too long.
+fn drain_node(
+    data_root: &std::path::Path,
+    node_name: &str,
+    timeout: Duration,
+    poll: Duration,
+    runner_grace_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = SlotStore::new(SlotLayout::new(data_root));
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(drain::run(
+            &store,
+            node_name,
+            timeout,
+            poll,
+            runner_grace_secs,
+        ))?;
+    Ok(())
 }
 
 fn create_slot(
@@ -292,7 +391,7 @@ fn serve(
                 client,
             );
             csi::serve(socket, node, async {
-                let _ = tokio::signal::ctrl_c().await;
+                shutdown_signal().await;
                 tracing::info!("shutting down");
             })
             .await
