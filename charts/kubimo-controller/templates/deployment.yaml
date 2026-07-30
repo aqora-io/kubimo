@@ -81,6 +81,14 @@ spec:
             - name: KUBIMO__RUNNER_PROXY_TIMEOUT_SECS
               value: {{ .runnerProxyTimeoutSecs | quote }}
             {{- end }}
+            {{- if .defaultWorkspaceMode }}
+            # Storage mode given to workspaces that do not ask for one. Only affects new
+            # workspaces: each pins its mode into status.mode on first reconcile, and a
+            # CEL rule refuses Pooled → Dedicated, so flipping this back only changes
+            # what gets created next — it never migrates anything.
+            - name: KUBIMO__DEFAULT_WORKSPACE_MODE
+              value: {{ .defaultWorkspaceMode | quote }}
+            {{- end }}
             {{- with .runnerStatus }}
             {{- with .resolution }}
             {{- if .method }}

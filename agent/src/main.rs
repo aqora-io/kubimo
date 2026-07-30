@@ -61,6 +61,17 @@ enum Command {
         /// advertises this path.
         #[arg(long, env = "CSI_ENDPOINT", default_value = "/csi/csi.sock")]
         socket: PathBuf,
+        /// Where kubelet publishes per-pod volumes, as this container sees it.
+        ///
+        /// Must be the same path it has on the host: `NodePublishVolume` hands us
+        /// kubelet's `target_path`, which is a host path, and we operate on it
+        /// directly. The stale-mount sweep reconstructs those same paths.
+        #[arg(
+            long,
+            env = "KUBIMO_AGENT_KUBELET_PODS_DIR",
+            default_value = sweep::DEFAULT_KUBELET_PODS_DIR,
+        )]
+        kubelet_pods_dir: PathBuf,
         /// Name of the node this agent runs on, reported by `NodeGetInfo`.
         #[arg(long, env = "KUBE_NODE_NAME")]
         node_name: String,
@@ -147,6 +158,7 @@ fn main() {
         } => create_slot(&args.data_root, &workspace, &namespace, limit_bytes),
         Command::Serve {
             socket,
+            kubelet_pods_dir,
             node_name,
             default_limit_bytes,
             min_kernel_version,
@@ -157,6 +169,7 @@ fn main() {
             serve(
                 &args.data_root,
                 &socket,
+                kubelet_pods_dir,
                 node_name,
                 default_limit_bytes,
                 allow_unquotaed_slots,
@@ -367,6 +380,7 @@ fn check_kernel(
 fn serve(
     data_root: &std::path::Path,
     socket: &std::path::Path,
+    kubelet_pods_dir: PathBuf,
     node_name: String,
     default_limit_bytes: u64,
     allow_unquotaed_slots: bool,
@@ -403,7 +417,6 @@ fn serve(
                 }
             };
             let sweep_node_name = node_name.clone();
-            let kubelet_pods_dir = std::path::PathBuf::from(sweep::DEFAULT_KUBELET_PODS_DIR);
             // Slots outlive the runners that used them — that is what makes
             // reopening a workspace instant — so nothing on the unpublish path
             // deletes one. Without this sweep they would accumulate on the node
