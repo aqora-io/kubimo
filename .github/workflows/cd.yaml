@@ -22,6 +22,9 @@ jobs:
           - name: marimo
             bake-target: marimo
             registry: ghcr.io/aqora-io/kubimo-marimo
+          - name: conda-marimo
+            bake-target: conda-marimo
+            registry: ghcr.io/aqora-io/kubimo-conda-marimo
           - name: agent
             bake-target: agent
             registry: ghcr.io/aqora-io/kubimo-agent
@@ -103,6 +106,8 @@ jobs:
             registry: ghcr.io/aqora-io/kubimo-controller
           - name: marimo
             registry: ghcr.io/aqora-io/kubimo-marimo
+          - name: conda-marimo
+            registry: ghcr.io/aqora-io/kubimo-conda-marimo
           - name: agent
             registry: ghcr.io/aqora-io/kubimo-agent
     steps:
@@ -118,7 +123,7 @@ jobs:
       # pinned. Script names follow the image names.
       - name: Image source hash
         id: rev
-        if: matrix.image.name == 'agent' || matrix.image.name == 'marimo'
+        if: matrix.image.name == 'agent' || matrix.image.name == 'marimo' || matrix.image.name == 'conda-marimo'
         run: echo "rev=$(./scripts/${{ matrix.image.name }}-image-rev)" >> "$GITHUB_OUTPUT"
       - name: Download digests
         uses: actions/download-artifact@v4

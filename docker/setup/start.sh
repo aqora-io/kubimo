@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -xe
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -101,6 +101,10 @@ uv_sync_workspace() {
   /usr/local/bin/uv sync --no-install-package marimo
 }
 
+mamba_update_workspace() {
+  /usr/local/bin/conda-helper.py sync -x --verbose
+}
+
 is_marimo_venv_configured() {
   /usr/local/bin/python3 -c '
 import sys, tomllib
@@ -128,7 +132,11 @@ if [[ "$CMD" == "edit" ]]; then
   # are not yet installed, and opening a notebook in it shows marimo's
   # "Install packages" banner. Recoverable, and the same banner users already
   # get for genuinely missing packages.
-  uv_sync_workspace &
+  if [[ -n "$UV_PROJECT" ]]; then
+    uv_sync_workspace &
+  elif [[ -n "$CONDA_PREFIX" ]]; then
+    mamba_update_workspace
+  fi
   ensure_marimo_venv_config
   export MARIMO_IN_SECURE_ENVIRONMENT=true
   export MARIMO_SESSION_COOKIE_SECURE=true
@@ -146,7 +154,11 @@ if [[ "$CMD" == "edit" ]]; then
 
 elif [[ "$CMD" == "run" ]]; then
   # Same reasoning as `edit` above.
-  uv_sync_workspace &
+  if [[ -n "$UV_PROJECT" ]]; then
+    uv_sync_workspace &
+  elif [[ -n "$CONDA_PREFIX" ]]; then
+    mamba_update_workspace
+  fi
   ensure_marimo_venv_config
   export MARIMO_IN_SECURE_ENVIRONMENT=true
   export MARIMO_SESSION_COOKIE_SECURE=true
@@ -181,7 +193,12 @@ elif [[ "$CMD" == "render" ]]; then
   exec /usr/local/bin/marimo-ssr serve "${argv[@]}" "$directory"
 
 elif [[ "$CMD" == "cache" ]]; then
-  uv_sync_workspace
+  if [[ -n "$UV_PROJECT" ]]; then
+    uv_sync_workspace
+  elif [[ -n "$CONDA_PREFIX" ]]; then
+    mamba_update_workspace
+    export VIRTUAL_ENV="$CONDA_PREFIX"
+  fi
   exec "$VIRTUAL_ENV/bin/python3" /app/cache.py \
     --include-code "${common_flags[@]}"
 
