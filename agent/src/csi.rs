@@ -831,22 +831,27 @@ impl Node for KubimoNode {
         if unmounted {
             // kubelet creates the target directory, so it is ours to remove.
             let _ = std::fs::remove_dir(target);
-            let published = self.store.lookup_publish(&request.volume_id).ok().flatten();
-            self.store.forget_publish(&request.volume_id);
-            // Drop the cached credentials once nothing on this node is mounting
-            // the workspace any more — after the flush above, which needed them.
-            // Held any longer they would accumulate for every workspace the node
-            // has ever served.
-            if let Some(published) = published
-                && !self
-                    .store
-                    .published_workspaces()
-                    .is_ok_and(|live| live.contains(&published.workspace))
-            {
-                self.forget_credentials(&published.workspace);
-            }
-            tracing::info!(target = %target.display(), "unpublished slot");
         }
+        // Forget the publish record whether or not we were the one to unmount.
+        // `unmounted` is false when the target was already gone — kubelet cleaned it,
+        // or a previous call did — and keeping the record then makes
+        // `published_workspaces` report this workspace as mounted for as long as this
+        // data volume lives, which permanently stops the reaper reclaiming its slot.
+        let published = self.store.lookup_publish(&request.volume_id).ok().flatten();
+        self.store.forget_publish(&request.volume_id);
+        // Drop the cached credentials once nothing on this node is mounting
+        // the workspace any more — after the flush above, which needed them.
+        // Held any longer they would accumulate for every workspace the node
+        // has ever served.
+        if let Some(published) = published
+            && !self
+                .store
+                .published_workspaces()
+                .is_ok_and(|live| live.contains(&published.workspace))
+        {
+            self.forget_credentials(&published.workspace);
+        }
+        tracing::info!(target = %target.display(), unmounted, "unpublished slot");
         Ok(Response::new(proto::NodeUnpublishVolumeResponse {}))
     }
 
