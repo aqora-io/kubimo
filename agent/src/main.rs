@@ -132,12 +132,8 @@ enum Command {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
     let args = Args::parse();
+    init_tracing(matches!(args.command, Command::Drain { .. }));
     let result = match args.command {
         Command::Inspect => {
             inspect(&args.data_root);
@@ -208,6 +204,45 @@ fn inspect(data_root: &std::path::Path) {
             }
         }
         Err(err) => tracing::warn!(%err, "no slots directory yet"),
+    }
+}
+
+/// Container stdout, as seen from a process that is not PID 1.
+const CONTAINER_STDOUT: &str = "/proc/1/fd/1";
+
+/// Set up logging, optionally redirecting to the container's own stdout.
+///
+/// kubelet does **not** capture a `preStop` hook's output, so the drain — which runs as
+/// a second process in this container — would otherwise do all of its work invisibly:
+/// nothing in `kubectl logs` would say which pods it deleted or whether it finished.
+/// That is exactly the wrong thing to be missing while diagnosing an upgrade.
+///
+/// The image's ENTRYPOINT is the agent, so PID 1 is the serving process and
+/// `/proc/1/fd/1` is the container's log stream. Writing there puts the drain's lines
+/// where an operator already looks, interleaved with the unpublish and flush lines it
+/// is causing. Falls back to stderr when the path is unavailable — running outside a
+/// container, or PID 1 not being ours.
+fn init_tracing(to_container_stdout: bool) {
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    if to_container_stdout
+        && std::fs::OpenOptions::new()
+            .write(true)
+            .open(CONTAINER_STDOUT)
+            .is_ok()
+    {
+        builder
+            .with_writer(|| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(CONTAINER_STDOUT)
+                    .map(|file| Box::new(file) as Box<dyn std::io::Write>)
+                    .unwrap_or_else(|_| Box::new(std::io::stderr()))
+            })
+            .init();
+    } else {
+        builder.init();
     }
 }
 
