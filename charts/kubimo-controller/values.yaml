@@ -23,22 +23,6 @@ image:
 #     resolution:
 #       method: ServiceDns
 #       # host: https://kubimo.org
-#   # Delete a Pooled runner pod whose slot bind mount is dead, so the runner
-#   # controller recreates it against a working agent. This is the backstop for the
-#   # cases the agent's shutdown drain cannot cover — a node crash, or a drain that
-#   # timed out — where the runner is otherwise wedged indefinitely.
-#   #
-#   # Off by default: it deletes user-visible pods, and the restart loses whatever was
-#   # written after the agent died, since that filesystem no longer exists.
-#   recycleWedgedRunners:
-#     enabled: false
-#     # Must outlast an agent rollout. A pod on a node whose agent is not up yet is
-#     # indistinguishable from a wedged one for the first minute or so.
-#     dwellSeconds: 120
-#     cooldownSeconds: 600
-#     # After this many, the runner is left broken deliberately, so a permanently bad
-#     # node shows up as an error rather than an endless restart.
-#     maxRecycles: 3
 #     intervalSecs: 10
 
 crds:

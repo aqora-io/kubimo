@@ -43,40 +43,6 @@ pub struct StatusCheck {
     pub resolution: StatusCheckResolution,
     #[serde(default = "default_runner_status_check_interval_secs")]
     pub interval_secs: u64,
-    #[serde(default)]
-    pub recycle: RecyclePolicy,
-}
-
-/// When to delete a runner pod whose slot bind mount is dead, so it gets recreated.
-///
-/// Off by default: this deletes user-visible pods, so it stays opt-in until a cluster
-/// has produced a real wedged pod to check the signature against.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RecyclePolicy {
-    pub enabled: bool,
-    /// How long the wedge must persist before acting.
-    ///
-    /// Guards the case that is *invisible* in container status: a new pod on a node
-    /// whose agent is not up yet fails as a `FailedMount` event, staying
-    /// `ContainerCreating` with no message at all. That is the normal state during every
-    /// agent rollout, so the dwell must comfortably outlast one.
-    pub dwell_secs: i64,
-    pub cooldown_secs: i64,
-    /// After this many recycles the runner is left broken on purpose, so a permanently
-    /// bad node surfaces as an error someone can see rather than an endless restart.
-    pub max_recycles: u32,
-}
-
-impl Default for RecyclePolicy {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            dwell_secs: 120,
-            cooldown_secs: 600,
-            max_recycles: 3,
-        }
-    }
 }
 
 impl Default for StatusCheck {
@@ -84,7 +50,6 @@ impl Default for StatusCheck {
         Self {
             resolution: Default::default(),
             interval_secs: default_runner_status_check_interval_secs(),
-            recycle: Default::default(),
         }
     }
 }
@@ -180,31 +145,5 @@ mod tests {
     #[test]
     fn default_workspace_mode_rejects_unknown_value() {
         assert!(load_from(&[("KUBIMO__DEFAULT_WORKSPACE_MODE", "Nonsense")]).is_err());
-    }
-
-    /// Recycling deletes user-visible pods, so it must stay off unless asked for.
-    #[test]
-    fn recycle_is_disabled_unless_enabled() {
-        let config = load_from(&[]).unwrap();
-        assert!(!config.runner_status.recycle.enabled);
-        assert_eq!(config.runner_status.recycle.max_recycles, 3);
-    }
-
-    /// The switch that turns remediation on. If this does not deserialize, enabling it
-    /// in a chart silently does nothing and runners stay wedged.
-    #[test]
-    fn recycle_parses_from_env() {
-        let config = load_from(&[
-            ("KUBIMO__RUNNER_STATUS__RECYCLE__ENABLED", "true"),
-            ("KUBIMO__RUNNER_STATUS__RECYCLE__DWELL_SECS", "45"),
-            ("KUBIMO__RUNNER_STATUS__RECYCLE__MAX_RECYCLES", "1"),
-        ])
-        .unwrap();
-        assert!(config.runner_status.recycle.enabled);
-        assert_eq!(config.runner_status.recycle.dwell_secs, 45);
-        assert_eq!(config.runner_status.recycle.max_recycles, 1);
-        // Untouched keys keep their defaults rather than resetting to zero.
-        assert_eq!(config.runner_status.recycle.cooldown_secs, 600);
-        assert_eq!(config.runner_status.interval_secs, 10);
     }
 }

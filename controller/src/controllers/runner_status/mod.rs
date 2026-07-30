@@ -1,8 +1,6 @@
 mod apply_conditions;
 mod conditions;
-mod recycle;
 
-use kubimo::k8s_openapi::jiff::Timestamp;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -244,10 +242,9 @@ impl Reconciler for RunnerStatusReconciler {
 
     async fn apply(&self, ctx: &Context, runner: &Runner) -> Result<Action, Self::Error> {
         let mut status = runner.status.clone().unwrap_or_default();
-        let startup = self
+        let startup_complete = self
             .apply_startup_conditions(ctx, runner, &mut status)
             .await?;
-        let startup_complete = startup.complete;
         let action = if matches!(runner.spec.command, RunnerCommand::Render) {
             Action::await_change()
         } else {
@@ -264,24 +261,10 @@ impl Reconciler for RunnerStatusReconciler {
             ctx.api_for(runner)?.patch_status(&patched).await?;
         }
         if startup_complete {
-            return Ok(action);
+            Ok(action)
+        } else {
+            Ok(Action::requeue(STARTUP_REQUEUE_INTERVAL))
         }
-        // Only once the status is written, so the wedge is visible in the CR even if the
-        // delete below fails. Recycling is remediation of last resort: everything written
-        // since the agent died is on a filesystem that no longer exists, so the pod is
-        // restarted rather than repaired.
-        if let Some(pod) = startup.pod.as_ref()
-            && let Some(wedge) = recycle::should_recycle(
-                pod,
-                startup.mode,
-                runner.metadata.annotations.as_ref(),
-                &ctx.config.runner_status.recycle,
-                Timestamp::now(),
-            )
-        {
-            recycle::recycle_pod(ctx, runner, pod, &wedge).await?;
-        }
-        Ok(Action::requeue(STARTUP_REQUEUE_INTERVAL))
     }
 }
 
