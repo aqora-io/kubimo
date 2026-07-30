@@ -77,9 +77,10 @@ impl Reconciler for RunnerReconciler {
         .await;
 
         // Recreating the pod while the previous one is still Terminating is a 409, and a
-        // transient one: the name frees up as soon as it finishes. Left to propagate it
-        // would log an error on every recycle and every manual pod delete, which is
-        // exactly when someone is reading the logs.
+        // transient one: the name frees up as soon as it finishes. Left to propagate, it
+        // would log a reconcile error every time the agent's drain or stale-mount sweep
+        // deletes a runner, and on every manual pod delete — which is exactly when
+        // someone is reading these logs.
         if let Err(err) = applied {
             if is_already_exists(&err) {
                 return Ok(Action::requeue(Duration::from_secs(2)));

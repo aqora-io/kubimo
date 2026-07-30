@@ -240,12 +240,7 @@ pub(super) fn pod_ready_condition(
 
 /// Why the runner pod is not ready, derived from container state. Prefers the
 /// "runner" container; falls back to the first non-ready container (sidecar).
-///
-/// Also the input to [`super::recycle`], which must read container state directly
-/// rather than the `PvcBound` condition: [`slot_bound_condition`] reports `True`
-/// once `restart_count > 0`, so a pod that ran, lost its filesystem and now cannot
-/// recreate its container is *not* visible through that condition.
-pub(super) fn container_state_detail(pod: &Pod) -> Option<(String, String)> {
+fn container_state_detail(pod: &Pod) -> Option<(String, String)> {
     let statuses = pod.status.as_ref()?.container_statuses.as_ref()?;
     let container = statuses
         .iter()

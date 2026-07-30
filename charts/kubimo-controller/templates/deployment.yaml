@@ -61,29 +61,6 @@ spec:
             - name: KUBIMO__MARIMO_IMAGE
               value: {{ .marimoImage | quote }}
             {{- end }}
-            {{- with .recycleWedgedRunners }}
-            # Delete a Pooled runner pod whose slot bind mount is dead, so the runner
-            # controller recreates it. This is what recovers the runners an agent
-            # replacement wedges when the drain could not run — a node crash, or a drain
-            # that timed out.
-            #
-            # `enabled` renders unconditionally so that setting it to false is not read
-            # as "unset"; the other keys fall through to the controller's own defaults.
-            - name: KUBIMO__RUNNER_STATUS__RECYCLE__ENABLED
-              value: {{ .enabled | default false | quote }}
-            {{- with .dwellSeconds }}
-            - name: KUBIMO__RUNNER_STATUS__RECYCLE__DWELL_SECS
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .cooldownSeconds }}
-            - name: KUBIMO__RUNNER_STATUS__RECYCLE__COOLDOWN_SECS
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .maxRecycles }}
-            - name: KUBIMO__RUNNER_STATUS__RECYCLE__MAX_RECYCLES
-              value: {{ . | quote }}
-            {{- end }}
-            {{- end }}
             {{- if .busyboxImage }}
             - name: KUBIMO__BUSYBOX_IMAGE
               value: {{ .busyboxImage | quote }}
