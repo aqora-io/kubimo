@@ -15,9 +15,9 @@ use crate::selector::Selector;
 use crate::validation::{
     budget_selector_not_empty, log_level, runner_immutable_fields, runner_max_cpu_greater_than_min,
     runner_max_memory_greater_than_min, workspace_auto_scale_bounds, workspace_clone_not_pooled,
-    workspace_max_storage_greater_than_min, workspace_mode_no_downgrade,
-    workspace_no_volume_with_name, workspace_restore_from_exclusive,
-    workspace_restore_from_not_indexer_prefix,
+    workspace_immutable_fields, workspace_max_storage_greater_than_min,
+    workspace_mode_no_downgrade, workspace_no_volume_with_name, workspace_python_runtime_exclusive,
+    workspace_restore_from_exclusive, workspace_restore_from_not_indexer_prefix,
 };
 
 use crate::{
@@ -171,6 +171,8 @@ pub struct WorkspaceStatus {
     pub slot: Option<WorkspaceSlotStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive: Option<WorkspaceArchiveStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub python_runtime: Option<WorkspacePythonRuntime>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -195,6 +197,14 @@ pub struct WorkspaceRestoreFrom {
     /// `indexer.pod`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pod: Option<WorkspaceIndexerPod>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[cfg_attr(test, derive(Eq, PartialEq))]
+pub enum WorkspacePythonRuntime {
+    #[default]
+    Uv,
+    Conda,
 }
 
 // Every optional field in this spec — and in the structs it nests — skips
@@ -226,6 +236,8 @@ pub struct WorkspaceRestoreFrom {
     validation = workspace_restore_from_not_indexer_prefix(),
     validation = workspace_mode_no_downgrade(),
     validation = workspace_clone_not_pooled(),
+    validation = workspace_immutable_fields(),
+    validation = workspace_python_runtime_exclusive(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSpec {
@@ -262,6 +274,8 @@ pub struct WorkspaceSpec {
     pub clone_workspace_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restore_from: Option<WorkspaceRestoreFrom>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub python_runtime: Option<WorkspacePythonRuntime>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]

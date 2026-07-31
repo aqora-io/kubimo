@@ -68,11 +68,22 @@ impl Reconciler for RunnerReconciler {
             Some(workspace) => workspace,
         };
 
+        let python_runtime = workspace
+            .status
+            .as_ref()
+            .and_then(|status| status.python_runtime)
+            .ok_or_else(|| {
+                kubimo::Error::Custom(format!(
+                    "Workspace has no python runtime: {name:?}",
+                    name = workspace.name(),
+                ))
+            })?;
+
         let applied = futures::future::try_join_all([
             self.apply_owner_reference(ctx, runner)
                 .map_ok(|_| false)
                 .boxed(),
-            self.apply_pod(ctx, runner, &workspace)
+            self.apply_pod(ctx, runner, &workspace, python_runtime)
                 .map_ok(|applied| matches!(applied, apply_pod::PodApply::Replaced))
                 .boxed(),
             self.apply_service(ctx, runner).map_ok(|_| false).boxed(),

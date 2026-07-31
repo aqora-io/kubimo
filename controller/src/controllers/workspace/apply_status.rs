@@ -2,7 +2,7 @@ use kubimo::k8s_crd_snapshot_storage::VolumeSnapshot;
 use kubimo::k8s_openapi::api::batch::v1::Job;
 use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kubimo::k8s_openapi::jiff::Timestamp;
-use kubimo::{Workspace, WorkspaceMode, WorkspaceStatus, prelude::*};
+use kubimo::{Workspace, WorkspaceMode, WorkspacePythonRuntime, WorkspaceStatus, prelude::*};
 
 use crate::context::Context;
 
@@ -49,17 +49,20 @@ impl WorkspaceReconciler {
             // until their workspace is Ready, and a brand-new pooled workspace
             // has no archive by definition, so gating on one would stop it ever
             // starting its first runner.
-            let workspace =
-                update_workspace_status(workspace.clone(), None, StatusKind::PooledReady, mode);
+            let mut status = build_workspace_status(workspace, None, StatusKind::PooledReady, mode);
+            status.python_runtime = Some(get_workspace_python_runtime(ctx, workspace).await?);
+            let mut workspace = workspace.clone();
+            workspace.status = Some(status);
             ctx.api_namespaced::<Workspace>(namespace)
                 .patch_status(&workspace)
                 .await?;
             return Ok(());
         }
-        let workspace =
+
+        let mut status =
             if let Some(job) = ctx.api_namespaced::<Job>(namespace).get_opt(name).await? {
-                update_workspace_status(
-                    workspace.clone(),
+                build_workspace_status(
+                    workspace,
                     job_last_transition_time(&job),
                     StatusKind::from_job(&job),
                     mode,
@@ -82,8 +85,14 @@ impl WorkspaceReconciler {
                     // Not Complete unless its job was created
                     StatusKind::JobNotComplete
                 };
-                update_workspace_status(workspace.clone(), None, status, mode)
+                build_workspace_status(workspace, None, status, mode)
             };
+
+        status.python_runtime = Some(get_workspace_python_runtime(ctx, workspace).await?);
+
+        let mut workspace = workspace.clone();
+        workspace.status = Some(status);
+
         ctx.api_namespaced::<Workspace>(namespace)
             .patch_status(&workspace)
             .await?;
@@ -102,12 +111,15 @@ impl WorkspaceReconciler {
         }
         let namespace = workspace.require_namespace()?;
         let mode = workspace.effective_mode(ctx.config.default_workspace_mode);
-        let workspace = update_workspace_status(
-            workspace.clone(),
+        let mut status = build_workspace_status(
+            workspace,
             None,
             StatusKind::BudgetExceeded(reason.to_owned()),
             mode,
         );
+        status.python_runtime = Some(get_workspace_python_runtime(ctx, workspace).await?);
+        let mut workspace = workspace.clone();
+        workspace.status = Some(status);
         ctx.api_namespaced::<Workspace>(namespace)
             .patch_status(&workspace)
             .await?;
@@ -154,12 +166,12 @@ fn job_last_transition_time(job: &Job) -> Option<Time> {
         .cloned()
 }
 
-fn update_workspace_status(
-    mut workspace: Workspace,
+fn build_workspace_status(
+    workspace: &Workspace,
     last_transition_time: Option<Time>,
     kind: StatusKind,
     mode: WorkspaceMode,
-) -> Workspace {
+) -> WorkspaceStatus {
     let last_transition_time = last_transition_time
         .or(workspace.metadata.creation_timestamp.clone())
         .unwrap_or_else(|| Time(Timestamp::now()));
@@ -227,10 +239,33 @@ fn update_workspace_status(
     // re-writing it every reconcile is idempotent and self-pinning: once set,
     // changing `KUBIMO__DEFAULT_WORKSPACE_MODE` can never re-mode this object
     // and orphan its PVC.
-    workspace.status = Some(WorkspaceStatus {
+    WorkspaceStatus {
         conditions: Some(conditions),
         mode: Some(mode),
         ..Default::default()
-    });
-    workspace
+    }
+}
+
+pub(crate) async fn get_workspace_python_runtime(
+    ctx: &Context,
+    workspace: &Workspace,
+) -> Result<WorkspacePythonRuntime, kubimo::Error> {
+    if let Some(clone_workspace_name) = workspace.spec.clone_workspace_name.as_ref() {
+        let namespace = workspace.require_namespace()?;
+        let clone_workspace = ctx
+            .api_namespaced::<Workspace>(namespace)
+            .get(clone_workspace_name)
+            .await?;
+        let clone_status = clone_workspace.status.as_ref().ok_or_else(|| {
+            kubimo::Error::Custom(format!("Workspace has no status: {clone_workspace_name:?}"))
+        })?;
+        let python_runtime = clone_status.python_runtime.ok_or_else(|| {
+            kubimo::Error::Custom(format!(
+                "Workspace has no python runtime: {clone_workspace_name:?}"
+            ))
+        })?;
+        Ok(python_runtime)
+    } else {
+        Ok(workspace.spec.python_runtime.unwrap_or_default())
+    }
 }

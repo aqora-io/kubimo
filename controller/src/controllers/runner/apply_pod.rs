@@ -3,7 +3,7 @@ use kubimo::k8s_openapi::api::core::v1::{
 };
 use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{Runner, RunnerCommand, Workspace, prelude::*};
+use kubimo::{Runner, RunnerCommand, Workspace, WorkspacePythonRuntime, prelude::*};
 
 use crate::Config;
 use crate::command::cmd;
@@ -34,6 +34,7 @@ impl RunnerReconciler {
         // fetched again: the caller has already read it to gate on Ready, and a
         // second GET could see a different generation than the gate did.
         workspace: &Workspace,
+        python_runtime: WorkspacePythonRuntime,
     ) -> Result<PodApply, kubimo::Error> {
         let namespace = runner.require_namespace()?;
         let mode = workspace.effective_mode(ctx.config.default_workspace_mode);
@@ -84,7 +85,10 @@ impl RunnerReconciler {
         ));
         let mut containers = vec![Container {
             name: "runner".into(),
-            image: Some(ctx.config.marimo_image.clone()),
+            image: Some(match python_runtime {
+                WorkspacePythonRuntime::Uv => ctx.config.marimo_image.clone(),
+                WorkspacePythonRuntime::Conda => ctx.config.marimo_conda_image.clone(),
+            }),
             resources: Resources::default()
                 .cpu(runner.spec.cpu.clone())
                 .memory(runner.spec.memory.clone())

@@ -13,6 +13,15 @@ fn default_marimo_image() -> String {
 }
 
 #[inline]
+fn default_marimo_conda_image() -> String {
+    concat!(
+        "ghcr.io/aqora-io/kubimo-marimo-conda:",
+        env!("CARGO_PKG_VERSION")
+    )
+    .to_string()
+}
+
+#[inline]
 fn default_busybox_image() -> String {
     "busybox:1.36.1".to_string()
 }
@@ -119,6 +128,8 @@ pub struct Config {
     pub manager_name: String,
     #[serde(default = "default_marimo_image")]
     pub marimo_image: String,
+    #[serde(default = "default_marimo_conda_image")]
+    pub marimo_conda_image: String,
     #[serde(default = "default_busybox_image")]
     pub busybox_image: String,
     #[serde(default = "default_ingress_class_name")]
