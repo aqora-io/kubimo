@@ -155,6 +155,8 @@ if [[ "$CMD" == "edit" ]]; then
     mamba_update_workspace
   fi
   ensure_marimo_venv_config
+  export MARIMO_IN_SECURE_ENVIRONMENT=true
+  export MARIMO_SESSION_COOKIE_SECURE=true
   exec marimo \
     "${common_flags[@]}" \
     --yes \
@@ -175,6 +177,8 @@ elif [[ "$CMD" == "run" ]]; then
     mamba_update_workspace
   fi
   ensure_marimo_venv_config
+  export MARIMO_IN_SECURE_ENVIRONMENT=true
+  export MARIMO_SESSION_COOKIE_SECURE=true
   exec marimo \
     "${common_flags[@]}" \
     --yes \
