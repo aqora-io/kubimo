@@ -1,7 +1,8 @@
 FROM rust:1.94-trixie AS build
 
-# protoc for the CSI proto, and pkg-config for the object_store TLS stack.
-RUN apt-get update && apt-get install -y wget pkg-config protobuf-compiler
+# pkg-config for the object_store TLS stack. build.rs vendors its own protoc,
+# so no system protobuf-compiler is needed.
+RUN apt-get update && apt-get install -y wget pkg-config
 
 ARG SCCACHE_VERSION=0.9.1
 RUN ARCH="$(uname -m)-unknown-linux-musl" && \
