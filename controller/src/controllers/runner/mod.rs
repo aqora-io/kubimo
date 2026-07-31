@@ -86,7 +86,15 @@ impl Reconciler for RunnerReconciler {
         // known runtime-class drift it has already deleted the pod, and this requeue is
         // what recreates it once the old one finishes terminating.
         if let Err(err) = applied {
-            if is_already_exists(&err) || is_immutable_conflict(&err) {
+            if is_already_exists(&err) {
+                return Ok(Action::requeue(Duration::from_secs(2)));
+            }
+            if is_immutable_conflict(&err) {
+                // Not every 422 is the runtime-class drift apply_pod handles: any other
+                // validation failure returns 422 too and never converges, so warn rather
+                // than loop on it invisibly every 2s. A few lines during a legitimate
+                // drift replacement are acceptable noise.
+                tracing::warn!(%err, "pod apply returned 422; requeuing to recreate the pod");
                 return Ok(Action::requeue(Duration::from_secs(2)));
             }
             return Err(err);
