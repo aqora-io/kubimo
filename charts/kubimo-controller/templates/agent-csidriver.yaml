@@ -2,7 +2,10 @@
 apiVersion: storage.k8s.io/v1
 kind: CSIDriver
 metadata:
-  name: {{ .Values.agent.driverName }}
+  # Must match DRIVER_NAME in agent/src/csi.rs and SLOT_CSI_DRIVER in
+  # controller/src/controllers/slot_volume.rs — the binaries hardcode it, so
+  # it is not a chart value.
+  name: kubimo.aqora.io
   labels:
     {{- include "kubimo-controller.labels" . | nindent 4 }}
 spec:

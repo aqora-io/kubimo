@@ -1,4 +1,7 @@
 {{- if .Values.agent.enabled }}
+{{- if semverCompare "< 1.29.0" .Capabilities.KubeVersion.Version }}
+{{- fail "the kubimo agent requires Kubernetes >= 1.29 (native sidecar containers for the CSI registrar)" }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -92,7 +95,7 @@ spec:
           restartPolicy: Always
           args:
             - --csi-address=/csi/csi.sock
-            - --kubelet-registration-path={{ .Values.agent.kubeletDir }}/plugins/{{ .Values.agent.driverName }}/csi.sock
+            - --kubelet-registration-path={{ .Values.agent.kubeletDir }}/plugins/kubimo.aqora.io/csi.sock
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
@@ -204,7 +207,7 @@ spec:
                     storage: {{ .Values.agent.dataVolume.size }}
         - name: plugin-dir
           hostPath:
-            path: {{ .Values.agent.kubeletDir }}/plugins/{{ .Values.agent.driverName }}
+            path: {{ .Values.agent.kubeletDir }}/plugins/kubimo.aqora.io
             type: DirectoryOrCreate
         - name: registration-dir
           hostPath:
