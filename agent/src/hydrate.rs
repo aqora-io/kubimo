@@ -105,6 +105,11 @@ async fn upload_inputs(
         // cannot be restored — the workspace would look backed up but hydrate
         // empty.
         upload_content: true,
+        // A slot whose mount vanished, or whose hydration silently produced
+        // nothing, walks empty and looks identical to a workspace the user
+        // emptied. The agent must never resolve that ambiguity by deleting the
+        // archive — S3 is the only copy in Pooled mode.
+        allow_empty: false,
         watch_debounce_millis: 500,
         // A busy workspace still syncs at least every 10s.
         watch_max_wait_millis: 10_000,
