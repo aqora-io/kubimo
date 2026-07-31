@@ -78,20 +78,13 @@ async fn sweep(
     }
     let published = store.published_workspaces()?;
     let mut reclaimed = 0;
-    for (workspace, namespace) in workspaces {
-        let Some(why) = should_reclaim(
-            store,
-            clients,
-            &workspace,
-            namespace.as_deref(),
-            &published,
-            idle_ttl,
-        )
-        .await
+    for (namespace, workspace) in workspaces {
+        let Some(why) =
+            should_reclaim(store, clients, &namespace, &workspace, &published, idle_ttl).await
         else {
             continue;
         };
-        match store.remove_slot(&workspace) {
+        match store.remove_slot(&namespace, &workspace) {
             Ok(true) => {
                 reclaimed += 1;
                 match why {
@@ -131,26 +124,14 @@ enum Reclaim {
 async fn should_reclaim(
     store: &SlotStore,
     clients: &NamespacedClients,
+    namespace: &str,
     workspace: &str,
-    namespace: Option<&str>,
-    published: &HashSet<String>,
+    published: &HashSet<(String, String)>,
     idle_ttl: Duration,
 ) -> Option<Reclaim> {
-    if published.contains(workspace) {
+    if published.contains(&(namespace.to_string(), workspace.to_string())) {
         return None;
     }
-    // A Workspace CR is namespaced, and the agent's own namespace is not the
-    // one it lives in. Without knowing which, a lookup returns "not found" for
-    // a perfectly live workspace — and acting on that would delete a tenant's
-    // slot. Slots recorded before the namespace was tracked have none, so they
-    // are kept rather than guessed at.
-    let Some(namespace) = namespace else {
-        tracing::warn!(
-            workspace,
-            "no namespace recorded for this slot; keeping it rather than risking a live workspace"
-        );
-        return None;
-    };
     let client = clients.get(namespace).await?;
     let alive = match client.api::<kubimo::Workspace>().get_opt(workspace).await {
         Ok(None) => false,
@@ -178,7 +159,7 @@ async fn should_reclaim(
     if idle_ttl.is_zero() {
         return None;
     }
-    match store.flushed_ago(workspace) {
+    match store.flushed_ago(namespace, workspace) {
         Ok(Some(idle)) if idle >= idle_ttl => Some(Reclaim::Idle),
         Ok(_) => None,
         Err(err) => {
@@ -204,15 +185,15 @@ mod tests {
         let (_dir, store) = store();
         assert!(store.workspaces().unwrap().is_empty());
 
-        store.resolve_or_create("bmow-one", "platform").unwrap();
-        store.resolve_or_create("bmow-two", "platform").unwrap();
+        store.resolve_or_create("platform", "bmow-one").unwrap();
+        store.resolve_or_create("platform", "bmow-two").unwrap();
         let mut found = store.workspaces().unwrap();
         found.sort();
         assert_eq!(
             found,
             vec![
-                ("bmow-one".to_string(), Some("platform".to_string())),
-                ("bmow-two".to_string(), Some("platform".to_string())),
+                ("platform".to_string(), "bmow-one".to_string()),
+                ("platform".to_string(), "bmow-two".to_string()),
             ]
         );
     }
@@ -226,12 +207,15 @@ mod tests {
     #[test]
     fn a_zero_ttl_disables_eviction_rather_than_evicting_everything() {
         let (_dir, store) = store();
-        store.resolve_or_create("bmow-keep", "platform").unwrap();
-        store.mark_flushed("bmow-keep").unwrap();
+        store.resolve_or_create("platform", "bmow-keep").unwrap();
+        store.mark_flushed("platform", "bmow-keep").unwrap();
 
         // The marker exists and its age is trivially >= 0, so only the explicit
         // zero check stops this being reclaimed.
-        let idle = store.flushed_ago("bmow-keep").unwrap().expect("flushed");
+        let idle = store
+            .flushed_ago("platform", "bmow-keep")
+            .unwrap()
+            .expect("flushed");
         assert!(idle >= Duration::ZERO);
         assert!(
             Duration::ZERO.is_zero(),
@@ -252,24 +236,29 @@ mod tests {
     #[test]
     fn a_failed_flush_leaves_no_marker_from_an_earlier_success() {
         let (_dir, store) = store();
-        store.resolve_or_create("bmow-remount", "platform").unwrap();
+        store.resolve_or_create("platform", "bmow-remount").unwrap();
 
         // First mount ends: flush succeeds and marks the slot.
-        store.mark_flushed("bmow-remount").unwrap();
-        assert!(store.flushed_ago("bmow-remount").unwrap().is_some());
+        store.mark_flushed("platform", "bmow-remount").unwrap();
+        assert!(
+            store
+                .flushed_ago("platform", "bmow-remount")
+                .unwrap()
+                .is_some()
+        );
 
         // Second mount ends: the flush is attempted — clearing first — and
         // fails, so `mark_flushed` is never reached.
-        store.clear_flushed("bmow-remount").unwrap();
+        store.clear_flushed("platform", "bmow-remount").unwrap();
         assert_eq!(
-            store.flushed_ago("bmow-remount").unwrap(),
+            store.flushed_ago("platform", "bmow-remount").unwrap(),
             None,
             "a stale marker would let the reaper evict unflushed work"
         );
 
         // Clearing when there is nothing to clear is not an error: every flush
         // attempt does it, including the first.
-        store.clear_flushed("bmow-remount").unwrap();
+        store.clear_flushed("platform", "bmow-remount").unwrap();
     }
 
     /// The flush marker is what makes idle eviction safe, so its absence has to
@@ -279,12 +268,12 @@ mod tests {
     #[test]
     fn a_slot_that_never_flushed_reports_no_age() {
         let (_dir, store) = store();
-        store.resolve_or_create("bmow-fresh", "platform").unwrap();
-        assert_eq!(store.flushed_ago("bmow-fresh").unwrap(), None);
+        store.resolve_or_create("platform", "bmow-fresh").unwrap();
+        assert_eq!(store.flushed_ago("platform", "bmow-fresh").unwrap(), None);
 
-        store.mark_flushed("bmow-fresh").unwrap();
+        store.mark_flushed("platform", "bmow-fresh").unwrap();
         let idle = store
-            .flushed_ago("bmow-fresh")
+            .flushed_ago("platform", "bmow-fresh")
             .unwrap()
             .expect("a flushed slot has an age");
         // Just flushed, so nowhere near the eviction threshold.
@@ -296,11 +285,11 @@ mod tests {
     #[test]
     fn an_unknown_workspace_reports_no_age() {
         let (_dir, store) = store();
-        assert_eq!(store.flushed_ago("bmow-nothing").unwrap(), None);
+        assert_eq!(store.flushed_ago("platform", "bmow-nothing").unwrap(), None);
         // Marking one that does not exist is a no-op rather than an error: the
         // slot may have been reclaimed between the flush and this call.
-        store.mark_flushed("bmow-nothing").unwrap();
-        assert_eq!(store.flushed_ago("bmow-nothing").unwrap(), None);
+        store.mark_flushed("platform", "bmow-nothing").unwrap();
+        assert_eq!(store.flushed_ago("platform", "bmow-nothing").unwrap(), None);
     }
 
     /// Reclaiming drops the marker with everything else, so a workspace that
@@ -309,14 +298,19 @@ mod tests {
     #[test]
     fn reclaiming_clears_the_flush_marker() {
         let (_dir, store) = store();
-        store.resolve_or_create("bmow-cycle", "platform").unwrap();
-        store.mark_flushed("bmow-cycle").unwrap();
-        assert!(store.flushed_ago("bmow-cycle").unwrap().is_some());
+        store.resolve_or_create("platform", "bmow-cycle").unwrap();
+        store.mark_flushed("platform", "bmow-cycle").unwrap();
+        assert!(
+            store
+                .flushed_ago("platform", "bmow-cycle")
+                .unwrap()
+                .is_some()
+        );
 
-        assert!(store.remove_slot("bmow-cycle").unwrap());
-        store.resolve_or_create("bmow-cycle", "platform").unwrap();
+        assert!(store.remove_slot("platform", "bmow-cycle").unwrap());
+        store.resolve_or_create("platform", "bmow-cycle").unwrap();
         assert_eq!(
-            store.flushed_ago("bmow-cycle").unwrap(),
+            store.flushed_ago("platform", "bmow-cycle").unwrap(),
             None,
             "a new slot must not inherit the old one's flush marker"
         );
@@ -325,16 +319,16 @@ mod tests {
     #[test]
     fn removing_a_slot_clears_its_directory_and_index() {
         let (_dir, store) = store();
-        let resolved = store.resolve_or_create("bmow-gone", "platform").unwrap();
+        let resolved = store.resolve_or_create("platform", "bmow-gone").unwrap();
         let slot_dir = store.layout().slot_dir(&resolved.id);
         assert!(slot_dir.is_dir());
 
-        assert!(store.remove_slot("bmow-gone").unwrap());
+        assert!(store.remove_slot("platform", "bmow-gone").unwrap());
         assert!(!slot_dir.exists());
         assert!(store.workspaces().unwrap().is_empty());
         // And the workspace looks brand new again, rather than pointing at a
         // slot that no longer exists.
-        assert!(store.lookup("bmow-gone").unwrap().is_none());
+        assert!(store.lookup("platform", "bmow-gone").unwrap().is_none());
     }
 
     /// The namespace has to survive in the index, because the reaper runs long
@@ -343,20 +337,20 @@ mod tests {
     #[test]
     fn the_index_remembers_which_namespace_a_workspace_lives_in() {
         let (_dir, store) = store();
-        store.resolve_or_create("bmow-ns", "some-tenant").unwrap();
+        store.resolve_or_create("some-tenant", "bmow-ns").unwrap();
         assert_eq!(
             store.workspaces().unwrap(),
-            vec![("bmow-ns".to_string(), Some("some-tenant".to_string()))]
+            vec![("some-tenant".to_string(), "bmow-ns".to_string())]
         );
         // And the slot itself still resolves: the namespace is a second line,
         // not something that corrupts the id on the first.
-        assert!(store.lookup("bmow-ns").unwrap().is_some());
+        assert!(store.lookup("some-tenant", "bmow-ns").unwrap().is_some());
     }
 
     #[test]
     fn removing_an_unknown_slot_is_not_an_error() {
         let (_dir, store) = store();
-        assert!(!store.remove_slot("bmow-absent").unwrap());
+        assert!(!store.remove_slot("platform", "bmow-absent").unwrap());
     }
 
     /// A published slot is mounted into a live pod, so the sweep has to see it
@@ -366,8 +360,13 @@ mod tests {
     #[test]
     fn a_slot_is_pinned_while_any_volume_is_published() {
         let (_dir, store) = store();
-        let resolved = store.resolve_or_create("bmow-live", "platform").unwrap();
-        assert!(!store.published_workspaces().unwrap().contains("bmow-live"));
+        let resolved = store.resolve_or_create("platform", "bmow-live").unwrap();
+        assert!(
+            !store
+                .published_workspaces()
+                .unwrap()
+                .contains(&("platform".to_string(), "bmow-live".to_string()))
+        );
 
         store
             .record_publish(
@@ -381,9 +380,19 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(store.published_workspaces().unwrap().contains("bmow-live"));
+        assert!(
+            store
+                .published_workspaces()
+                .unwrap()
+                .contains(&("platform".to_string(), "bmow-live".to_string()))
+        );
 
         store.forget_publish("csi-abc");
-        assert!(!store.published_workspaces().unwrap().contains("bmow-live"));
+        assert!(
+            !store
+                .published_workspaces()
+                .unwrap()
+                .contains(&("platform".to_string(), "bmow-live".to_string()))
+        );
     }
 }

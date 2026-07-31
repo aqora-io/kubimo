@@ -117,8 +117,16 @@ pub async fn run(
             }
             Ok(published) => {
                 if std::time::Instant::now() >= deadline {
+                    // `namespace/workspace`, not the bare workspace name: a CR name is only
+                    // unique within its namespace, so naming just the workspace here could
+                    // point an operator at the wrong tenant's slot.
+                    let remaining: Vec<String> = published
+                        .iter()
+                        .map(|(namespace, workspace)| format!("{namespace}/{workspace}"))
+                        .collect();
                     tracing::error!(
-                        remaining = published.len(),
+                        remaining = remaining.len(),
+                        workspaces = ?remaining,
                         "draining: timed out with volumes still published; their slots \
                          will be lost with this node volume"
                     );
