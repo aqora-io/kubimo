@@ -1,4 +1,4 @@
-use kubimo::WorkspaceMode;
+use kubimo::{WorkspaceMode, WorkspacePythonRuntime};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -10,6 +10,15 @@ fn default_manager_name() -> String {
 #[inline]
 fn default_marimo_image() -> String {
     concat!("ghcr.io/aqora-io/kubimo-marimo:", env!("CARGO_PKG_VERSION")).to_string()
+}
+
+#[inline]
+fn default_marimo_conda_image() -> String {
+    concat!(
+        "ghcr.io/aqora-io/kubimo-marimo-conda:",
+        env!("CARGO_PKG_VERSION")
+    )
+    .to_string()
 }
 
 #[inline]
@@ -119,6 +128,8 @@ pub struct Config {
     pub manager_name: String,
     #[serde(default = "default_marimo_image")]
     pub marimo_image: String,
+    #[serde(default = "default_marimo_conda_image")]
+    pub marimo_conda_image: String,
     #[serde(default = "default_busybox_image")]
     pub busybox_image: String,
     #[serde(default = "default_ingress_class_name")]
@@ -155,6 +166,13 @@ impl Config {
             .add_source(Self::environment_source())
             .build()?
             .try_deserialize()
+    }
+
+    pub fn marimo_image(&self, python_runtime: WorkspacePythonRuntime) -> &str {
+        match python_runtime {
+            WorkspacePythonRuntime::Uv => &self.marimo_image,
+            WorkspacePythonRuntime::Conda => &self.marimo_conda_image,
+        }
     }
 }
 

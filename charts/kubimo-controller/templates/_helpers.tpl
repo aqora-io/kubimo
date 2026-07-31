@@ -93,6 +93,14 @@ optional in values.yaml, hence the dict guards.
 {{- $controller.marimoImage | default (printf "%s:%s" $repo $tag) -}}
 {{- end }}
 
+{{- define "kubimo-controller.marimoCondaImage" -}}
+{{- $controller := .Values.controller | default dict -}}
+{{- $marimo := .Values.marimoConda | default dict -}}
+{{- $repo := $marimo.repository | default "ghcr.io/aqora-io/kubimo-conda-marimo" -}}
+{{- $tag := $marimo.tag | default $marimo.sourceTag | default .Chart.AppVersion -}}
+{{- $controller.marimoCondaImage | default (printf "%s:%s" $repo $tag) -}}
+{{- end }}
+
 {{/*
 Create the name of the service account to use
 */}}
