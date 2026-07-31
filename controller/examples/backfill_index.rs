@@ -313,10 +313,13 @@ async fn classify(
     runners: &[Runner],
     pods: &kubimo::Api<Pod>,
 ) -> Result<Option<Skip>, Box<dyn std::error::Error>> {
-    if workspace
-        .spec
-        .mode
-        .is_some_and(|mode| mode != kubimo::WorkspaceMode::Dedicated)
+    // status.mode wins over spec.mode (effective_mode): a workspace created after the
+    // operator's default flipped to Pooled has spec.mode == None but status.mode ==
+    // Some(Pooled), and spec-only would misclassify it as Dedicated. Dedicated is the
+    // right default here because a workspace with neither spec nor status mode predates
+    // pooled mode entirely.
+    if workspace.effective_mode(kubimo::WorkspaceMode::Dedicated)
+        != kubimo::WorkspaceMode::Dedicated
     {
         return Ok(Some(Skip::NotDedicated));
     }
