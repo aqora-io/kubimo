@@ -5,7 +5,7 @@
 //! `<root>/.index`, which is never bind-mounted into a pod.
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::slot::{SlotId, SlotIdError, SlotLayout};
@@ -94,8 +94,17 @@ impl SlotStore {
         self.layout.root().join(".index")
     }
 
-    fn workspace_link(&self, workspace: &str) -> PathBuf {
-        self.index_dir().join(format!("ws-{workspace}"))
+    /// Path of the on-disk link recording which slot `(namespace, workspace)` owns.
+    ///
+    /// `namespace` and `workspace` are joined with a `.` rather than kept in
+    /// separate path components: a CR name is only unique within its namespace,
+    /// so two Workspaces named alike in different namespaces must not collide on
+    /// one node's slot index. The join is unambiguous the other way too — a
+    /// namespace is a DNS label and can never contain `.`, so splitting the
+    /// stripped filename on the *first* dot always recovers the namespace
+    /// cleanly even though workspace names may contain dots of their own.
+    fn workspace_link(&self, namespace: &str, workspace: &str) -> PathBuf {
+        self.index_dir().join(format!("ws-{namespace}.{workspace}"))
     }
 
     fn project_id_path(&self, id: &SlotId) -> PathBuf {
@@ -140,9 +149,10 @@ impl SlotStore {
     /// The file's mtime is the timestamp; nothing reads its contents. Only
     /// called after a flush actually succeeded, which is what lets the reaper
     /// treat the slot as a cache it may drop.
-    pub fn mark_flushed(&self, workspace: &str) -> Result<(), StoreError> {
+    pub fn mark_flushed(&self, namespace: &str, workspace: &str) -> Result<(), StoreError> {
+        validate_workspace_name(namespace)?;
         validate_workspace_name(workspace)?;
-        let Some(id) = self.lookup_slot_id(workspace)? else {
+        let Some(id) = self.lookup_slot_id(namespace, workspace)? else {
             return Ok(());
         };
         let path = self.flushed_path(&id);
@@ -159,9 +169,10 @@ impl SlotStore {
     /// when the first mount ended, and if the second one's final flush then
     /// fails, the reaper would read a stale marker as permission to evict work
     /// that never reached S3.
-    pub fn clear_flushed(&self, workspace: &str) -> Result<(), StoreError> {
+    pub fn clear_flushed(&self, namespace: &str, workspace: &str) -> Result<(), StoreError> {
+        validate_workspace_name(namespace)?;
         validate_workspace_name(workspace)?;
-        let Some(id) = self.lookup_slot_id(workspace)? else {
+        let Some(id) = self.lookup_slot_id(namespace, workspace)? else {
             return Ok(());
         };
         match std::fs::remove_file(self.flushed_path(&id)) {
@@ -177,9 +188,14 @@ impl SlotStore {
     /// read as "not safe to drop": the slot may hold the only copy of the
     /// tenant's newest work. A marker whose mtime is in the future — a clock
     /// step — also yields `None` rather than a bogus age.
-    pub fn flushed_ago(&self, workspace: &str) -> Result<Option<Duration>, StoreError> {
+    pub fn flushed_ago(
+        &self,
+        namespace: &str,
+        workspace: &str,
+    ) -> Result<Option<Duration>, StoreError> {
+        validate_workspace_name(namespace)?;
         validate_workspace_name(workspace)?;
-        let Some(id) = self.lookup_slot_id(workspace)? else {
+        let Some(id) = self.lookup_slot_id(namespace, workspace)? else {
             return Ok(None);
         };
         let Ok(meta) = std::fs::metadata(self.flushed_path(&id)) else {
@@ -191,10 +207,15 @@ impl SlotStore {
             .and_then(|at| std::time::SystemTime::now().duration_since(at).ok()))
     }
 
-    /// Look up the slot recorded for `workspace`, if any.
-    pub fn lookup(&self, workspace: &str) -> Result<Option<ResolvedSlot>, StoreError> {
+    /// Look up the slot recorded for `workspace` in `namespace`, if any.
+    pub fn lookup(
+        &self,
+        namespace: &str,
+        workspace: &str,
+    ) -> Result<Option<ResolvedSlot>, StoreError> {
+        validate_workspace_name(namespace)?;
         validate_workspace_name(workspace)?;
-        let link = self.workspace_link(workspace);
+        let link = self.workspace_link(namespace, workspace);
         let raw = match std::fs::read_to_string(&link) {
             Ok(raw) => raw,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -266,24 +287,23 @@ impl SlotStore {
         Ok(next)
     }
 
-    /// Record that `workspace` owns `id` with `project_id`.
+    /// Record that `workspace` in `namespace` owns `id` with `project_id`.
     fn record(
         &self,
-        workspace: &str,
         namespace: &str,
+        workspace: &str,
         id: &SlotId,
         project_id: u32,
     ) -> Result<(), StoreError> {
         std::fs::create_dir_all(self.index_dir()).map_err(io_err("creating index dir"))?;
         std::fs::write(self.project_id_path(id), project_id.to_string())
             .map_err(io_err("writing project id"))?;
-        // Slot id then namespace, one per line. The namespace is recorded
-        // because a Workspace CR can only be looked up in the namespace it
-        // lives in, and the agent's own namespace is not it — the agent runs
-        // beside the controller while workspaces belong to whichever namespace
-        // created them.
+        // Slot id then namespace, one per line. The namespace is redundant with
+        // the key here, but is kept anyway: it is what `workspaces()` falls
+        // back to for a legacy link with no namespace in its filename, and it
+        // keeps the file self-describing for a human reading it directly.
         std::fs::write(
-            self.workspace_link(workspace),
+            self.workspace_link(namespace, workspace),
             format!("{}\n{namespace}", id.as_str()),
         )
         .map_err(io_err("writing workspace index"))?;
@@ -362,13 +382,13 @@ impl SlotStore {
         let _ = std::fs::remove_file(self.publish_path(volume_id));
     }
 
-    /// Drop every publish record naming `workspace`.
+    /// Drop every publish record naming `(namespace, workspace)`.
     ///
     /// A record is keyed by volume id, so a workspace that was published, unpublished
     /// and republished can have left more than one behind. Any that survives makes
     /// [`Self::published_workspaces`] report the workspace as mounted forever, which
     /// stops the reaper reclaiming its slot for as long as this data volume lives.
-    fn forget_publishes_for(&self, workspace: &str) {
+    fn forget_publishes_for(&self, namespace: &str, workspace: &str) {
         let Ok(entries) = std::fs::read_dir(self.index_dir()) else {
             return;
         };
@@ -378,20 +398,34 @@ impl SlotStore {
             if !name.starts_with("vol-") {
                 continue;
             }
-            if std::fs::read_to_string(entry.path())
-                .is_ok_and(|raw| raw.lines().next() == Some(workspace))
-            {
-                let _ = std::fs::remove_file(entry.path());
+            let Ok(raw) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let mut lines = raw.lines();
+            if lines.next() != Some(workspace) {
+                continue;
             }
+            lines.next(); // slot
+            lines.next(); // bucket
+            lines.next(); // key prefix
+            let recorded_namespace = lines.next().unwrap_or_default();
+            // A record written before `PublishedSlot` carried a namespace has
+            // none to compare against; matching by workspace alone is what it
+            // always did, and is no less safe here — this record predates the
+            // very field the cross-tenant collision hinges on.
+            if !recorded_namespace.is_empty() && recorded_namespace != namespace {
+                continue;
+            }
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 
-    /// Every workspace this node holds a slot for.
+    /// Every workspace this node holds a slot for, as `(namespace, workspace)`.
     ///
     /// Read from the index rather than by listing slot directories, because a
     /// slot's directory name is opaque — which workspace it belongs to is only
     /// recorded in the `ws-` link.
-    pub fn workspaces(&self) -> Result<Vec<(String, Option<String>)>, StoreError> {
+    pub fn workspaces(&self) -> Result<Vec<(String, String)>, StoreError> {
         let entries = match std::fs::read_dir(self.index_dir()) {
             Ok(entries) => entries,
             // No index yet means no slots yet.
@@ -402,20 +436,54 @@ impl SlotStore {
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let name = entry.file_name();
-                let workspace = name.to_str()?.strip_prefix("ws-")?.to_string();
-                // Anything failing validation was not written by us.
-                validate_workspace_name(&workspace).ok()?;
-                let namespace = self.recorded_namespace(&workspace);
-                Some((workspace, namespace))
+                let stripped = name.to_str()?.strip_prefix("ws-")?;
+                // A namespace is a DNS label and can never contain a `.`, so the
+                // first dot in the stripped name unambiguously separates it from
+                // the workspace even though workspace names may contain dots of
+                // their own.
+                match stripped.split_once('.') {
+                    Some((namespace, workspace)) => {
+                        // Anything failing validation was not written by us.
+                        validate_workspace_name(namespace).ok()?;
+                        validate_workspace_name(workspace).ok()?;
+                        Some((namespace.to_string(), workspace.to_string()))
+                    }
+                    // Written before the namespace joined the index key. The only
+                    // place it survives is line 2 of this same link, so recover it
+                    // from there; if that is empty too there is nothing left to
+                    // check the workspace's CR in, and the entry is left for a
+                    // human rather than guessed at. Either way `lookup` and
+                    // friends never find this link again under its bare name, so
+                    // the next publish allocates a fresh, namespaced slot next to
+                    // it — this is what eventually lets the reaper reclaim it.
+                    None => {
+                        let workspace = stripped;
+                        validate_workspace_name(workspace).ok()?;
+                        match self.recorded_namespace(workspace) {
+                            Some(namespace) => Some((namespace, workspace.to_string())),
+                            None => {
+                                tracing::warn!(
+                                    workspace,
+                                    "no namespace recorded for this legacy slot index entry; \
+                                     skipping"
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
             })
             .collect())
     }
 
-    /// The workspaces that currently have at least one published volume.
+    /// The workspaces that currently have at least one published volume, as
+    /// `(namespace, workspace)`.
     ///
     /// A slot in this set is mounted into a live pod, so it must never be
     /// reclaimed however its workspace's CR looks.
-    pub fn published_workspaces(&self) -> Result<std::collections::HashSet<String>, StoreError> {
+    pub fn published_workspaces(
+        &self,
+    ) -> Result<std::collections::HashSet<(String, String)>, StoreError> {
         let entries = match std::fs::read_dir(self.index_dir()) {
             Ok(entries) => entries,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
@@ -431,11 +499,24 @@ impl SlotStore {
             if !name.starts_with("vol-") {
                 continue;
             }
-            if let Ok(raw) = std::fs::read_to_string(entry.path())
-                && let Some(workspace) = raw.lines().next()
-            {
-                published.insert(workspace.to_string());
-            }
+            let Ok(raw) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let mut lines = raw.lines();
+            let Some(workspace) = lines.next() else {
+                continue;
+            };
+            lines.next(); // slot
+            lines.next(); // bucket
+            lines.next(); // key prefix
+            // Empty for a record written before `PublishedSlot` carried a
+            // namespace at all. Collecting it as the empty string rather than
+            // dropping the record keeps it visible to `should_reclaim`, which is
+            // the safer of the two mistakes: an unmatched published slot can
+            // only ever cause it to be kept a little longer, never reclaimed
+            // out from under a running pod.
+            let namespace = lines.next().unwrap_or_default();
+            published.insert((namespace.to_string(), workspace.to_string()));
         }
         Ok(published)
     }
@@ -444,15 +525,32 @@ impl SlotStore {
     ///
     /// The project id file goes too, releasing that id: the quota limit set
     /// against it is meaningless once no inodes carry it.
-    pub fn remove_slot(&self, workspace: &str) -> Result<bool, StoreError> {
+    pub fn remove_slot(&self, namespace: &str, workspace: &str) -> Result<bool, StoreError> {
+        validate_workspace_name(namespace)?;
         validate_workspace_name(workspace)?;
         // Before anything else, and on both exits: a leaked publish record outlives the
         // slot it names and would make this workspace look permanently mounted.
-        self.forget_publishes_for(workspace);
-        let Some(id) = self.lookup_slot_id(workspace)? else {
-            // Nothing recorded, though the link may be a dangling leftover.
-            let _ = std::fs::remove_file(self.workspace_link(workspace));
-            return Ok(false);
+        self.forget_publishes_for(namespace, workspace);
+        let link = self.workspace_link(namespace, workspace);
+        // A slot recorded before the index key carried the namespace lives under
+        // this bare, legacy link instead. Falling back to it — only here — is
+        // what lets a slot `workspaces()` surfaced this way actually get freed:
+        // reclaiming it is safe regardless of which tenant it turns out to
+        // belong to, unlike serving it, which is exactly the guess this store no
+        // longer makes.
+        let legacy_link = self.index_dir().join(format!("ws-{workspace}"));
+        let (link, id) = match self.lookup_slot_id(namespace, workspace)? {
+            Some(id) => (link, id),
+            None => match self.read_slot_id(&legacy_link, workspace)? {
+                Some(id) => (legacy_link, id),
+                None => {
+                    // Nothing recorded under either link, though one may be a
+                    // dangling leftover.
+                    let _ = std::fs::remove_file(&link);
+                    let _ = std::fs::remove_file(&legacy_link);
+                    return Ok(false);
+                }
+            },
         };
         let dir = self.layout.slot_dir(&id);
         match std::fs::remove_dir_all(&dir) {
@@ -460,20 +558,21 @@ impl SlotStore {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(io_err(format!("removing {}", dir.display()))(err)),
         }
-        let _ = std::fs::remove_file(self.workspace_link(workspace));
+        let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_file(self.project_id_path(&id));
         let _ = std::fs::remove_file(self.flushed_path(&id));
         Ok(true)
     }
 
-    /// The namespace recorded for `workspace`, if the index carries one.
+    /// The namespace recorded on line 2 of a *legacy* link (`ws-{workspace}`,
+    /// no dot) — one written before the index key carried the namespace itself.
     ///
-    /// Absent for slots written before the namespace was recorded. Callers must
-    /// treat that as "unknown" rather than guessing: guessing wrong means
-    /// looking a Workspace up in a namespace it does not live in, which reads
-    /// as "deleted".
+    /// Every other kind of link carries its namespace in the key already; this
+    /// is only ever consulted for the legacy ones, where it is line 2 or
+    /// nowhere.
     fn recorded_namespace(&self, workspace: &str) -> Option<String> {
-        let raw = std::fs::read_to_string(self.workspace_link(workspace)).ok()?;
+        let link = self.index_dir().join(format!("ws-{workspace}"));
+        let raw = std::fs::read_to_string(link).ok()?;
         raw.lines()
             .nth(1)
             .map(str::trim)
@@ -481,12 +580,22 @@ impl SlotStore {
             .map(ToString::to_string)
     }
 
-    /// The slot id recorded for `workspace`, whether or not its directory still
-    /// exists. Unlike [`Self::lookup`] a missing directory is not treated as
-    /// "no slot", because reclaiming has to clean up the index either way.
-    fn lookup_slot_id(&self, workspace: &str) -> Result<Option<SlotId>, StoreError> {
-        let link = self.workspace_link(workspace);
-        let raw = match std::fs::read_to_string(&link) {
+    /// The slot id recorded for `workspace` in `namespace`, whether or not its
+    /// directory still exists. Unlike [`Self::lookup`] a missing directory is
+    /// not treated as "no slot", because reclaiming has to clean up the index
+    /// either way.
+    fn lookup_slot_id(
+        &self,
+        namespace: &str,
+        workspace: &str,
+    ) -> Result<Option<SlotId>, StoreError> {
+        self.read_slot_id(&self.workspace_link(namespace, workspace), workspace)
+    }
+
+    /// The slot id recorded at `link`, if any, reporting corruption against
+    /// `workspace`.
+    fn read_slot_id(&self, link: &Path, workspace: &str) -> Result<Option<SlotId>, StoreError> {
+        let raw = match std::fs::read_to_string(link) {
             Ok(raw) => raw,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(io_err(format!("reading {}", link.display()))(err)),
@@ -499,20 +608,22 @@ impl SlotStore {
             })
     }
 
-    /// Resolve the slot for `workspace`, allocating one if it has none.
+    /// Resolve the slot for `workspace` in `namespace`, allocating one if it
+    /// has none.
     pub fn resolve_or_create(
         &self,
-        workspace: &str,
         namespace: &str,
+        workspace: &str,
     ) -> Result<ResolvedSlot, StoreError> {
+        validate_workspace_name(namespace)?;
         validate_workspace_name(workspace)?;
-        if let Some(existing) = self.lookup(workspace)? {
+        if let Some(existing) = self.lookup(namespace, workspace)? {
             return Ok(existing);
         }
         let id = SlotId::generate();
         let project_id = self.allocate_project_id()?;
         std::fs::create_dir_all(self.layout.slot_dir(&id)).map_err(io_err("creating slot dir"))?;
-        self.record(workspace, namespace, &id, project_id)?;
+        self.record(namespace, workspace, &id, project_id)?;
         Ok(ResolvedSlot {
             id,
             project_id,
@@ -534,9 +645,9 @@ mod tests {
     #[test]
     fn resolve_is_stable_for_the_same_workspace() {
         let (_dir, store) = store();
-        let first = store.resolve_or_create("bmow-abc", "platform").unwrap();
+        let first = store.resolve_or_create("platform", "bmow-abc").unwrap();
         assert!(first.created);
-        let second = store.resolve_or_create("bmow-abc", "platform").unwrap();
+        let second = store.resolve_or_create("platform", "bmow-abc").unwrap();
         assert!(!second.created, "second call should reuse the slot");
         assert_eq!(first.id, second.id);
         assert_eq!(first.project_id, second.project_id);
@@ -545,8 +656,8 @@ mod tests {
     #[test]
     fn distinct_workspaces_get_distinct_slots_and_project_ids() {
         let (_dir, store) = store();
-        let a = store.resolve_or_create("bmow-a", "platform").unwrap();
-        let b = store.resolve_or_create("bmow-b", "platform").unwrap();
+        let a = store.resolve_or_create("platform", "bmow-a").unwrap();
+        let b = store.resolve_or_create("platform", "bmow-b").unwrap();
         assert_ne!(a.id, b.id);
         assert_ne!(a.project_id, b.project_id);
     }
@@ -561,7 +672,7 @@ mod tests {
         for i in 0..25 {
             let store = SlotStore::new(SlotLayout::new(dir.path()));
             let slot = store
-                .resolve_or_create(&format!("bmow-{i}"), "platform")
+                .resolve_or_create("platform", &format!("bmow-{i}"))
                 .unwrap();
             assert!(seen.insert(slot.project_id), "reused {}", slot.project_id);
         }
@@ -574,9 +685,9 @@ mod tests {
     #[test]
     fn wiped_slot_directory_is_treated_as_absent() {
         let (_dir, store) = store();
-        let first = store.resolve_or_create("bmow-abc", "platform").unwrap();
+        let first = store.resolve_or_create("platform", "bmow-abc").unwrap();
         std::fs::remove_dir_all(store.layout().slot_dir(&first.id)).unwrap();
-        let second = store.resolve_or_create("bmow-abc", "platform").unwrap();
+        let second = store.resolve_or_create("platform", "bmow-abc").unwrap();
         assert!(second.created);
         assert_ne!(first.id, second.id);
     }
@@ -595,7 +706,7 @@ mod tests {
             "nul\0byte",
         ] {
             assert!(
-                store().1.resolve_or_create(name, "platform").is_err(),
+                store().1.resolve_or_create("platform", name).is_err(),
                 "accepted {name:?}"
             );
         }
@@ -604,7 +715,7 @@ mod tests {
     #[test]
     fn publish_records_round_trip() {
         let (_dir, store) = store();
-        let slot = store.resolve_or_create("bmow-abc", "platform").unwrap();
+        let slot = store.resolve_or_create("platform", "bmow-abc").unwrap();
         let published = PublishedSlot {
             workspace: "bmow-abc".to_string(),
             // The unpublish path has no volume attributes to re-read, so the
@@ -646,18 +757,18 @@ mod tests {
         let (_dir, store) = store();
         assert!(
             store
-                .resolve_or_create("bmow-019e82b3-1234-7abc-8def-0123456789ab", "platform")
+                .resolve_or_create("platform", "bmow-019e82b3-1234-7abc-8def-0123456789ab")
                 .is_ok()
         );
     }
 
-    fn publish(store: &SlotStore, volume_id: &str, workspace: &str, slot: SlotId) {
+    fn publish(store: &SlotStore, volume_id: &str, namespace: &str, workspace: &str, slot: SlotId) {
         store
             .record_publish(
                 volume_id,
                 &PublishedSlot {
                     workspace: workspace.to_string(),
-                    namespace: "platform".to_string(),
+                    namespace: namespace.to_string(),
                     slot,
                     bucket: None,
                     key_prefix: None,
@@ -666,28 +777,129 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn same_name_in_two_namespaces_gets_two_slots() {
+        let (_tmp, store) = store();
+        let a = store.resolve_or_create("tenant-a", "workspace").unwrap();
+        let b = store.resolve_or_create("tenant-b", "workspace").unwrap();
+        assert_ne!(a.id, b.id);
+        assert_ne!(a.project_id, b.project_id);
+        assert_eq!(
+            store.lookup("tenant-a", "workspace").unwrap().unwrap().id,
+            a.id
+        );
+        assert_eq!(
+            store.lookup("tenant-b", "workspace").unwrap().unwrap().id,
+            b.id
+        );
+    }
+
+    #[test]
+    fn a_dotted_workspace_name_round_trips_through_the_index() {
+        let (_tmp, store) = store();
+        store.resolve_or_create("tenant-a", "v1.notebook").unwrap();
+        assert_eq!(
+            store.workspaces().unwrap(),
+            vec![("tenant-a".to_string(), "v1.notebook".to_string())]
+        );
+    }
+
+    #[test]
+    fn publishes_are_scoped_to_their_namespace() {
+        let (_tmp, store) = store();
+        let a = store.resolve_or_create("tenant-a", "workspace").unwrap();
+        publish(&store, "csi-a", "tenant-a", "workspace", a.id.clone());
+        assert!(
+            store
+                .published_workspaces()
+                .unwrap()
+                .contains(&("tenant-a".into(), "workspace".into()))
+        );
+        assert!(
+            !store
+                .published_workspaces()
+                .unwrap()
+                .contains(&("tenant-b".into(), "workspace".into()))
+        );
+        // removing tenant-b's (nonexistent) slot must not drop tenant-a's publish record
+        store.remove_slot("tenant-b", "workspace").unwrap();
+        assert!(
+            store
+                .published_workspaces()
+                .unwrap()
+                .contains(&("tenant-a".into(), "workspace".into()))
+        );
+    }
+
+    /// A slot recorded before the index key carried the namespace — `ws-{workspace}`,
+    /// no dot — has to stay discoverable and reclaimable, or an in-place upgrade
+    /// would leak every such slot's disk space forever.
+    #[test]
+    fn a_legacy_unnamespaced_slot_is_surfaced_and_reclaimed() {
+        let (_dir, store) = store();
+        // What a pre-namespacing agent left behind; `resolve_or_create` itself
+        // only ever writes the new, namespace-in-key form now.
+        let id = SlotId::generate();
+        std::fs::create_dir_all(store.index_dir()).unwrap();
+        std::fs::create_dir_all(store.layout().slot_dir(&id)).unwrap();
+        std::fs::write(store.project_id_path(&id), "1000").unwrap();
+        std::fs::write(
+            store.index_dir().join("ws-bmow-legacy"),
+            format!("{}\nold-tenant", id.as_str()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.workspaces().unwrap(),
+            vec![("old-tenant".to_string(), "bmow-legacy".to_string())]
+        );
+
+        assert!(store.remove_slot("old-tenant", "bmow-legacy").unwrap());
+        assert!(!store.layout().slot_dir(&id).is_dir());
+        assert!(store.workspaces().unwrap().is_empty());
+    }
+
+    /// A legacy entry with no namespace on line 2 either has nowhere left to
+    /// recover one from, so it is left alone rather than guessed at.
+    #[test]
+    fn a_legacy_slot_with_no_recorded_namespace_is_skipped() {
+        let (_dir, store) = store();
+        let id = SlotId::generate();
+        std::fs::create_dir_all(store.index_dir()).unwrap();
+        std::fs::create_dir_all(store.layout().slot_dir(&id)).unwrap();
+        std::fs::write(store.index_dir().join("ws-bmow-orphan"), id.as_str()).unwrap();
+
+        assert!(store.workspaces().unwrap().is_empty());
+    }
+
     /// The reaper keeps any workspace named in `published_workspaces`, unconditionally.
     /// So a publish record that outlives its slot does not merely leak a small file — it
     /// disables reclamation for that workspace for as long as the data volume lives.
     #[test]
     fn removing_a_slot_drops_its_publish_records() {
         let (_dir, store) = store();
-        let mine = store.resolve_or_create("bmow-abc", "platform").unwrap();
-        let theirs = store.resolve_or_create("bmow-xyz", "platform").unwrap();
+        let mine = store.resolve_or_create("platform", "bmow-abc").unwrap();
+        let theirs = store.resolve_or_create("platform", "bmow-xyz").unwrap();
         // Two records for one workspace: republishing under a new volume id is normal.
-        publish(&store, "vol-one", "bmow-abc", mine.id.clone());
-        publish(&store, "vol-two", "bmow-abc", mine.id.clone());
-        publish(&store, "vol-other", "bmow-xyz", theirs.id.clone());
+        publish(&store, "vol-one", "platform", "bmow-abc", mine.id.clone());
+        publish(&store, "vol-two", "platform", "bmow-abc", mine.id.clone());
+        publish(
+            &store,
+            "vol-other",
+            "platform",
+            "bmow-xyz",
+            theirs.id.clone(),
+        );
 
-        store.remove_slot("bmow-abc").unwrap();
+        store.remove_slot("platform", "bmow-abc").unwrap();
 
         let published = store.published_workspaces().unwrap();
         assert!(
-            !published.contains("bmow-abc"),
+            !published.contains(&("platform".to_string(), "bmow-abc".to_string())),
             "a surviving record would pin this workspace as published forever"
         );
         assert!(
-            published.contains("bmow-xyz"),
+            published.contains(&("platform".to_string(), "bmow-xyz".to_string())),
             "another workspace's record must be left alone"
         );
     }

@@ -121,8 +121,13 @@ pub struct KubimoNode {
     /// an unconfigured fallback is indistinguishable from a working one until
     /// a request fails.
     has_env_credentials: bool,
-    /// Per-workspace S3 clients, built from the credentials kubelet delivers
-    /// with each `NodePublishVolume`.
+    /// Per-`(namespace, workspace)` S3 clients, built from the credentials
+    /// kubelet delivers with each `NodePublishVolume`.
+    ///
+    /// Keyed by [`KubimoNode::slot_key`] rather than the bare workspace name: a
+    /// Workspace CR name is only unique within its namespace, so two
+    /// same-named workspaces in different namespaces scheduled onto this node
+    /// would otherwise share — and overwrite — each other's credentials.
     ///
     /// Retained past the publish because `NodeUnpublishVolume` carries no
     /// secrets and that is exactly when the final flush runs. Losing this on an
@@ -134,7 +139,8 @@ pub struct KubimoNode {
     /// downstream — the indexer's `WorkspaceDirectory` writes, `status.storage`
     /// patches, and every existence check — depends on getting this right.
     clients: crate::clients::NamespacedClients,
-    /// Continuous sync task per *workspace*, not per published volume.
+    /// Continuous sync task per *`(namespace, workspace)`*, not per published
+    /// volume.
     ///
     /// A workspace can be published more than once on a node at the same time —
     /// a cache job is deliberately co-located with a live runner by the
@@ -143,6 +149,10 @@ pub struct KubimoNode {
     /// independent key sets, racing each other's `WorkspaceDirectory` writes and
     /// orphaning objects through the sweep. So they share one, and it lives
     /// until the last volume referencing it goes away.
+    ///
+    /// Keyed by [`KubimoNode::slot_key`], not the bare workspace name, for the
+    /// same reason as [`Self::s3_clients`]: a Workspace CR name is only unique
+    /// within its namespace.
     ///
     /// Only bound slots appear here: an idle slot has no runner and cannot
     /// change, so the watcher count on a node tracks running pods rather than
@@ -222,9 +232,20 @@ impl KubimoNode {
         self.clients.get(namespace).await
     }
 
-    /// Remember the credentials kubelet delivered for `workspace`.
+    /// The key `s3_clients` and `watchers` are indexed by.
+    ///
+    /// A Workspace CR name is only unique within its own namespace, so keying
+    /// either map on the bare workspace name would let two identically-named
+    /// workspaces in different namespaces, scheduled onto the same node,
+    /// silently share — and overwrite — each other's credentials or watcher.
+    fn slot_key(namespace: &str, workspace: &str) -> String {
+        format!("{namespace}/{workspace}")
+    }
+
+    /// Remember the credentials kubelet delivered for `workspace` in `namespace`.
     fn remember_credentials(
         &self,
+        namespace: &str,
         workspace: &str,
         secrets: &std::collections::HashMap<String, String>,
     ) {
@@ -232,25 +253,30 @@ impl KubimoNode {
             return;
         }
         let client = indexer::s3::S3Client::from_options(secrets.iter());
-        self.lock_s3_clients().insert(workspace.to_string(), client);
+        self.lock_s3_clients()
+            .insert(Self::slot_key(namespace, workspace), client);
     }
 
-    /// The S3 client to use for `workspace`.
+    /// The S3 client to use for `workspace` in `namespace`.
     ///
     /// `None` means there is nowhere to read or write this workspace's archive:
     /// no credentials arrived with the mount and the agent has none of its own.
     /// Callers must say so rather than proceeding, because the failure is
     /// otherwise invisible — a hydrate looks like an empty workspace and a
     /// flush is logged and dropped.
-    fn s3_for(&self, workspace: &str) -> Option<indexer::s3::S3Client> {
-        if let Some(client) = self.lock_s3_clients().get(workspace) {
+    fn s3_for(&self, namespace: &str, workspace: &str) -> Option<indexer::s3::S3Client> {
+        if let Some(client) = self
+            .lock_s3_clients()
+            .get(&Self::slot_key(namespace, workspace))
+        {
             return Some(client.clone());
         }
         self.has_env_credentials.then(|| self.s3.clone())
     }
 
-    fn forget_credentials(&self, workspace: &str) {
-        self.lock_s3_clients().remove(workspace);
+    fn forget_credentials(&self, namespace: &str, workspace: &str) {
+        self.lock_s3_clients()
+            .remove(&Self::slot_key(namespace, workspace));
     }
 
     fn lock_s3_clients(
@@ -266,27 +292,28 @@ impl KubimoNode {
     async fn start_watcher(
         &self,
         volume_id: &str,
-        workspace: &str,
         namespace: &str,
+        workspace: &str,
         dir: &Path,
         archive: &crate::hydrate::ArchiveLocation,
     ) {
         let Some(client) = self.client_for(namespace).await else {
             return;
         };
-        let Some(s3) = self.s3_for(workspace) else {
+        let Some(s3) = self.s3_for(namespace, workspace) else {
             tracing::warn!(
                 workspace,
                 "no S3 credentials for this workspace; its slot will not be synced"
             );
             return;
         };
+        let key = Self::slot_key(namespace, workspace);
         // Deliberately scoped: `spawn_watcher` awaits (it reads the workspace's
         // existing directory CRs to recover its key layout), and this is a std
         // mutex whose guard cannot be held across that.
         {
             let mut watchers = self.lock_watchers();
-            if let Some(watcher) = watchers.get_mut(workspace) {
+            if let Some(watcher) = watchers.get_mut(&key) {
                 watcher.volumes.insert(volume_id.to_string());
                 return;
             }
@@ -311,13 +338,13 @@ impl KubimoNode {
         // Re-check: dropping the lock above leaves room for another publish of
         // the same workspace to have won the race. Keep the incumbent, since two
         // watchers on one slot would upload it twice over.
-        if let Some(watcher) = watchers.get_mut(workspace) {
+        if let Some(watcher) = watchers.get_mut(&key) {
             watcher.volumes.insert(volume_id.to_string());
             handle.abort();
             return;
         }
         watchers.insert(
-            workspace.to_string(),
+            key,
             Watcher {
                 handle,
                 volumes: std::iter::once(volume_id.to_string()).collect(),
@@ -340,14 +367,15 @@ impl KubimoNode {
     /// The watcher is aborted rather than gracefully stopped once the last
     /// claim goes: a final flush follows immediately, so anything it was midway
     /// through is redone.
-    fn stop_watcher(&self, volume_id: &str, workspace: &str) {
+    fn stop_watcher(&self, volume_id: &str, namespace: &str, workspace: &str) {
+        let key = Self::slot_key(namespace, workspace);
         let mut watchers = self.lock_watchers();
-        let Some(watcher) = watchers.get_mut(workspace) else {
+        let Some(watcher) = watchers.get_mut(&key) else {
             return;
         };
         watcher.volumes.remove(volume_id);
         if watcher.volumes.is_empty()
-            && let Some(watcher) = watchers.remove(workspace)
+            && let Some(watcher) = watchers.remove(&key)
         {
             watcher.handle.abort();
         }
@@ -423,7 +451,7 @@ impl KubimoNode {
         // set remembered when the volume was published. Losing it — an agent
         // container restart between publish and unpublish — must be loud: the
         // slot's newest work is on disk but cannot be persisted.
-        let Some(s3) = self.s3_for(&workspace) else {
+        let Some(s3) = self.s3_for(&published.namespace, &workspace) else {
             tracing::error!(
                 workspace,
                 "no S3 credentials for this workspace, so its final flush is being skipped; \
@@ -439,7 +467,7 @@ impl KubimoNode {
         // the second mount carries on writing; if that mount's own flush then
         // failed, an untouched marker would read as permission to evict work
         // that never reached S3.
-        if let Err(err) = self.store.clear_flushed(&workspace) {
+        if let Err(err) = self.store.clear_flushed(&published.namespace, &workspace) {
             tracing::warn!(%err, workspace, "could not clear the flush marker");
         }
         if let Err(err) = crate::hydrate::flush_slot(&dir, &workspace, &archive, &client, &s3).await
@@ -451,7 +479,7 @@ impl KubimoNode {
         // evict a slot without this marker, precisely so a failed flush — or
         // the deliberate skip above when a workspace is being deleted — keeps
         // the only copy of the tenant's newest work on disk.
-        if let Err(err) = self.store.mark_flushed(&workspace) {
+        if let Err(err) = self.store.mark_flushed(&published.namespace, &workspace) {
             tracing::warn!(
                 %err,
                 workspace,
@@ -567,7 +595,7 @@ impl KubimoNode {
     ) -> Result<PathBuf, Status> {
         let resolved = self
             .store
-            .resolve_or_create(workspace, namespace)
+            .resolve_or_create(namespace, workspace)
             .map_err(|err| Status::internal(format!("resolving slot: {err}")))?;
         let dir = self.store.layout().slot_dir(&resolved.id);
         if resolved.created {
@@ -631,7 +659,7 @@ impl KubimoNode {
             // Absent credentials leave both sources unreadable; the slot starts
             // empty rather than the mount failing, matching a workspace that
             // genuinely has no archive.
-            let s3 = self.s3_for(workspace);
+            let s3 = self.s3_for(namespace, workspace);
             let hydrated = self
                 .hydrate_new_slot(workspace, &resolved.id, &dir, archive, seed, s3.as_ref())
                 .await;
@@ -642,7 +670,7 @@ impl KubimoNode {
             // data loss whose only trace is a mount error that then succeeds.
             // Dropping the slot makes the retry start over.
             if hydrated.is_err()
-                && let Err(err) = self.store.remove_slot(workspace)
+                && let Err(err) = self.store.remove_slot(namespace, workspace)
             {
                 tracing::error!(
                     %err,
@@ -754,7 +782,7 @@ impl Node for KubimoNode {
         // volume's `nodePublishSecretRef` in the *pod's* namespace. Recorded
         // before anything touches S3, and kept afterwards because the matching
         // unpublish — where the final flush happens — carries no secrets.
-        self.remember_credentials(&workspace, &request.secrets);
+        self.remember_credentials(&namespace, &workspace, &request.secrets);
         let slot_dir = self
             .prepare_slot(
                 &workspace,
@@ -766,7 +794,7 @@ impl Node for KubimoNode {
             .await?;
         if let Some(slot) = self
             .store
-            .lookup(&workspace)
+            .lookup(&namespace, &workspace)
             .map_err(|err| Status::internal(format!("looking up slot: {err}")))?
         {
             self.publish_slot_status(&workspace, &namespace, &slot, limit_bytes, archive.as_ref())
@@ -790,8 +818,8 @@ impl Node for KubimoNode {
         if let Some(archive) = archive.as_ref() {
             self.start_watcher(
                 &request.volume_id,
-                &workspace,
                 &namespace,
+                &workspace,
                 &slot_dir,
                 archive,
             )
@@ -827,7 +855,11 @@ impl Node for KubimoNode {
         // The watcher is shared by every volume published for this workspace on
         // this node, so it only actually stops once the last of them is gone.
         if let Ok(Some(published)) = self.store.lookup_publish(&request.volume_id) {
-            self.stop_watcher(&request.volume_id, &published.workspace);
+            self.stop_watcher(
+                &request.volume_id,
+                &published.namespace,
+                &published.workspace,
+            );
         }
         self.flush_published(&request.volume_id).await;
         let unmounted = crate::mount::unbind(target)
@@ -851,12 +883,11 @@ impl Node for KubimoNode {
         // Held any longer they would accumulate for every workspace the node
         // has ever served.
         if let Some(published) = published
-            && !self
-                .store
-                .published_workspaces()
-                .is_ok_and(|live| live.contains(&published.workspace))
+            && !self.store.published_workspaces().is_ok_and(|live| {
+                live.contains(&(published.namespace.clone(), published.workspace.clone()))
+            })
         {
-            self.forget_credentials(&published.workspace);
+            self.forget_credentials(&published.namespace, &published.workspace);
         }
         tracing::info!(target = %target.display(), unmounted, "unpublished slot");
         Ok(Response::new(proto::NodeUnpublishVolumeResponse {}))
@@ -960,8 +991,9 @@ mod tests {
     async fn a_shared_watcher_stops_only_when_its_last_volume_goes() {
         let (_dir, node) = node();
         let handle = tokio::spawn(std::future::pending::<()>());
+        let key = KubimoNode::slot_key("platform", "bmow-shared");
         node.lock_watchers().insert(
-            "bmow-shared".to_string(),
+            key.clone(),
             Watcher {
                 handle,
                 volumes: ["vol-runner".to_string(), "vol-cache".to_string()]
@@ -970,24 +1002,24 @@ mod tests {
             },
         );
 
-        node.stop_watcher("vol-cache", "bmow-shared");
+        node.stop_watcher("vol-cache", "platform", "bmow-shared");
         let watchers = node.lock_watchers();
         let watcher = watchers
-            .get("bmow-shared")
+            .get(&key)
             .expect("the runner still needs the watcher");
         assert!(!watcher.handle.is_finished());
         assert_eq!(watcher.volumes.len(), 1);
         drop(watchers);
 
-        node.stop_watcher("vol-runner", "bmow-shared");
-        assert!(!node.lock_watchers().contains_key("bmow-shared"));
+        node.stop_watcher("vol-runner", "platform", "bmow-shared");
+        assert!(!node.lock_watchers().contains_key(&key));
     }
 
     /// Unpublishing a volume that was never watched must not disturb anything.
     #[tokio::test]
     async fn stopping_an_unknown_volume_is_a_no_op() {
         let (_dir, node) = node();
-        node.stop_watcher("vol-unknown", "bmow-absent");
+        node.stop_watcher("vol-unknown", "platform", "bmow-absent");
         assert!(node.lock_watchers().is_empty());
     }
 

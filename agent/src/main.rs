@@ -324,7 +324,7 @@ fn create_slot(
     limit_bytes: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = SlotStore::new(SlotLayout::new(data_root));
-    let resolved = store.resolve_or_create(workspace, namespace)?;
+    let resolved = store.resolve_or_create(namespace, workspace)?;
     let dir = store.layout().slot_dir(&resolved.id);
     if resolved.created {
         // Order matters: stamp the project id before anything is written,
