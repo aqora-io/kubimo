@@ -496,12 +496,6 @@ impl KubimoNode {
         }
     }
 
-    /// Prepare the slot backing `workspace` and return its directory.
-    ///
-    /// Quota and ownership are applied only when the slot is first created:
-    /// re-stamping a project id on every publish would be wasted work, and
-    /// re-chowning could stomp on files the tenant deliberately made
-    /// more restrictive.
     /// Record where a pooled workspace actually lives, on the CR.
     ///
     /// Without this, the only way to find out which node holds a workspace's

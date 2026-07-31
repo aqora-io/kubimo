@@ -193,7 +193,6 @@ fn sandbox_runtime_class() -> Option<String> {
     Some("gvisor".to_string())
 }
 
-/// Name of the CSI driver the node agent registers as.
 pub(crate) fn runner_port(runner: &Runner) -> i32 {
     match runner.spec.command {
         RunnerCommand::Render => 8080,

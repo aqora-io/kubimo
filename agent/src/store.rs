@@ -195,12 +195,13 @@ impl SlotStore {
     /// Forget that `workspace`'s slot was flushed, because it is about to
     /// change.
     ///
-    /// Called on every publish, so the marker means "flushed *and* untouched
-    /// since" rather than merely "flushed at some point". Without it a slot
-    /// mounted twice — a cache job beside a runner — keeps the marker written
-    /// when the first mount ended, and if the second one's final flush then
-    /// fails, the reaper would read a stale marker as permission to evict work
-    /// that never reached S3.
+    /// Cleared at the *start* of every flush attempt — not on publish — so a
+    /// flush that then fails can never leave a stale marker behind, and the
+    /// marker means "the last flush succeeded" rather than merely "flushed at
+    /// some point". Without it a slot mounted twice — a cache job beside a
+    /// runner — keeps the marker written when the first mount ended, and if the
+    /// second one's final flush then fails, the reaper would read a stale marker
+    /// as permission to evict work that never reached S3.
     pub fn clear_flushed(&self, namespace: &str, workspace: &str) -> Result<(), StoreError> {
         validate_workspace_name(namespace)?;
         validate_workspace_name(workspace)?;
