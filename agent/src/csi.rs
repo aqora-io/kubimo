@@ -228,6 +228,11 @@ impl KubimoNode {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn store(&self) -> &SlotStore {
+        &self.store
+    }
+
     async fn client_for(&self, namespace: &str) -> Option<kubimo::Client> {
         self.clients.get(namespace).await
     }
@@ -585,108 +590,141 @@ impl KubimoNode {
         Ok(restored)
     }
 
+    /// Resolve the slot for `workspace`, provisioning it on first creation, and
+    /// return it together with its directory.
+    ///
+    /// The returned [`crate::store::ResolvedSlot`] is authoritative: the caller
+    /// must not look the slot up again, since a concurrent first publish could
+    /// otherwise observe a *different* slot between the two reads — the very
+    /// split that would bind-mount one directory while the publish record named
+    /// another. Callers therefore hold [`SlotStore::lock_for`] across this.
     async fn prepare_slot(
         &self,
-        workspace: &str,
         namespace: &str,
+        workspace: &str,
         limit_bytes: u64,
         archive: Option<&crate::hydrate::ArchiveLocation>,
         seed: Option<&crate::hydrate::ArchiveLocation>,
-    ) -> Result<PathBuf, Status> {
+    ) -> Result<(crate::store::ResolvedSlot, PathBuf), Status> {
         let resolved = self
             .store
             .resolve_or_create(namespace, workspace)
             .map_err(|err| Status::internal(format!("resolving slot: {err}")))?;
         let dir = self.store.layout().slot_dir(&resolved.id);
-        if resolved.created {
-            let quotas_enforced = quota::project_quota_enforced(self.store.layout().root())
-                .map_err(|err| Status::internal(format!("checking quota support: {err}")))?;
-            match (quotas_enforced, self.allow_unquotaed_slots) {
-                (true, _) => {
-                    // Stamp the project before anything is written: inodes
-                    // created beforehand keep the old project and escape
-                    // accounting.
-                    quota::assign_project(&dir, resolved.project_id)
-                        .map_err(|err| Status::internal(format!("assigning project: {err}")))?;
-                    quota::set_project_limit(
-                        self.store.layout().root(),
-                        resolved.project_id,
-                        limit_bytes,
-                    )
-                    .map_err(|err| Status::internal(format!("setting quota: {err}")))?;
-                }
-                (false, true) => tracing::warn!(
+        if resolved.created
+            && let Err(err) = self
+                .provision_new_slot(
+                    namespace,
                     workspace,
-                    slot = %resolved.id,
-                    "filesystem has no project-quota enforcement and \
-                     --allow-unquotaed-slots is set: this slot has NO capacity limit \
-                     and can fill the node volume"
-                ),
-                (false, false) => {
-                    return Err(Status::failed_precondition(format!(
-                        "{} is not mounted with project-quota enforcement (`prjquota`), so slots \
-                         would have no capacity limit. Mount the data volume with `prjquota`, or \
-                         pass --allow-unquotaed-slots to accept unlimited slots.",
-                        self.store.layout().root().display()
-                    )));
-                }
+                    &resolved,
+                    &dir,
+                    limit_bytes,
+                    archive,
+                    seed,
+                )
+                .await
+        {
+            // A slot that failed provisioning must not survive: kubelet's retry finds
+            // `created: false` and skips quota, ownership and hydration entirely, so a
+            // transient error here would otherwise become a permanently unquotaed,
+            // never-hydrated slot. Dropping it makes the retry start over.
+            if let Err(remove_err) = self.store.remove_slot(namespace, workspace) {
+                tracing::error!(%remove_err, workspace, slot = %resolved.id,
+                    "could not drop a slot whose provisioning failed; a retry will reuse it as-is");
             }
-            std::fs::set_permissions(
-                &dir,
-                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
-            )
-            .map_err(|err| Status::internal(format!("setting slot permissions: {err}")))?;
-            std::os::unix::fs::chown(&dir, Some(SLOT_UID), Some(SLOT_GID))
-                .map_err(|err| Status::internal(format!("chowning slot: {err}")))?;
-            tracing::info!(
+            return Err(err);
+        }
+        Ok((resolved, dir))
+    }
+
+    /// Provision a freshly created slot: project quota, ownership, the venv
+    /// template, then hydration from S3.
+    ///
+    /// Split out from [`Self::prepare_slot`] so that a failure at any step is
+    /// rolled back in one place. Every step here runs only once, when the slot
+    /// is created; a half-provisioned slot left behind would be published as-is
+    /// on retry — unquotaed and empty — so the caller discards it on error.
+    #[allow(clippy::too_many_arguments)]
+    async fn provision_new_slot(
+        &self,
+        namespace: &str,
+        workspace: &str,
+        resolved: &crate::store::ResolvedSlot,
+        dir: &Path,
+        limit_bytes: u64,
+        archive: Option<&crate::hydrate::ArchiveLocation>,
+        seed: Option<&crate::hydrate::ArchiveLocation>,
+    ) -> Result<(), Status> {
+        let quotas_enforced = quota::project_quota_enforced(self.store.layout().root())
+            .map_err(|err| Status::internal(format!("checking quota support: {err}")))?;
+        match (quotas_enforced, self.allow_unquotaed_slots) {
+            (true, _) => {
+                // Stamp the project before anything is written: inodes
+                // created beforehand keep the old project and escape
+                // accounting.
+                quota::assign_project(dir, resolved.project_id)
+                    .map_err(|err| Status::internal(format!("assigning project: {err}")))?;
+                quota::set_project_limit(
+                    self.store.layout().root(),
+                    resolved.project_id,
+                    limit_bytes,
+                )
+                .map_err(|err| Status::internal(format!("setting quota: {err}")))?;
+            }
+            (false, true) => tracing::warn!(
                 workspace,
                 slot = %resolved.id,
-                project_id = resolved.project_id,
-                limit_bytes,
-                "allocated slot"
-            );
-            // Seed the venv from the node template before hydrating, so the
-            // runner does not have to build ~920MB of it from scratch. Failure
-            // is not fatal: `uv sync` will build one, just slowly.
-            match crate::venv::seed_from_template(self.store.layout().root(), &dir).await {
-                Ok(seeded) => tracing::info!(workspace, seeded, "venv template"),
-                Err(err) => tracing::warn!(%err, workspace, "could not seed venv template"),
-            }
-            // Only a freshly created slot is hydrated. Re-hydrating one that is
-            // already populated would overwrite the tenant's newer local edits
-            // with whatever was last synced — this is the path that makes
-            // reopening a workspace with a warm slot instant.
-            // Absent credentials leave both sources unreadable; the slot starts
-            // empty rather than the mount failing, matching a workspace that
-            // genuinely has no archive.
-            let s3 = self.s3_for(namespace, workspace);
-            let hydrated = self
-                .hydrate_new_slot(workspace, &resolved.id, &dir, archive, seed, s3.as_ref())
-                .await;
-            // A failed hydration must not leave the slot behind. Hydration only
-            // runs for a freshly created slot, so kubelet's retry would find one
-            // already present, skip hydration entirely, and publish an *empty*
-            // workspace — turning one transient S3 error into permanent, silent
-            // data loss whose only trace is a mount error that then succeeds.
-            // Dropping the slot makes the retry start over.
-            if hydrated.is_err()
-                && let Err(err) = self.store.remove_slot(namespace, workspace)
-            {
-                tracing::error!(
-                    %err,
-                    workspace,
-                    slot = %resolved.id,
-                    "could not drop a slot whose hydration failed; a retry will \
-                     publish it empty"
-                );
-            }
-            if hydrated? {
-                // Restored files land as root; the runner is uid 1000.
-                chown_tree(&dir)
-                    .map_err(|err| Status::internal(format!("chowning hydrated slot: {err}")))?;
+                "filesystem has no project-quota enforcement and \
+                 --allow-unquotaed-slots is set: this slot has NO capacity limit \
+                 and can fill the node volume"
+            ),
+            (false, false) => {
+                return Err(Status::failed_precondition(format!(
+                    "{} is not mounted with project-quota enforcement (`prjquota`), so slots \
+                     would have no capacity limit. Mount the data volume with `prjquota`, or \
+                     pass --allow-unquotaed-slots to accept unlimited slots.",
+                    self.store.layout().root().display()
+                )));
             }
         }
-        Ok(dir)
+        std::fs::set_permissions(
+            dir,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .map_err(|err| Status::internal(format!("setting slot permissions: {err}")))?;
+        std::os::unix::fs::chown(dir, Some(SLOT_UID), Some(SLOT_GID))
+            .map_err(|err| Status::internal(format!("chowning slot: {err}")))?;
+        tracing::info!(
+            workspace,
+            slot = %resolved.id,
+            project_id = resolved.project_id,
+            limit_bytes,
+            "allocated slot"
+        );
+        // Seed the venv from the node template before hydrating, so the
+        // runner does not have to build ~920MB of it from scratch. Failure
+        // is not fatal: `uv sync` will build one, just slowly.
+        match crate::venv::seed_from_template(self.store.layout().root(), dir).await {
+            Ok(seeded) => tracing::info!(workspace, seeded, "venv template"),
+            Err(err) => tracing::warn!(%err, workspace, "could not seed venv template"),
+        }
+        // Only a freshly created slot is hydrated. Re-hydrating one that is
+        // already populated would overwrite the tenant's newer local edits
+        // with whatever was last synced — this is the path that makes
+        // reopening a workspace with a warm slot instant.
+        // Absent credentials leave both sources unreadable; the slot starts
+        // empty rather than the mount failing, matching a workspace that
+        // genuinely has no archive.
+        let s3 = self.s3_for(namespace, workspace);
+        let restored = self
+            .hydrate_new_slot(workspace, &resolved.id, dir, archive, seed, s3.as_ref())
+            .await?;
+        if restored {
+            // Restored files land as root; the runner is uid 1000.
+            chown_tree(dir)
+                .map_err(|err| Status::internal(format!("chowning hydrated slot: {err}")))?;
+        }
+        Ok(())
     }
 }
 
@@ -778,42 +816,46 @@ impl Node for KubimoNode {
                 ))
             })?;
 
+        // Serialise everything that follows against any other publish of the
+        // same workspace on this node — a cache job is deliberately co-located
+        // with a live runner, so two first publishes race here. Held from slot
+        // creation through the publish record and the bind mount, so a
+        // concurrent first publish can neither allocate a second slot and orphan
+        // this one's directory, nor bind-mount one slot while the publish record
+        // names another. The reaper takes the same lock before reclaiming.
+        let lock = self.store.lock_for(&namespace, &workspace);
+        let _slot_guard = lock.lock().await;
+
         // Credentials for this workspace's archive, resolved by kubelet from the
         // volume's `nodePublishSecretRef` in the *pod's* namespace. Recorded
         // before anything touches S3, and kept afterwards because the matching
         // unpublish — where the final flush happens — carries no secrets.
         self.remember_credentials(&namespace, &workspace, &request.secrets);
-        let slot_dir = self
+        let (slot, slot_dir) = self
             .prepare_slot(
-                &workspace,
                 &namespace,
+                &workspace,
                 limit_bytes,
                 archive.as_ref(),
                 seed.as_ref(),
             )
             .await?;
-        if let Some(slot) = self
-            .store
-            .lookup(&namespace, &workspace)
-            .map_err(|err| Status::internal(format!("looking up slot: {err}")))?
-        {
-            self.publish_slot_status(&workspace, &namespace, &slot, limit_bytes, archive.as_ref())
-                .await;
-            if let Err(err) = self.store.record_publish(
-                &request.volume_id,
-                &crate::store::PublishedSlot {
-                    workspace: workspace.clone(),
-                    namespace: namespace.clone(),
-                    slot: slot.id,
-                    bucket: archive.as_ref().map(|a| a.bucket.clone()),
-                    key_prefix: archive.as_ref().and_then(|a| a.key_prefix.clone()),
-                },
-            ) {
-                // Not fatal: the mount is what the pod needs. Losing the record
-                // only means the flush on unpublish is skipped, and the slot
-                // keeps the data on disk either way.
-                tracing::warn!(%err, workspace, "could not record publish; flush on stop will be skipped");
-            }
+        self.publish_slot_status(&workspace, &namespace, &slot, limit_bytes, archive.as_ref())
+            .await;
+        if let Err(err) = self.store.record_publish(
+            &request.volume_id,
+            &crate::store::PublishedSlot {
+                workspace: workspace.clone(),
+                namespace: namespace.clone(),
+                slot: slot.id,
+                bucket: archive.as_ref().map(|a| a.bucket.clone()),
+                key_prefix: archive.as_ref().and_then(|a| a.key_prefix.clone()),
+            },
+        ) {
+            // Not fatal: the mount is what the pod needs. Losing the record
+            // only means the flush on unpublish is skipped, and the slot
+            // keeps the data on disk either way.
+            tracing::warn!(%err, workspace, "could not record publish; flush on stop will be skipped");
         }
         if let Some(archive) = archive.as_ref() {
             self.start_watcher(
@@ -1216,6 +1258,29 @@ mod tests {
         assert!(
             !walked.iter().any(|p| p.ends_with("secret")),
             "walked outside the slot through a symlink: {walked:?}"
+        );
+    }
+
+    /// A publish that fails provisioning must leave nothing behind: kubelet's
+    /// retry would otherwise find a slot with `created: false`, skip quota and
+    /// hydration entirely, and publish it with no capacity limit at all. A
+    /// tmpfs temp dir has no project quota, so with `allow_unquotaed_slots` off
+    /// provisioning refuses in its quota branch — the failure this exercises.
+    #[tokio::test]
+    async fn a_refused_publish_leaves_no_slot_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SlotStore::new(crate::slot::SlotLayout::new(dir.path()));
+        let node = KubimoNode::new("test-node".into(), store, 1024, false, None);
+        let err = node
+            .prepare_slot("tenant-a", "workspace", 1024, None, None)
+            .await
+            .expect_err("must refuse unquotaed slots");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            node.store()
+                .lookup("tenant-a", "workspace")
+                .unwrap()
+                .is_none()
         );
     }
 

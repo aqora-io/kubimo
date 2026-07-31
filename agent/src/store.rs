@@ -54,8 +54,18 @@ fn validate_workspace_name(name: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct SlotStore {
     layout: SlotLayout,
+    /// Per-`(namespace, workspace)` publish serialisation; see [`Self::lock_for`].
+    ///
+    /// Shared through the `Arc`, so every clone of a store — the CSI node's and
+    /// the reaper's — contends on the *same* lock for a given workspace rather
+    /// than two independent ones. A separate map per clone would defeat the
+    /// point: the reaper could reclaim a slot mid-publish.
+    locks: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    >,
 }
 
 /// A slot currently published to a runner pod, and where its archive lives.
@@ -83,11 +93,33 @@ pub struct ResolvedSlot {
 
 impl SlotStore {
     pub fn new(layout: SlotLayout) -> Self {
-        Self { layout }
+        Self {
+            layout,
+            locks: Default::default(),
+        }
     }
 
     pub fn layout(&self) -> &SlotLayout {
         &self.layout
+    }
+
+    /// The mutex serialising every operation on one workspace's slot on this node.
+    ///
+    /// Serialises slot creation, reclaim, and the final flush for one workspace
+    /// on this node. The map only ever grows, bounded by the number of
+    /// workspaces this node has served this agent's lifetime — the same order as
+    /// `s3_clients`.
+    pub fn lock_for(
+        &self,
+        namespace: &str,
+        workspace: &str,
+    ) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let key = format!("{namespace}/{workspace}");
+        let mut locks = match self.locks.lock() {
+            Ok(locks) => locks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        locks.entry(key).or_default().clone()
     }
 
     fn index_dir(&self) -> PathBuf {
@@ -610,6 +642,9 @@ impl SlotStore {
 
     /// Resolve the slot for `workspace` in `namespace`, allocating one if it
     /// has none.
+    ///
+    /// Callers that can race — concurrent publishes, the reaper — must hold
+    /// [`Self::lock_for`] across the call.
     pub fn resolve_or_create(
         &self,
         namespace: &str,
@@ -902,5 +937,27 @@ mod tests {
             published.contains(&("platform".to_string(), "bmow-xyz".to_string())),
             "another workspace's record must be left alone"
         );
+    }
+
+    /// Two first-time publishes of the same workspace, each holding the shared
+    /// per-workspace lock, must converge on one slot: the check-then-create in
+    /// [`SlotStore::resolve_or_create`] is only race-free when serialised this
+    /// way.
+    #[tokio::test]
+    async fn concurrent_first_publishes_share_one_slot() {
+        let (_tmp, store) = store();
+        let lock = store.lock_for("tenant-a", "workspace");
+        let (a, b) = tokio::join!(
+            async {
+                let _g = lock.lock().await;
+                store.resolve_or_create("tenant-a", "workspace").unwrap()
+            },
+            async {
+                let _g = lock.lock().await;
+                store.resolve_or_create("tenant-a", "workspace").unwrap()
+            }
+        );
+        assert_eq!(a.id, b.id);
+        assert!(a.created != b.created, "exactly one caller creates");
     }
 }
