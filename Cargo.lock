@@ -1864,6 +1864,7 @@ version = "0.1.34"
 dependencies = [
  "async-trait",
  "chrono",
+ "clap",
  "config",
  "futures",
  "json-patch",

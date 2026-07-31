@@ -5,18 +5,18 @@ use crate::command::cmd;
 use crate::context::Context;
 
 pub(crate) const WORKSPACE_DIR: &str = "/home/me/workspace";
-pub(crate) const MOUNT_DIR: &str = "/home/me";
+pub const MOUNT_DIR: &str = "/home/me";
 /// Where the init job mounts the workspace volume.
 pub(crate) const INIT_MOUNT_DIR: &str = "/mnt";
 pub(crate) const INIT_WORKSPACE_DIR: &str = "/mnt/workspace";
 
 #[inline]
-pub(crate) fn pod_name(workspace_name: &str) -> String {
+pub fn pod_name(workspace_name: &str) -> String {
     format!("{workspace_name}-indexer")
 }
 
 #[inline]
-pub(crate) fn service_account_name(workspace_name: &str) -> String {
+pub fn service_account_name(workspace_name: &str) -> String {
     format!("{workspace_name}-indexer")
 }
 
@@ -30,10 +30,7 @@ pub(crate) fn role_binding_name(workspace_name: &str) -> String {
     format!("{workspace_name}-indexer")
 }
 
-pub(crate) fn upload_args(
-    workspace: &Workspace,
-    watch: bool,
-) -> Result<Vec<String>, kubimo::Error> {
+pub fn upload_args(workspace: &Workspace, watch: bool) -> Result<Vec<String>, kubimo::Error> {
     let workspace_name = workspace.name()?;
     let mut args = vec!["upload".to_string()];
     if watch {
@@ -85,7 +82,7 @@ pub(crate) fn pod_env_from(pod: Option<&WorkspaceIndexerPod>) -> Option<Vec<EnvF
     pod.and_then(|pod| pod.env_from.clone())
 }
 
-pub(crate) fn env(workspace: &Workspace) -> Option<Vec<EnvVar>> {
+pub fn env(workspace: &Workspace) -> Option<Vec<EnvVar>> {
     pod_env(
         workspace
             .spec
@@ -95,7 +92,7 @@ pub(crate) fn env(workspace: &Workspace) -> Option<Vec<EnvVar>> {
     )
 }
 
-pub(crate) fn env_from(workspace: &Workspace) -> Option<Vec<EnvFromSource>> {
+pub fn env_from(workspace: &Workspace) -> Option<Vec<EnvFromSource>> {
     pod_env_from(
         workspace
             .spec

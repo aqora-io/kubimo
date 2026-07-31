@@ -11,14 +11,14 @@ pub(crate) fn workspace_label(workspace_name: &str) -> (String, String) {
     )
 }
 
-pub(crate) fn workspace_label_map(workspace_name: &str) -> BTreeMap<String, String> {
+pub fn workspace_label_map(workspace_name: &str) -> BTreeMap<String, String> {
     let (key, value) = workspace_label(workspace_name);
     [(key, value)].into_iter().collect()
 }
 
 /// Returns a required pod affinity on the workspace label so workspace pods
 /// are always scheduled onto the same node.
-pub(crate) fn workspace_affinity(workspace_name: &str) -> Affinity {
+pub fn workspace_affinity(workspace_name: &str) -> Affinity {
     let (key, value) = workspace_label(workspace_name);
     Affinity {
         pod_affinity: Some(PodAffinity {
