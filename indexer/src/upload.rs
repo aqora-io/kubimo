@@ -33,12 +33,12 @@ use tokio::{
     task::JoinSet,
 };
 
+use crate::disk;
 use crate::fingerprint::ContentCache;
 use crate::keys::{WorkspaceDirNameSet, WorkspaceFileUrlSet};
 use crate::python::{Notebook, get_marimo_notebook};
 use crate::s3::{CacheMarkers, S3Client, UploadError};
 use crate::watcher::{WaitError, Watcher};
-use crate::{disk, manifest};
 
 /// Everything the pipeline needs, without the binary's clap types so the node
 /// agent can drive it too.
@@ -943,7 +943,7 @@ async fn upload_manifest(
     workspace_dirs: &BTreeMap<String, WorkspaceDir>,
     upload_permits: &Semaphore,
 ) {
-    let manifest = manifest::build_manifest(&args.name, args.upload_content, workspace_dirs);
+    let manifest = kubimo::build_manifest(&args.name, args.upload_content, workspace_dirs);
     let url = match kubimo::manifest_url(bucket, args.key_prefix.as_deref()) {
         Ok(url) => url,
         Err(err) => {
