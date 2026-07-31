@@ -116,6 +116,7 @@ mod tests {
         test_compiles(workspace_mode_no_downgrade());
         test_compiles(budget_selector_not_empty());
         test_compiles(workspace_no_volume_with_name());
+        test_compiles(workspace_clone_not_pooled());
         test_compiles(runner_immutable_fields());
         test_compiles(runner_max_memory_greater_than_min());
         test_compiles(runner_max_cpu_greater_than_min());
