@@ -1,10 +1,10 @@
 pub mod budget;
 pub mod cache_job;
-pub(crate) mod indexer;
+pub mod indexer;
 pub(crate) mod ingress;
 pub mod runner;
 pub mod runner_status;
 pub(crate) mod slot_volume;
 pub mod workspace;
-pub(crate) mod workspace_affinity;
+pub mod workspace_affinity;
 pub mod workspace_directory;
