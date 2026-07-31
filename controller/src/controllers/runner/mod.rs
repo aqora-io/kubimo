@@ -81,8 +81,12 @@ impl Reconciler for RunnerReconciler {
         // would log a reconcile error every time the agent's drain or stale-mount sweep
         // deletes a runner, and on every manual pod delete — which is exactly when
         // someone is reading these logs.
+        //
+        // A 422 means the apply hit an immutable pod field; when apply_pod confirmed the
+        // known runtime-class drift it has already deleted the pod, and this requeue is
+        // what recreates it once the old one finishes terminating.
         if let Err(err) = applied {
-            if is_already_exists(&err) {
+            if is_already_exists(&err) || is_immutable_conflict(&err) {
                 return Ok(Action::requeue(Duration::from_secs(2)));
             }
             return Err(err);
@@ -101,6 +105,21 @@ fn is_already_exists(err: &kubimo::Error) -> bool {
     matches!(
         err,
         kubimo::Error::Kube(kubimo::kube::Error::Api(status)) if status.code == 409
+    )
+}
+
+/// A 422 from the API server — what an apply that tries to change an immutable
+/// field (e.g. a pod's `runtimeClassName`) returns, and one that never resolves
+/// on its own retry: the field stays wrong forever unless the object is
+/// replaced.
+///
+/// A 422 is also what any other validation failure returns, so this alone must
+/// not justify anything destructive: apply_pod confirms the actual drift
+/// against the live pod before deleting.
+fn is_immutable_conflict(err: &kubimo::Error) -> bool {
+    matches!(
+        err,
+        kubimo::Error::Kube(kubimo::kube::Error::Api(status)) if status.code == 422
     )
 }
 
@@ -136,4 +155,26 @@ pub async fn run(
         default_error_policy,
         ctx,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_422_reads_as_an_immutable_field_conflict() {
+        let invalid = kubimo::Error::Kube(kubimo::kube::Error::Api(
+            kubimo::kube::core::Status::failure("pod updates may not change fields", "Invalid")
+                .with_code(422)
+                .boxed(),
+        ));
+        assert!(is_immutable_conflict(&invalid));
+
+        let conflict = kubimo::Error::Kube(kubimo::kube::Error::Api(
+            kubimo::kube::core::Status::failure("still terminating", "Conflict")
+                .with_code(409)
+                .boxed(),
+        ));
+        assert!(!is_immutable_conflict(&conflict));
+    }
 }
