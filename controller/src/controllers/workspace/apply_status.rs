@@ -5,6 +5,7 @@ use kubimo::k8s_openapi::jiff::Timestamp;
 use kubimo::{Workspace, WorkspaceMode, WorkspaceStatus, prelude::*};
 
 use crate::context::Context;
+use crate::controllers::workspace_python_runtime::fetch_workspace_python_runtime;
 
 use super::WorkspaceReconciler;
 
@@ -49,17 +50,20 @@ impl WorkspaceReconciler {
             // until their workspace is Ready, and a brand-new pooled workspace
             // has no archive by definition, so gating on one would stop it ever
             // starting its first runner.
-            let workspace =
-                update_workspace_status(workspace.clone(), None, StatusKind::PooledReady, mode);
+            let mut status = build_workspace_status(workspace, None, StatusKind::PooledReady, mode);
+            status.python_runtime = Some(fetch_workspace_python_runtime(ctx, workspace).await?);
+            let mut workspace = workspace.clone();
+            workspace.status = Some(status);
             ctx.api_namespaced::<Workspace>(namespace)
                 .patch_status(&workspace)
                 .await?;
             return Ok(());
         }
-        let workspace =
+
+        let mut status =
             if let Some(job) = ctx.api_namespaced::<Job>(namespace).get_opt(name).await? {
-                update_workspace_status(
-                    workspace.clone(),
+                build_workspace_status(
+                    workspace,
                     job_last_transition_time(&job),
                     StatusKind::from_job(&job),
                     mode,
@@ -82,8 +86,14 @@ impl WorkspaceReconciler {
                     // Not Complete unless its job was created
                     StatusKind::JobNotComplete
                 };
-                update_workspace_status(workspace.clone(), None, status, mode)
+                build_workspace_status(workspace, None, status, mode)
             };
+
+        status.python_runtime = Some(fetch_workspace_python_runtime(ctx, workspace).await?);
+
+        let mut workspace = workspace.clone();
+        workspace.status = Some(status);
+
         ctx.api_namespaced::<Workspace>(namespace)
             .patch_status(&workspace)
             .await?;
@@ -102,12 +112,15 @@ impl WorkspaceReconciler {
         }
         let namespace = workspace.require_namespace()?;
         let mode = workspace.effective_mode(ctx.config.default_workspace_mode);
-        let workspace = update_workspace_status(
-            workspace.clone(),
+        let mut status = build_workspace_status(
+            workspace,
             None,
             StatusKind::BudgetExceeded(reason.to_owned()),
             mode,
         );
+        status.python_runtime = Some(fetch_workspace_python_runtime(ctx, workspace).await?);
+        let mut workspace = workspace.clone();
+        workspace.status = Some(status);
         ctx.api_namespaced::<Workspace>(namespace)
             .patch_status(&workspace)
             .await?;
@@ -154,12 +167,12 @@ fn job_last_transition_time(job: &Job) -> Option<Time> {
         .cloned()
 }
 
-fn update_workspace_status(
-    mut workspace: Workspace,
+fn build_workspace_status(
+    workspace: &Workspace,
     last_transition_time: Option<Time>,
     kind: StatusKind,
     mode: WorkspaceMode,
-) -> Workspace {
+) -> WorkspaceStatus {
     let last_transition_time = last_transition_time
         .or(workspace.metadata.creation_timestamp.clone())
         .unwrap_or_else(|| Time(Timestamp::now()));
@@ -227,10 +240,9 @@ fn update_workspace_status(
     // re-writing it every reconcile is idempotent and self-pinning: once set,
     // changing `KUBIMO__DEFAULT_WORKSPACE_MODE` can never re-mode this object
     // and orphan its PVC.
-    workspace.status = Some(WorkspaceStatus {
+    WorkspaceStatus {
         conditions: Some(conditions),
         mode: Some(mode),
         ..Default::default()
-    });
-    workspace
+    }
 }

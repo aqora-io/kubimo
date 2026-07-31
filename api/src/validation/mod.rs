@@ -128,6 +128,18 @@ pub fn workspace_no_new_dedicated() -> Rule {
         .field_path(".spec.mode")
 }
 
+pub fn workspace_immutable_fields() -> Rule {
+    Rule::new(include_str!("./workspace_immutable_fields.cel"))
+        .message("workspace is immutable")
+        .field_path(".spec.pythonRuntime")
+}
+
+pub fn workspace_python_runtime_exclusive() -> Rule {
+    Rule::new(include_str!("./workspace_python_runtime_exclusive.cel"))
+        .message("pythonRuntime and cloneWorkspaceName are mutually exclusive")
+        .field_path(".spec.pythonRuntime")
+}
+
 pub fn runner_immutable_fields() -> Rule {
     Rule::new(include_str!("./runner_immutable_fields.cel"))
         .message("workspace is immutable")
@@ -183,6 +195,8 @@ mod tests {
         test_compiles(workspace_no_volume_with_name());
         test_compiles(workspace_clone_not_pooled());
         test_compiles(workspace_no_new_dedicated());
+        test_compiles(workspace_immutable_fields());
+        test_compiles(workspace_python_runtime_exclusive());
         test_compiles(runner_immutable_fields());
         test_compiles(runner_max_memory_greater_than_min());
         test_compiles(runner_max_cpu_greater_than_min());

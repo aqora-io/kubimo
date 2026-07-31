@@ -20,6 +20,7 @@ use kubimo::{
 use crate::backoff::default_error_policy;
 use crate::context::Context;
 use crate::controllers::workspace_affinity;
+use crate::controllers::workspace_python_runtime::get_workspace_python_runtime;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 
@@ -68,11 +69,13 @@ impl Reconciler for RunnerReconciler {
             Some(workspace) => workspace,
         };
 
+        let python_runtime = get_workspace_python_runtime(&workspace)?;
+
         let applied = futures::future::try_join_all([
             self.apply_owner_reference(ctx, runner)
                 .map_ok(|_| false)
                 .boxed(),
-            self.apply_pod(ctx, runner, &workspace)
+            self.apply_pod(ctx, runner, &workspace, python_runtime)
                 .map_ok(|applied| matches!(applied, apply_pod::PodApply::Replaced))
                 .boxed(),
             self.apply_service(ctx, runner).map_ok(|_| false).boxed(),
