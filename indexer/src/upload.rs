@@ -37,7 +37,7 @@ use crate::disk;
 use crate::fingerprint::ContentCache;
 use crate::keys::{WorkspaceDirNameSet, WorkspaceFileUrlSet};
 use crate::python::{Notebook, get_marimo_notebook};
-use crate::s3::{CacheMarkers, S3Client, UploadError};
+use crate::s3::{CacheMarkers, DownloadError, S3Client, UploadError};
 use crate::watcher::{WaitError, Watcher};
 
 /// Everything the pipeline needs, without the binary's clap types so the node
@@ -52,6 +52,10 @@ pub struct UploadOptions {
     pub key_prefix: Option<String>,
     pub watch: bool,
     pub upload_content: bool,
+    /// Index a workspace whose directory is genuinely empty, overwriting its
+    /// archive. Off by default: see [`empty_walk_is_safe`] for why an empty
+    /// walk is otherwise refused.
+    pub allow_empty: bool,
     pub watch_debounce_millis: u64,
     /// Ceiling on how long a burst of events may defer a sync.
     pub watch_max_wait_millis: u64,
@@ -755,6 +759,93 @@ pub struct RunResult {
     names: BTreeSet<String>,
     urls: BTreeSet<Url>,
     paths: BTreeSet<PathBuf>,
+    /// The cycle refused to touch the archive because the walk came back empty.
+    /// One-shot runs turn this into a non-zero exit; the watcher keeps going.
+    pub refused: bool,
+}
+
+/// What the archive looked like before this cycle, as far as S3 can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestProbe {
+    /// No manifest under this prefix — the workspace has never been indexed.
+    Absent,
+    /// A manifest that records no directories.
+    Empty,
+    /// A manifest with directories in it: there is an archive here.
+    NonEmpty,
+    /// The manifest could not be fetched or parsed. Treated as "there might be
+    /// an archive here", because we cannot prove otherwise.
+    Unreadable,
+}
+
+/// May a cycle whose walk produced nothing go on to rewrite the archive?
+///
+/// The clean sweep is `previous − current`, so a walk that yields nothing marks
+/// *everything* stale: every `WorkspaceDirectory` CR is deleted, every object
+/// under the prefix is deleted, and `upload_manifest` writes an empty manifest
+/// first. An unmounted volume, a hydration that silently produced nothing, and
+/// a user who genuinely deleted every file are indistinguishable from here —
+/// and only one of the three is recoverable.
+///
+/// So an empty walk may only proceed when there is demonstrably nothing to
+/// lose. Checking the `WorkspaceDirectory` CRs alone is not enough: a workspace
+/// can have an S3 archive and no CRs (production has several), and for those
+/// `previous` is empty while the manifest is not. Hence the probe.
+fn empty_walk_is_safe(
+    previous_names: &BTreeSet<String>,
+    previous_urls: &BTreeSet<Url>,
+    manifest: ManifestProbe,
+) -> bool {
+    if !previous_names.is_empty() || !previous_urls.is_empty() {
+        return false;
+    }
+    // `Absent` is the never-indexed workspace writing its first manifest, which
+    // must keep working. `Unreadable` fails closed: an archive we cannot read is
+    // exactly the one we least want to overwrite.
+    matches!(manifest, ManifestProbe::Absent | ManifestProbe::Empty)
+}
+
+/// Fetch the current manifest to find out whether an archive exists. Only
+/// called when the walk produced nothing, so it costs nothing on the hot path.
+async fn probe_manifest(args: &UploadOptions, s3: &S3Client) -> ManifestProbe {
+    let Some(bucket) = args.bucket.as_deref() else {
+        // No bucket configured means no archive to destroy; the CR check alone
+        // decides.
+        return ManifestProbe::Absent;
+    };
+    let url = match kubimo::manifest_url(bucket, args.key_prefix.as_deref()) {
+        Ok(url) => url,
+        Err(err) => {
+            tracing::error!("Error building manifest url: {err}");
+            return ManifestProbe::Unreadable;
+        }
+    };
+    match s3.get_bytes(&url).await {
+        Ok(bytes) => match serde_json::from_slice::<kubimo::WorkspaceManifest>(&bytes) {
+            Ok(manifest) if manifest.directories.is_empty() => ManifestProbe::Empty,
+            Ok(_) => ManifestProbe::NonEmpty,
+            Err(err) => {
+                tracing::error!("Could not parse manifest at {url}: {err}");
+                ManifestProbe::Unreadable
+            }
+        },
+        Err(DownloadError::S3(object_store::Error::NotFound { .. })) => ManifestProbe::Absent,
+        Err(err) => {
+            tracing::error!("Could not read manifest at {url}: {err}");
+            ManifestProbe::Unreadable
+        }
+    }
+}
+
+/// Materialize the watch set, which is shared with the walk workers.
+async fn take_paths(paths: Arc<Mutex<BTreeSet<PathBuf>>>) -> BTreeSet<PathBuf> {
+    match Arc::try_unwrap(paths) {
+        Ok(paths) => paths.into_inner(),
+        Err(paths) => {
+            tracing::warn!("Error getting paths ownership: {:?}", paths);
+            paths.lock().await.clone()
+        }
+    }
 }
 
 pub async fn run(
@@ -858,6 +949,32 @@ pub async fn run(
             .push(entry);
     }
     let names = workspace_dirs.keys().cloned().collect::<BTreeSet<_>>();
+    if names.is_empty()
+        && !args.allow_empty
+        && !empty_walk_is_safe(
+            previous_names,
+            previous_urls,
+            probe_manifest(args, s3).await,
+        )
+    {
+        tracing::error!(
+            workspace = %args.name,
+            directory = %args.directory.display(),
+            previous_dirs = previous_names.len(),
+            previous_objects = previous_urls.len(),
+            "Walk produced no entries but this workspace has an archive; refusing to \
+             delete it. Pass --allow-empty to index a workspace that is genuinely empty."
+        );
+        return RunResult {
+            // Hand the *previous* sets straight back. Returning the empty walked
+            // sets would disarm the guard: with nothing recorded as previous, the
+            // next cycle sails through and overwrites the archive after all.
+            names: previous_names.clone(),
+            urls: previous_urls.clone(),
+            paths: take_paths(paths).await,
+            refused: true,
+        };
+    }
     let names_to_delete = previous_names
         .difference(&names)
         .cloned()
@@ -911,13 +1028,7 @@ pub async fn run(
         tracing::error!("Error waiting for tasks: {}", err);
     }
     update_workspace_storage_status(args, client).await;
-    let paths = match Arc::try_unwrap(paths) {
-        Ok(paths) => paths.into_inner(),
-        Err(paths) => {
-            tracing::warn!("Error getting paths ownership: {:?}", paths);
-            paths.lock().await.clone()
-        }
-    };
+    let paths = take_paths(paths).await;
     // Drop fingerprints for files that no longer exist, so a watcher running
     // for days does not accumulate an entry per file ever seen. `paths` holds
     // absolute paths (it doubles as the watch set) while the cache is keyed
@@ -928,7 +1039,12 @@ pub async fn run(
         .map(Path::to_path_buf)
         .collect();
     content_cache.retain_paths(&live).await;
-    RunResult { names, urls, paths }
+    RunResult {
+        names,
+        urls,
+        paths,
+        refused: false,
+    }
 }
 
 /// Build and upload the archive manifest for the current batch. Best-effort:
@@ -1102,6 +1218,112 @@ mod tests {
                 .await
                 .is_none(),
             "an edited file must miss"
+        );
+    }
+
+    fn names(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn urls(items: &[&str]) -> BTreeSet<Url> {
+        items.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
+    /// The ordinary shape of the disaster: a workspace that has been indexed
+    /// before, whose volume is now unmounted. The walk returns nothing, and
+    /// without this check every CR and every object would be swept as stale.
+    #[test]
+    fn an_empty_walk_is_refused_when_directory_crs_exist() {
+        assert!(!empty_walk_is_safe(
+            &names(&["bmowd-abc"]),
+            &BTreeSet::new(),
+            ManifestProbe::Absent,
+        ));
+    }
+
+    /// Same disaster reached from the other side: content objects are known
+    /// even though no directory CR is.
+    #[test]
+    fn an_empty_walk_is_refused_when_content_urls_exist() {
+        assert!(!empty_walk_is_safe(
+            &BTreeSet::new(),
+            &urls(&["s3://bucket/prefix/abc"]),
+            ManifestProbe::Absent,
+        ));
+    }
+
+    /// The case a CR-only check misses. A workspace can have an S3 archive and
+    /// no `WorkspaceDirectory` CRs at all — production has several, and they
+    /// are precisely the ones a mass re-index touches. `previous` is empty for
+    /// them, so only the manifest reveals that there is something to lose.
+    #[test]
+    fn an_empty_walk_is_refused_when_the_manifest_has_directories() {
+        assert!(!empty_walk_is_safe(
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            ManifestProbe::NonEmpty,
+        ));
+    }
+
+    /// The guard must not break the never-indexed workspace writing its first,
+    /// legitimately empty manifest — that is how a freshly created workspace
+    /// gets an archive at all.
+    #[test]
+    fn a_never_indexed_workspace_may_still_write_its_first_empty_manifest() {
+        assert!(empty_walk_is_safe(
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            ManifestProbe::Absent,
+        ));
+        // Re-indexing a workspace that is still empty is likewise a no-op, not
+        // a refusal.
+        assert!(empty_walk_is_safe(
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            ManifestProbe::Empty,
+        ));
+    }
+
+    /// Credentials expiring or the network faltering must not read as "there
+    /// is no archive here". Failing open would make a transient S3 error
+    /// delete a workspace.
+    #[test]
+    fn an_unreadable_manifest_fails_closed() {
+        assert!(!empty_walk_is_safe(
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            ManifestProbe::Unreadable,
+        ));
+    }
+
+    /// The whole hazard rests on `edit_paths` dropping the root: `walk` does
+    /// emit the directory itself, and the strip-to-empty check at the top of
+    /// `edit_paths` is what turns an empty workspace into *zero* downstream
+    /// entries rather than one. That is what makes `names` empty, which is what
+    /// makes the clean sweep delete everything. Pin it, or a future change to
+    /// that skip silently re-arms the destruction.
+    #[tokio::test]
+    async fn an_empty_directory_yields_no_indexable_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut join_set = JoinSet::new();
+        let rx = walk(
+            &mut join_set,
+            WalkOptions {
+                directory: dir.path().to_path_buf(),
+                include_gitignored: false,
+                exclude_hidden: false,
+                git_dir: None,
+            },
+            16,
+        );
+        let (mut rx, _scanned) = edit_paths(&mut join_set, rx, dir.path().to_path_buf(), 16);
+        let mut count = 0;
+        while rx.recv().await.is_some() {
+            count += 1;
+        }
+        assert_eq!(
+            count, 0,
+            "an empty directory must yield no indexable paths, only the root that edit_paths drops"
         );
     }
 }

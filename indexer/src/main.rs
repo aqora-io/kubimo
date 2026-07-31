@@ -40,6 +40,12 @@ struct UploadArgs {
     watch: bool,
     #[arg(long, short)]
     upload_content: bool,
+    /// Index a workspace whose directory is genuinely empty. Without this, a
+    /// walk that finds nothing while an archive exists is refused rather than
+    /// deleting that archive — an unmounted volume looks exactly like an empty
+    /// one from in here.
+    #[arg(long)]
+    allow_empty: bool,
     #[arg(long, default_value_t = 500)]
     watch_debounce_millis: u64,
     /// Ceiling on how long a burst of events may defer a sync. Without one a
@@ -64,6 +70,7 @@ impl UploadArgs {
             key_prefix: self.key_prefix.clone(),
             watch: self.watch,
             upload_content: self.upload_content,
+            allow_empty: self.allow_empty,
             watch_debounce_millis: self.watch_debounce_millis,
             watch_max_wait_millis: self.watch_max_wait_millis,
             watch_poll_millis: self.watch_poll_millis,
@@ -158,7 +165,7 @@ async fn main() {
                 )
                 .await;
             } else {
-                let _ = upload::run(
+                let result = upload::run(
                     &args.to_options(),
                     // One-shot: nothing to carry over between runs.
                     &indexer::fingerprint::ContentCache::new(),
@@ -169,6 +176,14 @@ async fn main() {
                     &previous_urls,
                 )
                 .await;
+                // A refusal is not a crash, but it is not a successful index
+                // either. Exiting non-zero is what lets a caller driving many
+                // of these tell "indexed" from "declined to destroy an
+                // archive" — the watcher, by contrast, keeps running and
+                // retries on the next event.
+                if result.refused {
+                    std::process::exit(2);
+                }
             }
         }
         Command::Clean(args) => {
