@@ -26,6 +26,16 @@ fn default_runner_status_check_interval_secs() -> u64 {
     10
 }
 
+/// Both of a runner's long-lived streams — the kernel websocket and the
+/// code-mode SSE endpoint (`/api/kernel/execute`, what `marimo pair` drives) —
+/// carry no traffic for as long as a cell takes to run. ingress-nginx defaults
+/// its proxy timeouts to 60s, which cuts the connection mid-cell; marimo's
+/// editor papers over it by reconnecting, but an agent just loses its result.
+#[inline]
+fn default_runner_proxy_timeout_secs() -> u32 {
+    3600
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "method")]
 pub enum StatusCheckResolution {
@@ -85,6 +95,8 @@ pub struct Config {
     pub runner_hosts: Vec<String>,
     #[serde(default)]
     pub cluster_issuer: Option<String>,
+    #[serde(default = "default_runner_proxy_timeout_secs")]
+    pub runner_proxy_timeout_secs: u32,
     #[serde(default)]
     pub runner_status: StatusCheck,
 }
