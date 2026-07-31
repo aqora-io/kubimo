@@ -56,6 +56,8 @@ spec:
             # stages from `kubimo-controller.marimoImage`.
             - name: KUBIMO__MARIMO_IMAGE
               value: {{ include "kubimo-controller.marimoImage" . | quote }}
+            - name: KUBIMO__MARIMO_CONDA_IMAGE
+              value: {{ include "kubimo-controller.marimoCondaImage" . | quote }}
             {{- with .Values.controller }}
             {{- if .rustLog }}
             - name: RUST_LOG

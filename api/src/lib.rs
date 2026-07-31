@@ -40,8 +40,9 @@ pub use crd::{
     Workspace, WorkspaceArchiveStatus, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory,
     WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo,
     WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField,
-    WorkspaceIndexer, WorkspaceIndexerPod, WorkspaceMode, WorkspaceRestoreFrom,
-    WorkspaceSlotStatus, WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus, all_crds,
+    WorkspaceIndexer, WorkspaceIndexerPod, WorkspaceMode, WorkspacePythonRuntime,
+    WorkspaceRestoreFrom, WorkspaceSlotStatus, WorkspaceSpec, WorkspaceStatus,
+    WorkspaceStorageStatus, all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;
