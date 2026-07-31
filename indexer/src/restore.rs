@@ -61,11 +61,13 @@ pub struct ArchiveOrigin {
 
 impl ArchiveOrigin {
     fn base(&self) -> String {
-        format!(
-            "s3://{}/{}",
-            self.bucket,
-            self.key_prefix.as_deref().unwrap_or("")
-        )
+        let mut prefix = self.key_prefix.as_deref().unwrap_or("").to_string();
+        // Anchor at a path boundary: without the trailing slash, `mine` would
+        // also admit `mine-other/…` as its own content.
+        if !prefix.is_empty() && !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+        format!("s3://{}/{}", self.bucket, prefix)
     }
 
     fn check(&self, url: &Url) -> Result<(), PlanError> {
@@ -542,5 +544,27 @@ mod tests {
         }]);
         let plan = plan_restore(&manifest, &origin()).unwrap();
         assert_eq!(plan.files[0].modified, Some(modified));
+    }
+
+    #[test]
+    fn a_prefix_without_a_trailing_slash_still_rejects_sibling_prefixes() {
+        let origin = ArchiveOrigin {
+            bucket: "bucket".to_string(),
+            key_prefix: Some("workspace/mine".to_string()),
+        };
+        assert!(
+            plan_restore(
+                &manifest_pointing_at("s3://bucket/workspace/mine/notebook.py"),
+                &origin
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            plan_restore(
+                &manifest_pointing_at("s3://bucket/workspace/mine-other/secret.py"),
+                &origin
+            ),
+            Err(PlanError::ForeignContent { .. })
+        ));
     }
 }
