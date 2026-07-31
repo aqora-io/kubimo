@@ -12,10 +12,13 @@ metadata:
 # `resourceNames: [<workspace>]`. One agent serves every slot on its node, so it
 # necessarily needs access to every workspace it might host.
 #
-# The compensating controls are: the agent runs in its own namespace (never
-# alongside tenant workloads), it is the only thing holding S3 credentials, and
-# per-slot scoped credentials (STS AssumeRole with an `s3:prefix` condition)
-# should replace the node-wide key before this is enabled in production.
+# The compensating control is that the agent has no Secrets RBAC of its own:
+# credentials reach it per-mount, as a per-workspace Secret named by the
+# volume's `nodePublishSecretRef`, resolved by kubelet in the *runner pod's*
+# namespace and handed to NodePublishVolume, so the agent holds them only in
+# memory while a slot is published. Per-slot scoped credentials (STS
+# AssumeRole with an `s3:prefix` condition) should still gate flipping the
+# default workspace mode to Pooled in production.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

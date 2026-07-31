@@ -106,7 +106,6 @@ affinity: {}
 # pods through a CSI node plugin.
 agent:
   enabled: false
-  driverName: kubimo.aqora.io
   image:
     repository: ghcr.io/aqora-io/kubimo-agent
     pullPolicy: IfNotPresent
