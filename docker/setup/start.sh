@@ -130,6 +130,8 @@ if [[ "$CMD" == "edit" ]]; then
   # get for genuinely missing packages.
   uv_sync_workspace &
   ensure_marimo_venv_config
+  export MARIMO_IN_SECURE_ENVIRONMENT=true
+  export MARIMO_SESSION_COOKIE_SECURE=true
   exec marimo \
     "${common_flags[@]}" \
     --yes \
@@ -146,6 +148,8 @@ elif [[ "$CMD" == "run" ]]; then
   # Same reasoning as `edit` above.
   uv_sync_workspace &
   ensure_marimo_venv_config
+  export MARIMO_IN_SECURE_ENVIRONMENT=true
+  export MARIMO_SESSION_COOKIE_SECURE=true
   exec marimo \
     "${common_flags[@]}" \
     --yes \
