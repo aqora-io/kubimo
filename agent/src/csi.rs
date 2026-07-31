@@ -425,17 +425,7 @@ impl KubimoNode {
     /// Never fails the unpublish. The slot keeps its data on disk either way, so
     /// a failed flush is recoverable — whereas refusing to unmount would leave
     /// the pod stuck Terminating and block the node from draining.
-    async fn flush_published(&self, volume_id: &str) {
-        let published = match self.store.lookup_publish(volume_id) {
-            Ok(Some(published)) => published,
-            // Unknown volume: the agent restarted, or this workspace was never
-            // published by us. Nothing to flush.
-            Ok(None) => return,
-            Err(err) => {
-                tracing::warn!(%err, "could not read publish record; skipping flush");
-                return;
-            }
-        };
+    async fn flush_published_slot(&self, published: &crate::store::PublishedSlot) {
         // No bucket recorded means the workspace has no archive configured;
         // there is nowhere to flush to.
         let Some(bucket) = published.bucket.clone() else {
@@ -445,7 +435,7 @@ impl KubimoNode {
             bucket,
             key_prefix: published.key_prefix.clone(),
         };
-        let workspace = published.workspace;
+        let workspace = published.workspace.as_str();
         let Some(client) = self.client_for(&published.namespace).await else {
             // Without cluster access there is no way to refresh the directory
             // CRs, and the upload path needs one. Say so: this is the last
@@ -458,7 +448,7 @@ impl KubimoNode {
             );
             return;
         };
-        if self.workspace_is_going_away(&client, &workspace).await {
+        if self.workspace_is_going_away(&client, workspace).await {
             tracing::info!(
                 workspace,
                 "workspace is deleted or terminating; skipping flush"
@@ -469,7 +459,7 @@ impl KubimoNode {
         // set remembered when the volume was published. Losing it — an agent
         // container restart between publish and unpublish — must be loud: the
         // slot's newest work is on disk but cannot be persisted.
-        let Some(s3) = self.s3_for(&published.namespace, &workspace) else {
+        let Some(s3) = self.s3_for(&published.namespace, workspace) else {
             tracing::error!(
                 workspace,
                 "no S3 credentials for this workspace, so its final flush is being skipped; \
@@ -485,10 +475,10 @@ impl KubimoNode {
         // the second mount carries on writing; if that mount's own flush then
         // failed, an untouched marker would read as permission to evict work
         // that never reached S3.
-        if let Err(err) = self.store.clear_flushed(&published.namespace, &workspace) {
+        if let Err(err) = self.store.clear_flushed(&published.namespace, workspace) {
             tracing::warn!(%err, workspace, "could not clear the flush marker");
         }
-        if let Err(err) = crate::hydrate::flush_slot(&dir, &workspace, &archive, &client, &s3).await
+        if let Err(err) = crate::hydrate::flush_slot(&dir, workspace, &archive, &client, &s3).await
         {
             tracing::error!(%err, workspace, "flush failed; slot data is still on disk");
             return;
@@ -497,7 +487,7 @@ impl KubimoNode {
         // evict a slot without this marker, precisely so a failed flush — or
         // the deliberate skip above when a workspace is being deleted — keeps
         // the only copy of the tenant's newest work on disk.
-        if let Err(err) = self.store.mark_flushed(&published.namespace, &workspace) {
+        if let Err(err) = self.store.mark_flushed(&published.namespace, workspace) {
             tracing::warn!(
                 %err,
                 workspace,
@@ -918,20 +908,79 @@ impl Node for KubimoNode {
             return Err(Status::invalid_argument("target_path is required"));
         }
         let target = Path::new(&request.target_path);
-        // Stop watching first so the final flush is not racing an in-flight
-        // upload, then flush: the runner's containers have already stopped by
-        // the time kubelet calls this, so the tree is quiescent.
-        //
-        // The watcher is shared by every volume published for this workspace on
-        // this node, so it only actually stops once the last of them is gone.
-        if let Ok(Some(published)) = self.store.lookup_publish(&request.volume_id) {
+        // Unknown volume: the agent restarted, or this workspace was never
+        // published by us. Nothing to flush — but still fall through to unbind.
+        let published = self.store.lookup_publish(&request.volume_id).ok().flatten();
+        // Release our claim on the shared watcher. It is shared by every volume
+        // published for this workspace on this node — a cache job co-located
+        // with a live runner — so it only actually stops once the last of them
+        // is gone.
+        if let Some(published) = published.as_ref() {
             self.stop_watcher(
                 &request.volume_id,
                 &published.namespace,
                 &published.workspace,
             );
         }
-        self.flush_published(&request.volume_id).await;
+        // Forget our own record BEFORE checking for siblings: two volumes of one
+        // workspace unpublishing together must not each see the other's record
+        // and both skip the final flush. Harmless when there was no record.
+        // Doing it whether or not we unmounted also stops a stale record — the
+        // target was already gone — from pinning the workspace as published for
+        // as long as this data volume lives, which would permanently block the
+        // reaper reclaiming its slot.
+        self.store.forget_publish(&request.volume_id);
+        // Flush only as the last volume out. While a sibling volume is still
+        // published its shared watcher is still syncing this same tree; a
+        // one-shot flush racing it would compute an independent diff and could
+        // delete a tenant edit the watcher just wrote. The durability boundary
+        // is unchanged: "the last time a runner stopped".
+        if let Some(published) = published.as_ref() {
+            match self.store.other_published_volumes(
+                &published.namespace,
+                &published.workspace,
+                &request.volume_id,
+            ) {
+                Ok(true) => {
+                    // A sibling volume still mounts this workspace, so keep the
+                    // cached credentials: its own final unpublish carries no
+                    // secrets and is the one that will need them to flush.
+                    tracing::info!(
+                        workspace = %published.workspace,
+                        "another volume still mounts this workspace; deferring its flush"
+                    );
+                }
+                Ok(false) => {
+                    // Under the workspace lock so a flush can never interleave
+                    // with a concurrent publish's hydration, or with a sibling
+                    // unpublish that lost the record race above and is also
+                    // flushing.
+                    let lock = self
+                        .store
+                        .lock_for(&published.namespace, &published.workspace);
+                    let _guard = lock.lock().await;
+                    self.flush_published_slot(published).await;
+                    // Nothing on this node mounts the workspace any more and its
+                    // final flush has run, so drop the cached credentials — the
+                    // one thing that still needed them is done. Held longer they
+                    // would accumulate for every workspace the node ever served.
+                    self.forget_credentials(&published.namespace, &published.workspace);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        workspace = %published.workspace,
+                        "could not check for sibling volumes; flushing to be safe"
+                    );
+                    let lock = self
+                        .store
+                        .lock_for(&published.namespace, &published.workspace);
+                    let _guard = lock.lock().await;
+                    self.flush_published_slot(published).await;
+                    self.forget_credentials(&published.namespace, &published.workspace);
+                }
+            }
+        }
         let unmounted = crate::mount::unbind(target)
             .map_err(|err| Status::internal(format!("unpublishing slot: {err}")))?;
         // The slot itself deliberately survives: keeping it lets the next open
@@ -940,24 +989,6 @@ impl Node for KubimoNode {
         if unmounted {
             // kubelet creates the target directory, so it is ours to remove.
             let _ = std::fs::remove_dir(target);
-        }
-        // Forget the publish record whether or not we were the one to unmount.
-        // `unmounted` is false when the target was already gone — kubelet cleaned it,
-        // or a previous call did — and keeping the record then makes
-        // `published_workspaces` report this workspace as mounted for as long as this
-        // data volume lives, which permanently stops the reaper reclaiming its slot.
-        let published = self.store.lookup_publish(&request.volume_id).ok().flatten();
-        self.store.forget_publish(&request.volume_id);
-        // Drop the cached credentials once nothing on this node is mounting
-        // the workspace any more — after the flush above, which needed them.
-        // Held any longer they would accumulate for every workspace the node
-        // has ever served.
-        if let Some(published) = published
-            && !self.store.published_workspaces().is_ok_and(|live| {
-                live.contains(&(published.namespace.clone(), published.workspace.clone()))
-            })
-        {
-            self.forget_credentials(&published.namespace, &published.workspace);
         }
         tracing::info!(target = %target.display(), unmounted, "unpublished slot");
         Ok(Response::new(proto::NodeUnpublishVolumeResponse {}))
@@ -1091,6 +1122,62 @@ mod tests {
         let (_dir, node) = node();
         node.stop_watcher("vol-unknown", "platform", "bmow-absent");
         assert!(node.lock_watchers().is_empty());
+    }
+
+    /// Unpublishing one of two volumes of a workspace must defer the flush to
+    /// the last one out: it forgets only its own record and leaves the
+    /// sibling's — and the shared watcher — in place, so that final flush still
+    /// happens. The flush marker itself is not observable here (a flush needs
+    /// S3 and a namespaced kube client, and the test node has neither), so this
+    /// pins the record and watcher bookkeeping the deferral decision rests on.
+    #[tokio::test]
+    async fn unpublishing_one_of_two_volumes_defers_and_keeps_the_sibling() {
+        let (dir, node) = node();
+        let slot = node
+            .store()
+            .resolve_or_create("tenant-a", "workspace")
+            .unwrap();
+        for volume in ["csi-runner", "csi-cache"] {
+            node.store()
+                .record_publish(
+                    volume,
+                    &crate::store::PublishedSlot {
+                        workspace: "workspace".into(),
+                        namespace: "tenant-a".into(),
+                        slot: slot.id.clone(),
+                        bucket: None,
+                        key_prefix: None,
+                    },
+                )
+                .unwrap();
+        }
+        let key = KubimoNode::slot_key("tenant-a", "workspace");
+        node.lock_watchers().insert(
+            key.clone(),
+            Watcher {
+                handle: tokio::spawn(std::future::pending::<()>()),
+                volumes: ["csi-runner".to_string(), "csi-cache".to_string()]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+
+        let target = dir.path().join("never-mounted");
+        node.node_unpublish_volume(Request::new(proto::NodeUnpublishVolumeRequest {
+            volume_id: "csi-cache".into(),
+            target_path: target.display().to_string(),
+        }))
+        .await
+        .unwrap();
+
+        // Its own record is gone; the sibling's survives so the last unpublish
+        // still knows to flush.
+        assert!(node.store().lookup_publish("csi-cache").unwrap().is_none());
+        assert!(node.store().lookup_publish("csi-runner").unwrap().is_some());
+        let watchers = node.lock_watchers();
+        let watcher = watchers.get(&key).expect("the runner still needs it");
+        assert_eq!(watcher.volumes.len(), 1);
+        assert!(!watcher.handle.is_finished());
     }
 
     /// Start the plugin on a temp socket and hand back a connected channel.

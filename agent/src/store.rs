@@ -591,6 +591,62 @@ impl SlotStore {
         Ok(false)
     }
 
+    /// Whether a `vol-` record *other than* `excluding_volume_id`'s names
+    /// `(namespace, workspace)`.
+    ///
+    /// The unpublish path asks this to decide whether it is the last volume of
+    /// its workspace out — the only one that should run the final flush. It
+    /// matches records exactly as [`Self::is_published`] does, legacy
+    /// empty-namespace records included, but skips the caller's own record so a
+    /// volume never counts itself as a sibling of itself.
+    ///
+    /// The exclusion compares *file names*, not whole paths: `publish_path`
+    /// composes an absolute path against `index_dir`, while the directory walk
+    /// yields whatever `read_dir` produced, and a `./` or trailing-slash
+    /// mismatch between the two would leave a volume unable to recognise its own
+    /// record and wrongly report a sibling.
+    pub fn other_published_volumes(
+        &self,
+        namespace: &str,
+        workspace: &str,
+        excluding_volume_id: &str,
+    ) -> Result<bool, StoreError> {
+        validate_workspace_name(namespace)?;
+        validate_workspace_name(workspace)?;
+        let excluded = self.publish_path(excluding_volume_id);
+        let excluded = excluded.file_name().and_then(|name| name.to_str());
+        let entries = match std::fs::read_dir(self.index_dir()) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(io_err("listing index dir")(err)),
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.starts_with("vol-") {
+                continue;
+            }
+            if Some(name) == excluded {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let mut lines = raw.lines();
+            if lines.next() != Some(workspace) {
+                continue;
+            }
+            lines.next(); // slot
+            lines.next(); // bucket
+            lines.next(); // key prefix
+            let recorded_namespace = lines.next().unwrap_or_default();
+            if recorded_namespace.is_empty() || recorded_namespace == namespace {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Drop a workspace's slot and everything indexing it.
     ///
     /// The project id file goes too, releasing that id: the quota limit set
@@ -974,6 +1030,42 @@ mod tests {
         assert!(
             published.contains(&("platform".to_string(), "bmow-xyz".to_string())),
             "another workspace's record must be left alone"
+        );
+    }
+
+    /// Two volumes of one workspace stay visible to each other until each
+    /// forgets its own record. This is the ordering `node_unpublish_volume`
+    /// leans on: it forgets its own record *before* asking whether a sibling
+    /// remains, so two simultaneous unpublishes cannot both see the other's
+    /// record and both defer the final flush.
+    #[test]
+    fn sibling_volumes_are_visible_until_each_forgets_its_own_record() {
+        let (_tmp, store) = store();
+        let slot = store.resolve_or_create("tenant-a", "workspace").unwrap();
+        publish(
+            &store,
+            "csi-runner",
+            "tenant-a",
+            "workspace",
+            slot.id.clone(),
+        );
+        publish(
+            &store,
+            "csi-cache",
+            "tenant-a",
+            "workspace",
+            slot.id.clone(),
+        );
+        assert!(
+            store
+                .other_published_volumes("tenant-a", "workspace", "csi-cache")
+                .unwrap()
+        );
+        store.forget_publish("csi-cache");
+        assert!(
+            !store
+                .other_published_volumes("tenant-a", "workspace", "csi-runner")
+                .unwrap()
         );
     }
 
