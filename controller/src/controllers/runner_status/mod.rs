@@ -7,6 +7,7 @@ use std::time::Duration;
 use chrono::{TimeDelta, Utc};
 use futures::prelude::*;
 use kubimo::k8s_openapi::api::core::v1::Secret;
+use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition as K8sCondition;
 use kubimo::kube::runtime::controller::Action;
 use kubimo::{Runner, RunnerCommand, RunnerStatus, prelude::*};
 use serde::Deserialize;
@@ -149,7 +150,51 @@ impl Connections {
 /// Requeue interval while startup conditions are not all True. PVC and
 /// Workspace changes don't trigger this controller's watches, so a faster
 /// requeue is what surfaces startup progress promptly.
-const STARTUP_REQUEUE_INTERVAL: Duration = Duration::from_secs(3);
+pub(super) const STARTUP_REQUEUE_INTERVAL: Duration = Duration::from_secs(3);
+
+/// How long a pod must have been un-ready before an unreachable runner may be
+/// collected. Cheap insurance against a node blip flipping `PodReady` for a few
+/// seconds in the middle of an ingress outage.
+const UNREACHABLE_GC_GRACE_SECS: i64 = 5 * 60;
+
+/// May a runner we could not reach be treated as idle?
+///
+/// Only when kubelet agrees it is unhealthy, and has for a while. A pod that is
+/// `Ready` while the HTTP poll fails is an infrastructure problem — the runner
+/// is fine and someone may well be using it.
+fn unreachable_is_collectable(conditions: &[K8sCondition], now_secs: i64) -> bool {
+    !conditions::pod_is_ready(conditions)
+        && conditions::pod_ready_age_secs(conditions, now_secs)
+            .is_some_and(|age| age >= UNREACHABLE_GC_GRACE_SECS)
+}
+
+/// Has this runner been idle long enough to collect?
+///
+/// Falls back to the creation timestamp: a runner that never came up has no
+/// `lastActive` and would otherwise never expire, which is how runners reached
+/// 8,000 restarts over 53 days without being cleaned up.
+fn is_inactive_past_deadline(
+    runner: &Runner,
+    delete_after_secs_inactive: u32,
+    now_secs: i64,
+) -> bool {
+    let Some(since) = runner
+        .status
+        .as_ref()
+        .and_then(|status| status.last_active.map(|dt| dt.timestamp()))
+        .or_else(|| {
+            runner
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|t| t.0.as_second())
+        })
+    else {
+        // Neither timestamp: nothing to measure against, so never collect.
+        return false;
+    };
+    since + (delete_after_secs_inactive as i64) < now_secs
+}
 
 #[derive(Debug, Clone, Default)]
 struct RunnerStatusReconciler {
@@ -177,17 +222,31 @@ impl RunnerStatusReconciler {
             &ctx.config.runner_status.resolution,
         )
         .await?;
+        // A failed poll is ambiguous: "this runner is dead" and "the controller
+        // cannot reach it" look identical from here. Carry on rather than
+        // returning, so the idle GC below stays reachable — the pod's own
+        // readiness is what tells the two apart.
         let connections = match api.connections().await {
-            Ok(connections) => connections,
+            Ok(connections) => Some(connections),
             Err(err) => {
-                tracing::warn!(err = ?err, "Could not get runner status: {}", err);
-                return Ok(Some(Action::requeue(interval)));
+                // Unreachable-and-not-ready is the ordinary case — the pod is
+                // starting, or crashlooping — and says nothing new every few
+                // seconds. A *ready* pod we cannot reach is the interesting
+                // one: that is an ingress or DNS fault, not a runner fault.
+                if conditions::pod_is_ready(status.conditions.as_deref().unwrap_or_default()) {
+                    tracing::warn!(err = ?err, "Could not reach a ready runner: {}", err);
+                } else {
+                    tracing::debug!(err = ?err, "Could not reach a runner whose pod is not ready: {}", err);
+                }
+                None
             }
         };
-        let marimo_version = if runner
-            .status
-            .as_ref()
-            .is_none_or(|status| status.marimo_version.is_none())
+        let is_active = connections.as_ref().is_some_and(Connections::is_active);
+        let marimo_version = if connections.is_some()
+            && runner
+                .status
+                .as_ref()
+                .is_none_or(|status| status.marimo_version.is_none())
         {
             match api.marimo_version().await {
                 Ok(version) => Some(version),
@@ -199,37 +258,33 @@ impl RunnerStatusReconciler {
         } else {
             None
         };
-        if connections.is_active() || marimo_version.is_some() {
-            if connections.is_active() {
-                status.last_active = Some(now);
-            }
-            if let Some(version) = marimo_version {
-                status.marimo_version = Some(version)
-            }
+        if is_active {
+            status.last_active = Some(now);
         }
-        if !connections.is_active()
+        if let Some(version) = marimo_version {
+            status.marimo_version = Some(version)
+        }
+        if !is_active
             && let Some(delete_after_secs_inactive) = runner
                 .spec
                 .lifecycle
                 .as_ref()
                 .and_then(|l| l.delete_after_secs_inactive)
+            // An unreachable runner may only be treated as idle when its pod is
+            // also not ready, and has been for long enough that a momentary
+            // flip collects nothing. With `Ingress` resolution a single outage
+            // makes every runner unreachable at once; without this, an outage
+            // outlasting `deleteAfterSecsInactive` would delete every runner in
+            // the cluster, including ones with users connected.
+            && (connections.is_some()
+                || unreachable_is_collectable(
+                    status.conditions.as_deref().unwrap_or_default(),
+                    now.timestamp(),
+                ))
+            && is_inactive_past_deadline(runner, delete_after_secs_inactive, now.timestamp())
         {
-            let last_active_timestamp = runner
-                .status
-                .as_ref()
-                .and_then(|status| status.last_active.map(|dt| dt.timestamp()))
-                .or_else(|| {
-                    runner
-                        .metadata
-                        .creation_timestamp
-                        .as_ref()
-                        .map(|t| t.0.as_second())
-                })
-                .unwrap_or(Utc::now().timestamp());
-            if last_active_timestamp + (delete_after_secs_inactive as i64) < now.timestamp() {
-                ctx.api_for(runner)?.delete(runner.name()?).await?;
-                return Ok(None);
-            }
+            ctx.api_for(runner)?.delete(runner.name()?).await?;
+            return Ok(None);
         }
         Ok(Some(Action::requeue(interval)))
     }
@@ -255,6 +310,12 @@ impl Reconciler for RunnerStatusReconciler {
             };
             action
         };
+        // Computed before `status` is moved into the patch below.
+        let startup_requeue = conditions::startup_requeue_interval(
+            status.conditions.as_deref().unwrap_or_default(),
+            Utc::now().timestamp(),
+            Duration::from_secs(ctx.config.runner_status.interval_secs),
+        );
         if Some(&status) != runner.status.as_ref() {
             let mut patched = runner.clone();
             patched.status = Some(status);
@@ -263,7 +324,7 @@ impl Reconciler for RunnerStatusReconciler {
         if startup_complete {
             Ok(action)
         } else {
-            Ok(Action::requeue(STARTUP_REQUEUE_INTERVAL))
+            Ok(Action::requeue(startup_requeue))
         }
     }
 }
@@ -284,4 +345,98 @@ pub async fn run(
             default_error_policy,
             ctx,
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+    use kubimo::k8s_openapi::jiff::Timestamp;
+
+    fn pod_ready_at(status: &str, transitioned_secs: i64) -> Vec<K8sCondition> {
+        vec![K8sCondition {
+            type_: kubimo::conditions::POD_READY.to_string(),
+            status: status.to_string(),
+            reason: "Test".to_string(),
+            message: String::new(),
+            last_transition_time: Time(Timestamp::from_second(transitioned_secs).unwrap()),
+            observed_generation: None,
+        }]
+    }
+
+    fn runner_created_at(secs: i64, last_active: Option<i64>) -> Runner {
+        let mut runner = Runner::new("bmor-test", Default::default());
+        runner.metadata.creation_timestamp = Some(Time(Timestamp::from_second(secs).unwrap()));
+        runner.status = last_active.map(|secs| RunnerStatus {
+            last_active: chrono::DateTime::from_timestamp(secs, 0),
+            ..Default::default()
+        });
+        runner
+    }
+
+    /// The incident this guard exists to prevent. With `Ingress` resolution one
+    /// outage makes `connections()` fail for *every* runner at once; if the
+    /// outage outlasts `deleteAfterSecsInactive`, an unguarded GC would delete
+    /// the entire cluster's runners, including ones with users connected.
+    /// Kubelet still reports those pods `Ready`, which is what saves them.
+    #[test]
+    fn an_unreachable_runner_with_a_ready_pod_is_never_collected() {
+        let conditions = pod_ready_at("True", 0);
+        assert!(!unreachable_is_collectable(&conditions, 100 * 3600));
+    }
+
+    /// A pod that only just went un-ready might be mid-restart or mid-blip.
+    /// Wait out the grace before believing it.
+    #[test]
+    fn an_unreachable_runner_with_a_freshly_unready_pod_is_not_collected_yet() {
+        let start = 1_000;
+        assert!(!unreachable_is_collectable(
+            &pod_ready_at("False", start),
+            start + 60
+        ));
+        // And a runner with no PodReady condition at all is not collectable:
+        // there is no evidence either way.
+        assert!(!unreachable_is_collectable(&[], start + 100 * 3600));
+    }
+
+    /// The 12 production runners: `PodReady=False` for weeks.
+    #[test]
+    fn an_unreachable_runner_unready_for_hours_is_collected() {
+        let start = 1_000;
+        assert!(unreachable_is_collectable(
+            &pod_ready_at("False", start),
+            start + 24 * 3600
+        ));
+    }
+
+    /// A runner that never came up has no `lastActive`, so without the
+    /// creation-timestamp fallback its deadline never arrives — which is how
+    /// runners reached 8,000 restarts over 53 days uncollected.
+    #[test]
+    fn a_runner_that_was_never_active_expires_from_its_creation() {
+        let day = 86_400;
+        let created = 1_000;
+        let runner = runner_created_at(created, None);
+        assert!(!is_inactive_past_deadline(
+            &runner,
+            day as u32,
+            created + 60
+        ));
+        assert!(is_inactive_past_deadline(
+            &runner,
+            day as u32,
+            created + day + 1
+        ));
+    }
+
+    /// A recent `lastActive` must win over an old creation timestamp, or a
+    /// long-lived runner in active use would be collected.
+    #[test]
+    fn last_active_takes_precedence_over_creation() {
+        let day = 86_400;
+        let created = 1_000;
+        let now = created + 30 * day;
+        let runner = runner_created_at(created, Some(now - 60));
+        assert!(!is_inactive_past_deadline(&runner, day as u32, now));
+    }
 }
