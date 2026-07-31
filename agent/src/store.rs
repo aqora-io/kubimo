@@ -1090,4 +1090,48 @@ mod tests {
         assert_eq!(a.id, b.id);
         assert!(a.created != b.created, "exactly one caller creates");
     }
+
+    /// The reaper re-reads the flush marker under the lock precisely because a
+    /// final flush can land in the window after its snapshot. `mark_flushed`
+    /// refreshes the marker — collapsing an aged age back to ~now — and a failed
+    /// flush's `clear_flushed` drops it entirely; either way the re-read no
+    /// longer reads as "idle past the TTL", which is what keeps the slot from
+    /// being evicted on the strength of a stale snapshot.
+    #[test]
+    fn a_final_flush_refreshes_or_clears_an_aged_marker() {
+        let (_dir, store) = store();
+        let slot = store.resolve_or_create("platform", "bmow-reflush").unwrap();
+        store.mark_flushed("platform", "bmow-reflush").unwrap();
+
+        // Age the marker past a day, as the reaper's pre-lock snapshot would see it.
+        let aged_to = std::time::SystemTime::now() - Duration::from_secs(48 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(store.flushed_path(&slot.id))
+            .unwrap()
+            .set_modified(aged_to)
+            .unwrap();
+        let snapshot_age = store
+            .flushed_ago("platform", "bmow-reflush")
+            .unwrap()
+            .expect("a flushed slot has an age");
+        assert!(
+            snapshot_age >= Duration::from_secs(24 * 60 * 60),
+            "{snapshot_age:?}"
+        );
+
+        // A final flush that completed in the window refreshes the marker, so the
+        // age the reaper re-reads under the lock is fresh and the slot is kept.
+        store.mark_flushed("platform", "bmow-reflush").unwrap();
+        let refreshed = store
+            .flushed_ago("platform", "bmow-reflush")
+            .unwrap()
+            .expect("still flushed");
+        assert!(refreshed < Duration::from_secs(60), "{refreshed:?}");
+
+        // A final flush that failed clears it, so the re-read reads as
+        // never-flushed and the slot is likewise kept.
+        store.clear_flushed("platform", "bmow-reflush").unwrap();
+        assert_eq!(store.flushed_ago("platform", "bmow-reflush").unwrap(), None);
+    }
 }
