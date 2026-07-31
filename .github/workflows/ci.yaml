@@ -61,6 +61,22 @@ jobs:
             helm unittest -u "$chart"
           done
 
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Lint
+        run: helm lint charts/kubimo-controller
+      - name: Template (defaults)
+        run: helm template charts/kubimo-controller
+      # agent.enabled renders four extra templates (DaemonSet, CSIDriver, RBAC,
+      # StorageClass) gated behind the drain fail() guard in _helpers.tpl; the
+      # default drain values already satisfy it, so this exercises the real
+      # relationship rather than disabling the check.
+      - name: Template (agent enabled)
+        run: helm template charts/kubimo-controller --set agent.enabled=true
+
   cache-py:
     runs-on: ubuntu-latest
     steps:
