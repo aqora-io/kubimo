@@ -146,8 +146,46 @@ impl RunnerReconciler {
             }),
             ..Default::default()
         };
-        ctx.api_namespaced::<Pod>(namespace).patch(&pod).await
+        match ctx.api_namespaced::<Pod>(namespace).patch(&pod).await {
+            Err(err) if super::is_immutable_conflict(&err) => {
+                // A live pod's spec is almost entirely immutable, so an apply that needs to
+                // change one of those fields — the sandbox runtimeClassName on a pod created
+                // before Render was sandboxed — can only be honoured by replacement. But a
+                // 422 is also what any other pod validation failure looks like (say, a
+                // Runner whose resources produce requests over limits), and deleting a
+                // working pod over one of those would take a user's notebook down for a
+                // bad input. So fetch the live pod and delete only on the one drift this
+                // replacement exists for; every other 422, and any failure to fetch,
+                // propagates untouched. Pods carry a termination grace period, so
+                // recreation must wait for the next reconcile rather than racing the
+                // delete.
+                let live = ctx
+                    .api_namespaced::<Pod>(namespace)
+                    .get_opt(runner.name()?)
+                    .await;
+                if matches!(&live, Ok(Some(live)) if runtime_class_drifted(live, &pod)) {
+                    ctx.api_namespaced::<Pod>(namespace)
+                        .delete_opt(runner.name()?)
+                        .await?;
+                }
+                Err(err)
+            }
+            result => result,
+        }
     }
+}
+
+/// Whether the live pod's runtime class differs from the desired one — the one
+/// immutable-field change a pod is deliberately replaced over. Other drifts, if
+/// ever introduced, should be added here on purpose rather than deleting on any
+/// 422.
+fn runtime_class_drifted(live: &Pod, desired: &Pod) -> bool {
+    fn class(pod: &Pod) -> Option<&str> {
+        pod.spec
+            .as_ref()
+            .and_then(|spec| spec.runtime_class_name.as_deref())
+    }
+    class(live) != class(desired)
 }
 
 /// Sandbox every runner, whatever its command.
@@ -212,5 +250,32 @@ mod tests {
     #[test]
     fn no_runner_command_is_exempt_from_the_sandbox() {
         assert_eq!(sandbox_runtime_class().as_deref(), Some("gvisor"));
+    }
+
+    fn pod_with_runtime_class(class: Option<&str>) -> Pod {
+        Pod {
+            spec: Some(PodSpec {
+                runtime_class_name: class.map(str::to_string),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Only a pod whose live runtime class differs from the desired one is a
+    /// replacement candidate; a pod that already matches must never be, or any
+    /// unrelated 422 would take a working notebook down.
+    #[test]
+    fn only_runtime_class_drift_marks_a_pod_for_replacement() {
+        let desired = pod_with_runtime_class(Some("gvisor"));
+        assert!(runtime_class_drifted(
+            &pod_with_runtime_class(None),
+            &desired
+        ));
+        assert!(runtime_class_drifted(&Pod::default(), &desired));
+        assert!(!runtime_class_drifted(
+            &pod_with_runtime_class(Some("gvisor")),
+            &desired
+        ));
     }
 }
