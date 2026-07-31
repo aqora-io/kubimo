@@ -187,6 +187,19 @@ fn chown_tree(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The `(false, false)` refusal: no project-quota enforcement and
+/// `--allow-unquotaed-slots` not set. Shared between a freshly created slot
+/// (rolled back by the caller) and an existing one (left in place, since it
+/// may hold tenant data).
+fn unquotaed_refusal(root: &Path) -> Status {
+    Status::failed_precondition(format!(
+        "{} is not mounted with project-quota enforcement (`prjquota`), so slots \
+         would have no capacity limit. Mount the data volume with `prjquota`, or \
+         pass --allow-unquotaed-slots to accept unlimited slots.",
+        root.display()
+    ))
+}
+
 /// Depth-first listing of `dir` and everything under it.
 ///
 /// Deliberately does not follow symlinks: the tree contains tenant-controlled
@@ -611,29 +624,50 @@ impl KubimoNode {
             .resolve_or_create(namespace, workspace)
             .map_err(|err| Status::internal(format!("resolving slot: {err}")))?;
         let dir = self.store.layout().slot_dir(&resolved.id);
-        if resolved.created
-            && let Err(err) = self
+        let quotas_enforced = quota::project_quota_enforced(self.store.layout().root())
+            .map_err(|err| Status::internal(format!("checking quota support: {err}")))?;
+
+        if resolved.created {
+            if let Err(err) = self
                 .provision_new_slot(
                     namespace,
                     workspace,
                     &resolved,
                     &dir,
                     limit_bytes,
+                    quotas_enforced,
                     archive,
                     seed,
                 )
                 .await
-        {
-            // A slot that failed provisioning must not survive: kubelet's retry finds
-            // `created: false` and skips quota, ownership and hydration entirely, so a
-            // transient error here would otherwise become a permanently unquotaed,
-            // never-hydrated slot. Dropping it makes the retry start over.
-            if let Err(remove_err) = self.store.remove_slot(namespace, workspace) {
-                tracing::error!(%remove_err, workspace, slot = %resolved.id,
-                    "could not drop a slot whose provisioning failed; a retry will reuse it as-is");
+            {
+                // A slot that failed provisioning must not survive: kubelet's retry finds
+                // `created: false` and skips quota, ownership and hydration entirely, so a
+                // transient error here would otherwise become a permanently unquotaed,
+                // never-hydrated slot. Dropping it makes the retry start over.
+                if let Err(remove_err) = self.store.remove_slot(namespace, workspace) {
+                    tracing::error!(%remove_err, workspace, slot = %resolved.id,
+                        "could not drop a slot whose provisioning failed; a retry will reuse it as-is");
+                }
+                return Err(err);
             }
-            return Err(err);
+        } else if quotas_enforced {
+            // Re-applied on every publish, not just creation: slot capacity changes
+            // arrive as a new `limitBytes` volume attribute on the next publish (see
+            // `node_expand_volume`), and skipping existing slots would silently discard
+            // them.
+            quota::set_project_limit(self.store.layout().root(), resolved.project_id, limit_bytes)
+                .map_err(|err| Status::internal(format!("setting quota: {err}")))?;
+        } else if !self.allow_unquotaed_slots {
+            // Unlike the created-slot case, there is nothing to roll back here:
+            // the slot already exists and may hold tenant data, so refusing the
+            // publish must leave it in place rather than removing it.
+            return Err(unquotaed_refusal(self.store.layout().root()));
         }
+        // else: quotas unenforced but `--allow-unquotaed-slots` is set, on an
+        // already-existing slot — the warning for this only fires on
+        // creation, to avoid repeating it on every publish.
+
         Ok((resolved, dir))
     }
 
@@ -652,11 +686,10 @@ impl KubimoNode {
         resolved: &crate::store::ResolvedSlot,
         dir: &Path,
         limit_bytes: u64,
+        quotas_enforced: bool,
         archive: Option<&crate::hydrate::ArchiveLocation>,
         seed: Option<&crate::hydrate::ArchiveLocation>,
     ) -> Result<(), Status> {
-        let quotas_enforced = quota::project_quota_enforced(self.store.layout().root())
-            .map_err(|err| Status::internal(format!("checking quota support: {err}")))?;
         match (quotas_enforced, self.allow_unquotaed_slots) {
             (true, _) => {
                 // Stamp the project before anything is written: inodes
@@ -679,12 +712,7 @@ impl KubimoNode {
                  and can fill the node volume"
             ),
             (false, false) => {
-                return Err(Status::failed_precondition(format!(
-                    "{} is not mounted with project-quota enforcement (`prjquota`), so slots \
-                     would have no capacity limit. Mount the data volume with `prjquota`, or \
-                     pass --allow-unquotaed-slots to accept unlimited slots.",
-                    self.store.layout().root().display()
-                )));
+                return Err(unquotaed_refusal(self.store.layout().root()));
             }
         }
         std::fs::set_permissions(
@@ -1281,6 +1309,35 @@ mod tests {
                 .lookup("tenant-a", "workspace")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// The `(false, false)` refusal must not remove a slot that already
+    /// existed: unlike a freshly created one, it may hold tenant data, and a
+    /// filesystem that lost `prjquota` across a remount is a reason to refuse
+    /// the publish, not to destroy the slot.
+    #[tokio::test]
+    async fn a_refused_publish_on_an_existing_slot_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        // Record the slot directly through the store, bypassing full
+        // provisioning (its chown step needs privileges this test does not
+        // have) — `prepare_slot` only needs `resolved.created` to be `false`.
+        let store = SlotStore::new(crate::slot::SlotLayout::new(dir.path()));
+        store.resolve_or_create("tenant-a", "workspace").unwrap();
+
+        let refusing = KubimoNode::new("test-node".into(), store, 1024, false, None);
+        let err = refusing
+            .prepare_slot("tenant-a", "workspace", 1024, None, None)
+            .await
+            .expect_err("must refuse an unquotaed publish even for an existing slot");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            refusing
+                .store()
+                .lookup("tenant-a", "workspace")
+                .unwrap()
+                .is_some(),
+            "an existing slot must survive a refused publish"
         );
     }
 
