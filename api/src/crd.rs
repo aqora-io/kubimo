@@ -104,7 +104,7 @@ pub struct WorkspaceIndexer {
 }
 
 /// The slot a `Pooled` workspace occupies on a node's shared data volume.
-/// Controller-owned; never set by clients.
+/// Agent-owned; never set by clients.
 ///
 /// Every field skips serializing when unset. These are written by more than one
 /// field manager, and under server-side apply a serialized `null` is a claim on
