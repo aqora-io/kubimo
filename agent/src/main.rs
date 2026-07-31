@@ -387,7 +387,6 @@ fn serve(
     idle_slot_ttl: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = SlotStore::new(SlotLayout::new(data_root));
-    let reaper_root = data_root.to_path_buf();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -425,7 +424,10 @@ fn serve(
             // merely idle one, so it only runs when we have a client.
             if client.is_some() {
                 tokio::spawn(reaper::run(
-                    SlotStore::new(SlotLayout::new(&reaper_root)),
+                    // A clone, not a fresh store: the reaper and the CSI node
+                    // must share one per-workspace lock map, or the reaper could
+                    // reclaim a slot in the middle of a publish creating it.
+                    store.clone(),
                     clients::NamespacedClients::new(true),
                     idle_slot_ttl,
                     client.clone().map(|client| reaper::StaleMountSweep {
