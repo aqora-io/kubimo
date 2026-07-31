@@ -910,32 +910,58 @@ impl Node for KubimoNode {
         let target = Path::new(&request.target_path);
         // Unknown volume: the agent restarted, or this workspace was never
         // published by us. Nothing to flush — but still fall through to unbind.
-        let published = self.store.lookup_publish(&request.volume_id).ok().flatten();
-        // Release our claim on the shared watcher. It is shared by every volume
-        // published for this workspace on this node — a cache job co-located
-        // with a live runner — so it only actually stops once the last of them
-        // is gone.
+        // A read *error* (as opposed to a clean not-found) is not swallowed: it
+        // means we cannot tell which workspace this volume belonged to, so the
+        // final flush is skipped and the slot's newest work stays only on this
+        // node.
+        let published = match self.store.lookup_publish(&request.volume_id) {
+            Ok(published) => published,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    "could not read the publish record; skipping the final flush, so any \
+                     changes since the last sync stay only on this node"
+                );
+                None
+            }
+        };
+        // Everything that decides and performs the final flush runs under the
+        // workspace lock, taken *before* we forget our own record or check for
+        // siblings — the same lock the publish path holds across slot resolution
+        // and its record, and the reaper takes before reclaiming. Once it is
+        // ours a concurrent publish of this workspace has either already recorded
+        // itself — so the sibling check below sees it — or has not begun
+        // resolving, and the reaper cannot interleave between this decision and
+        // the flush. Without a publish record there is nothing to flush and
+        // nothing to serialise, so that path stays lock-free.
         if let Some(published) = published.as_ref() {
+            let lock = self
+                .store
+                .lock_for(&published.namespace, &published.workspace);
+            let _guard = lock.lock().await;
+            // Release our claim on the shared watcher. It is shared by every
+            // volume published for this workspace on this node — a cache job
+            // co-located with a live runner — so it only actually stops once the
+            // last of them is gone.
             self.stop_watcher(
                 &request.volume_id,
                 &published.namespace,
                 &published.workspace,
             );
-        }
-        // Forget our own record BEFORE checking for siblings: two volumes of one
-        // workspace unpublishing together must not each see the other's record
-        // and both skip the final flush. Harmless when there was no record.
-        // Doing it whether or not we unmounted also stops a stale record — the
-        // target was already gone — from pinning the workspace as published for
-        // as long as this data volume lives, which would permanently block the
-        // reaper reclaiming its slot.
-        self.store.forget_publish(&request.volume_id);
-        // Flush only as the last volume out. While a sibling volume is still
-        // published its shared watcher is still syncing this same tree; a
-        // one-shot flush racing it would compute an independent diff and could
-        // delete a tenant edit the watcher just wrote. The durability boundary
-        // is unchanged: "the last time a runner stopped".
-        if let Some(published) = published.as_ref() {
+            // Forget our own record BEFORE checking for siblings: two volumes of
+            // one workspace unpublishing together must not each see the other's
+            // record and both skip the final flush. The lock serialises them, so
+            // exactly one now observes no sibling and flushes. Doing it whether
+            // or not we go on to unmount also stops a stale record — the target
+            // was already gone — from pinning the workspace as published for as
+            // long as this data volume lives, which would permanently block the
+            // reaper reclaiming its slot.
+            self.store.forget_publish(&request.volume_id);
+            // Flush only as the last volume out. While a sibling volume is still
+            // published its shared watcher is still syncing this same tree; a
+            // one-shot flush racing it would compute an independent diff and
+            // could delete a tenant edit the watcher just wrote. The durability
+            // boundary is unchanged: "the last time a runner stopped".
             match self.store.other_published_volumes(
                 &published.namespace,
                 &published.workspace,
@@ -951,14 +977,6 @@ impl Node for KubimoNode {
                     );
                 }
                 Ok(false) => {
-                    // Under the workspace lock so a flush can never interleave
-                    // with a concurrent publish's hydration, or with a sibling
-                    // unpublish that lost the record race above and is also
-                    // flushing.
-                    let lock = self
-                        .store
-                        .lock_for(&published.namespace, &published.workspace);
-                    let _guard = lock.lock().await;
                     self.flush_published_slot(published).await;
                     // Nothing on this node mounts the workspace any more and its
                     // final flush has run, so drop the cached credentials — the
@@ -972,10 +990,6 @@ impl Node for KubimoNode {
                         workspace = %published.workspace,
                         "could not check for sibling volumes; flushing to be safe"
                     );
-                    let lock = self
-                        .store
-                        .lock_for(&published.namespace, &published.workspace);
-                    let _guard = lock.lock().await;
                     self.flush_published_slot(published).await;
                     self.forget_credentials(&published.namespace, &published.workspace);
                 }

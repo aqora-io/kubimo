@@ -99,6 +99,22 @@ async fn sweep(
                 continue;
             }
         }
+        // The idle decision rested on the flush marker's age read *before* the
+        // lock. In that window a final flush may have completed — `mark_flushed`
+        // refreshes the marker at flush end — or failed — `clear_flushed` drops
+        // it at flush start — so re-read it now the lock is ours and only reclaim
+        // a slot still idle past the TTL. `Reclaim::Deleted` needs no such
+        // re-check: the workspace is gone and no flush is coming.
+        if why == Reclaim::Idle {
+            match store.flushed_ago(&namespace, &workspace) {
+                Ok(Some(age)) if age >= idle_ttl => {}
+                Ok(_) => continue,
+                Err(err) => {
+                    tracing::warn!(%err, workspace, "could not re-read the flush marker; keeping the slot");
+                    continue;
+                }
+            }
+        }
         match store.remove_slot(&namespace, &workspace) {
             Ok(true) => {
                 reclaimed += 1;
