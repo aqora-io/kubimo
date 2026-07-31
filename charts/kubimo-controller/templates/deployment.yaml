@@ -65,6 +65,10 @@ spec:
             - name: KUBIMO__MANAGER_NAME
               value: {{ .managerName | quote }}
             {{- end }}
+            {{- if .marimoCondaImage }}
+            - name: KUBIMO__MARIMO_CONDA_IMAGE
+              value: {{ .marimoCondaImage | quote }}
+            {{- end }}
             {{- if .busyboxImage }}
             - name: KUBIMO__BUSYBOX_IMAGE
               value: {{ .busyboxImage | quote }}

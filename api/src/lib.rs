@@ -34,14 +34,15 @@ pub use api::{Api, ApiListStream};
 #[cfg(feature = "client")]
 pub use client::{Client, ClientBuilder};
 pub use crd::{
-    AutoScale, Budget, BudgetResourceStatus, BudgetSpec, BudgetStatus, CacheJob, CacheJobField,
-    CacheJobSpec, LogLevel, Requirement, Runner, RunnerCommand, RunnerField, RunnerIngress,
-    RunnerLifecycle, RunnerSpec, RunnerStatus, RunnerTls, RunnerToken, StorageRequirement,
-    Workspace, WorkspaceArchiveStatus, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory,
-    WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo,
-    WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField,
-    WorkspaceIndexer, WorkspaceIndexerPod, WorkspaceMode, WorkspaceRestoreFrom,
-    WorkspaceSlotStatus, WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus, all_crds,
+    all_crds, AutoScale, Budget, BudgetResourceStatus, BudgetSpec, BudgetStatus, CacheJob,
+    CacheJobField, CacheJobSpec, LogLevel, Requirement, Runner, RunnerCommand, RunnerField,
+    RunnerIngress, RunnerLifecycle, RunnerSpec, RunnerStatus, RunnerTls, RunnerToken,
+    StorageRequirement, Workspace, WorkspaceArchiveStatus, WorkspaceDir, WorkspaceDirContentUrl,
+    WorkspaceDirDirectory, WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile,
+    WorkspaceDirMarimo, WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink,
+    WorkspaceField, WorkspaceIndexer, WorkspaceIndexerPod, WorkspaceMode, WorkspacePythonRuntime,
+    WorkspaceRestoreFrom, WorkspaceSlotStatus, WorkspaceSpec, WorkspaceStatus,
+    WorkspaceStorageStatus,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;
@@ -52,8 +53,8 @@ pub use label::KubimoLabel;
 #[cfg(feature = "client")]
 pub use list_stream::{ApiListStreamExt, ListStream};
 pub use manifest::{
-    MANIFEST_FILE_NAME, ManifestDirectory, ManifestVersion, WorkspaceManifest, build_manifest,
-    manifest_url,
+    build_manifest, manifest_url, ManifestDirectory, ManifestVersion, WorkspaceManifest,
+    MANIFEST_FILE_NAME,
 };
 pub use meta::{ObjectMetaExt, ResourceNameExt, ResourceNamespaceExt, ResourceOwnerRefExt};
 pub use quantity::{CpuQuantity, CpuUnit, Quantity, StorageQuantity, StorageUnit};

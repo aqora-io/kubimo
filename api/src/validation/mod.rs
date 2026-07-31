@@ -101,6 +101,18 @@ pub fn workspace_clone_not_pooled() -> Rule {
         .field_path(".spec.cloneWorkspaceName")
 }
 
+pub fn workspace_immutable_fields() -> Rule {
+    Rule::new(include_str!("./workspace_immutable_fields.cel"))
+        .message("workspace is immutable")
+        .field_path(".spec.pythonRuntime")
+}
+
+pub fn workspace_python_runtime_exclusive() -> Rule {
+    Rule::new(include_str!("./workspace_python_runtime_exclusive.cel"))
+        .message("pythonRuntime and cloneWorkspaceName are mutually exclusive")
+        .field_path(".spec.pythonRuntime")
+}
+
 pub fn runner_immutable_fields() -> Rule {
     Rule::new(include_str!("./runner_immutable_fields.cel"))
         .message("workspace is immutable")
