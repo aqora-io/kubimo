@@ -71,6 +71,10 @@ spec:
             - name: KUBIMO__RUNNER_HOSTS
               value: {{ if kindIs "string" .runnerHosts }}{{ .runnerHosts | quote }}{{ else }}{{ join "," .runnerHosts | quote }}{{ end }}
             {{- end }}
+            {{- if .runnerProxyTimeoutSecs }}
+            - name: KUBIMO__RUNNER_PROXY_TIMEOUT_SECS
+              value: {{ .runnerProxyTimeoutSecs | quote }}
+            {{- end }}
             {{- with .runnerStatus }}
             {{- with .resolution }}
             {{- if .method }}

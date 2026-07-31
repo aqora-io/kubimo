@@ -36,6 +36,17 @@ impl RunnerReconciler {
             "kubernetes.io/ingress.class".to_string(),
             ingress_class_name.clone(),
         );
+        // Keeps the kernel websocket and the code-mode SSE stream alive while a
+        // cell runs; see `runner_proxy_timeout_secs` in the config.
+        let proxy_timeout_secs = ctx.config.runner_proxy_timeout_secs.to_string();
+        annotations.insert(
+            "nginx.ingress.kubernetes.io/proxy-read-timeout".to_string(),
+            proxy_timeout_secs.clone(),
+        );
+        annotations.insert(
+            "nginx.ingress.kubernetes.io/proxy-send-timeout".to_string(),
+            proxy_timeout_secs,
+        );
         if let Some(cluster_issuer) = spec_tls
             .and_then(|tls| tls.cluster_issuer.as_ref())
             .or(ctx.config.cluster_issuer.as_ref())

@@ -19,6 +19,7 @@ image:
 #   runnerHosts:
 #     - kubimo.org
 #   clusterIssuer: letsencrypt-prod
+#   runnerProxyTimeoutSecs: 3600
 #   runnerStatus:
 #     resolution:
 #       method: ServiceDns
