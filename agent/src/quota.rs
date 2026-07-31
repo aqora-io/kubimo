@@ -34,9 +34,13 @@ const IOC_WRITE: u32 = 1;
 const FS_DQUOT_VERSION: i8 = 1;
 /// `FS_PROJ_QUOTA` in `d_flags`.
 const FS_PROJ_QUOTA: i8 = 4;
-/// `FS_DQ_BHARD | FS_DQ_BSOFT` — the only fields we set.
+/// `FS_DQ_BHARD | FS_DQ_BSOFT` — the block-limit fields.
 const FS_DQ_BSOFT: u16 = 0x0004;
 const FS_DQ_BHARD: u16 = 0x0008;
+/// `FS_DQ_ISOFT | FS_DQ_IHARD` — the inode-limit fields (see
+/// [`bytes_to_inode_limit`] for why we set these too).
+const FS_DQ_ISOFT: u16 = 0x0001;
+const FS_DQ_IHARD: u16 = 0x0002;
 
 /// `PRJQUOTA` quota type.
 const PRJQUOTA: u32 = 2;
@@ -155,6 +159,21 @@ fn bytes_to_basic_blocks(bytes: u64) -> u64 {
     bytes.div_ceil(BASIC_BLOCK_BYTES)
 }
 
+/// Inode limit derived from a byte limit.
+///
+/// XFS does not charge inode chunks (512 bytes each on v5 filesystems) to the
+/// project's *block* quota, so without an inode limit a tenant can consume
+/// node-wide space with empty files that its byte quota never sees. One inode
+/// per 4KiB of quota caps that overhead at ~12.5% of the byte limit; the floor
+/// keeps small slots usable — a Python venv alone runs to tens of thousands of
+/// files.
+const INODE_BYTES_PER_INODE: u64 = 4096;
+const MIN_INODE_LIMIT: u64 = 65_536;
+
+fn bytes_to_inode_limit(limit_bytes: u64) -> u64 {
+    (limit_bytes / INODE_BYTES_PER_INODE).max(MIN_INODE_LIMIT)
+}
+
 /// Stamp `project_id` onto `dir` and mark it project-inheriting.
 ///
 /// Must run before anything is written into the directory: inodes created
@@ -199,10 +218,12 @@ pub fn assign_project(dir: &Path, project_id: u32) -> Result<(), QuotaError> {
     Ok(())
 }
 
-/// Apply a hard block limit to `project_id`.
+/// Apply a hard block limit — and the inode limit derived from it, see
+/// [`bytes_to_inode_limit`] — to `project_id`.
 ///
-/// Soft and hard are set to the same value: a soft limit only starts a grace
-/// timer, and we want the write to fail at the boundary rather than days later.
+/// Soft and hard are set to the same value for both: a soft limit only starts
+/// a grace timer, and we want the write to fail at the boundary rather than
+/// days later.
 pub fn set_project_limit(
     fs_root: &Path,
     project_id: u32,
@@ -213,13 +234,16 @@ pub fn set_project_limit(
         source,
     })?;
     let blocks = bytes_to_basic_blocks(limit_bytes);
+    let inodes = bytes_to_inode_limit(limit_bytes);
     let quota = FsDiskQuota {
         d_version: FS_DQUOT_VERSION,
         d_flags: FS_PROJ_QUOTA,
-        d_fieldmask: FS_DQ_BHARD | FS_DQ_BSOFT,
+        d_fieldmask: FS_DQ_BHARD | FS_DQ_BSOFT | FS_DQ_ISOFT | FS_DQ_IHARD,
         d_id: project_id,
         d_blk_hardlimit: blocks,
         d_blk_softlimit: blocks,
+        d_ino_hardlimit: inodes,
+        d_ino_softlimit: inodes,
         ..Default::default()
     };
     // SAFETY: syscall 443 is `quotactl_fd(fd, cmd, id, addr)`; `quota` is a
@@ -284,5 +308,13 @@ mod tests {
         assert_eq!(bytes_to_basic_blocks(513), 2);
         // 64 GiB, the platform's spec.storage.max
         assert_eq!(bytes_to_basic_blocks(64 * 1024 * 1024 * 1024), 134_217_728);
+    }
+
+    #[test]
+    fn inode_limits_scale_with_the_byte_limit_and_never_drop_below_the_floor() {
+        assert_eq!(bytes_to_inode_limit(0), 65_536);
+        assert_eq!(bytes_to_inode_limit(256 * 1024 * 1024), 65_536); // exactly at the floor
+        assert_eq!(bytes_to_inode_limit(1024 * 1024 * 1024), 262_144);
+        assert_eq!(bytes_to_inode_limit(64 * 1024 * 1024 * 1024), 16_777_216);
     }
 }
