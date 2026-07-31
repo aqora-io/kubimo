@@ -553,6 +553,44 @@ impl SlotStore {
         Ok(published)
     }
 
+    /// Whether `(namespace, workspace)` has a live publish record right now.
+    ///
+    /// Scans the same `vol-` records [`Self::forget_publishes_for`] does, and
+    /// matches a legacy record (no namespace on line 5) by workspace alone for
+    /// the same reason: that field predates the very check a cross-tenant
+    /// collision depends on.
+    pub fn is_published(&self, namespace: &str, workspace: &str) -> Result<bool, StoreError> {
+        validate_workspace_name(namespace)?;
+        validate_workspace_name(workspace)?;
+        let entries = match std::fs::read_dir(self.index_dir()) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(io_err("listing index dir")(err)),
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.starts_with("vol-") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let mut lines = raw.lines();
+            if lines.next() != Some(workspace) {
+                continue;
+            }
+            lines.next(); // slot
+            lines.next(); // bucket
+            lines.next(); // key prefix
+            let recorded_namespace = lines.next().unwrap_or_default();
+            if recorded_namespace.is_empty() || recorded_namespace == namespace {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Drop a workspace's slot and everything indexing it.
     ///
     /// The project id file goes too, releasing that id: the quota limit set

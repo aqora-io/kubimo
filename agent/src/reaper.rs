@@ -84,6 +84,21 @@ async fn sweep(
         else {
             continue;
         };
+        // `should_reclaim` worked from a snapshot taken before a round of API calls;
+        // a publish can have landed since. The lock is the same one the publish path
+        // holds across slot resolution, so once it is ours either the new publish has
+        // already recorded itself — and the re-check below sees it — or it has not
+        // started resolving, in which case it will find no slot and allocate afresh.
+        let lock = store.lock_for(&namespace, &workspace);
+        let _guard = lock.lock().await;
+        match store.is_published(&namespace, &workspace) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(%err, workspace, "could not re-check publish state; keeping the slot");
+                continue;
+            }
+        }
         match store.remove_slot(&namespace, &workspace) {
             Ok(true) => {
                 reclaimed += 1;
@@ -172,12 +187,27 @@ async fn should_reclaim(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slot::SlotLayout;
+    use crate::slot::{SlotId, SlotLayout};
 
     fn store() -> (tempfile::TempDir, SlotStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = SlotStore::new(SlotLayout::new(dir.path()));
         (dir, store)
+    }
+
+    fn publish(store: &SlotStore, volume_id: &str, namespace: &str, workspace: &str, slot: SlotId) {
+        store
+            .record_publish(
+                volume_id,
+                &crate::store::PublishedSlot {
+                    workspace: workspace.to_string(),
+                    namespace: namespace.to_string(),
+                    slot,
+                    bucket: None,
+                    key_prefix: None,
+                },
+            )
+            .unwrap();
     }
 
     #[test]
@@ -394,5 +424,22 @@ mod tests {
                 .unwrap()
                 .contains(&("platform".to_string(), "bmow-live".to_string()))
         );
+    }
+
+    /// `sweep` decides to reclaim from a snapshot of `published_workspaces`
+    /// taken before a round of API calls. If a publish lands in that window,
+    /// the re-check under the lock — not the stale snapshot — must be what
+    /// the sweep trusts.
+    #[tokio::test]
+    async fn a_publish_that_lands_after_the_snapshot_still_pins_the_slot() {
+        let (_tmp, store) = store();
+        let resolved = store.resolve_or_create("platform", "bmow-late").unwrap();
+        store.mark_flushed("platform", "bmow-late").unwrap();
+        // Snapshot says unpublished…
+        let snapshot = store.published_workspaces().unwrap();
+        assert!(!snapshot.contains(&("platform".to_string(), "bmow-late".to_string())));
+        // …then a publish lands before the reaper reaches this workspace.
+        publish(&store, "csi-late", "platform", "bmow-late", resolved.id);
+        assert!(store.is_published("platform", "bmow-late").unwrap());
     }
 }
