@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use kubimo::Workspace;
 use kubimo::k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
 use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
@@ -296,6 +298,58 @@ pub(super) fn startup_complete(conditions: &[Condition]) -> bool {
             .iter()
             .any(|cond| cond.type_ == *type_ && cond.status == "True")
     })
+}
+
+/// Whether the runner's pod is passing its readiness probe, as of the
+/// conditions computed earlier in this same reconcile.
+///
+/// This is a second, independent observer of the runner's health: kubelet's
+/// probe travels over the pod network and is reported through the apiserver,
+/// not over the ingress path the status poll uses. The two can only agree by
+/// accident, which is what makes this worth consulting when the poll fails.
+pub(super) fn pod_is_ready(conditions: &[Condition]) -> bool {
+    conditions
+        .iter()
+        .any(|cond| cond.type_ == POD_READY && cond.status == "True")
+}
+
+/// How long `PodReady` has held its current status, in seconds.
+///
+/// [`upsert_condition`] bumps `last_transition_time` only when `status`
+/// changes — a reason or message change leaves it alone — so this is exactly
+/// "how long has the pod been (un)ready", stable across a crashloop's
+/// fluctuating back-off messages.
+pub(super) fn pod_ready_age_secs(conditions: &[Condition], now_secs: i64) -> Option<i64> {
+    conditions
+        .iter()
+        .find(|cond| cond.type_ == POD_READY)
+        .map(|cond| now_secs - cond.last_transition_time.0.as_second())
+}
+
+/// Requeue interval while the startup conditions are not all True.
+///
+/// Startup is genuinely slow, so the first window polls fast. But a pod that
+/// never becomes ready — a crashloop, or a `Render` runner that is never even
+/// polled — stays in this branch forever, and at 3s that is ~28,800 reconciles
+/// a day each, every one of them re-GETting the pod, PVC and Workspace. Decay
+/// once it is clear this is not a startup any more.
+pub(super) fn startup_requeue_interval(
+    conditions: &[Condition],
+    now_secs: i64,
+    poll_interval: Duration,
+) -> Duration {
+    const STARTING_WINDOW_SECS: i64 = 2 * 60;
+    const SETTLED_WINDOW_SECS: i64 = 10 * 60;
+    const WEDGED_REQUEUE: Duration = Duration::from_secs(60);
+
+    match pod_ready_age_secs(conditions, now_secs) {
+        // No PodReady condition yet: this reconcile is the first, so treat it
+        // as a fresh startup.
+        None => super::STARTUP_REQUEUE_INTERVAL,
+        Some(age) if age < STARTING_WINDOW_SECS => super::STARTUP_REQUEUE_INTERVAL,
+        Some(age) if age < SETTLED_WINDOW_SECS => poll_interval,
+        Some(_) => WEDGED_REQUEUE,
+    }
 }
 
 #[cfg(test)]
@@ -834,5 +888,68 @@ mod tests {
         extra.status = "False".to_string();
         conditions.push(extra);
         assert!(startup_complete(&conditions));
+    }
+
+    /// `PodReady` at a chosen age, which is what both the GC guard and the
+    /// requeue decay key on.
+    fn pod_ready_at(status: &str, transitioned_secs: i64) -> Vec<Condition> {
+        vec![Condition {
+            type_: POD_READY.to_string(),
+            status: status.to_string(),
+            reason: "Test".to_string(),
+            message: String::new(),
+            last_transition_time: Time(Timestamp::from_second(transitioned_secs).unwrap()),
+            observed_generation: None,
+        }]
+    }
+
+    #[test]
+    fn pod_is_ready_reads_the_condition_just_upserted() {
+        assert!(pod_is_ready(&pod_ready_at("True", 0)));
+        assert!(!pod_is_ready(&pod_ready_at("False", 0)));
+        // A missing condition is not readiness.
+        assert!(!pod_is_ready(&[]));
+    }
+
+    #[test]
+    fn pod_ready_age_is_measured_from_the_transition() {
+        let conditions = pod_ready_at("False", 1_000);
+        assert_eq!(pod_ready_age_secs(&conditions, 1_600), Some(600));
+        assert_eq!(pod_ready_age_secs(&[], 1_600), None);
+    }
+
+    /// A pod that is genuinely starting must keep the fast poll — that is the
+    /// whole reason the 3s interval exists.
+    #[test]
+    fn startup_requeue_stays_fast_for_a_real_startup() {
+        let poll = Duration::from_secs(10);
+        assert_eq!(
+            startup_requeue_interval(&pod_ready_at("False", 1_000), 1_030, poll),
+            super::super::STARTUP_REQUEUE_INTERVAL
+        );
+        // No condition yet: this is the first reconcile, so treat it as startup.
+        assert_eq!(
+            startup_requeue_interval(&[], 1_030, poll),
+            super::super::STARTUP_REQUEUE_INTERVAL
+        );
+    }
+
+    /// A pod that never becomes ready — a crashloop, or a `Render` runner that
+    /// is never polled at all — would otherwise sit at 3s forever, ~28,800
+    /// reconciles a day each.
+    #[test]
+    fn startup_requeue_decays_for_a_pod_that_never_becomes_ready() {
+        let poll = Duration::from_secs(10);
+        let start = 1_000;
+        assert_eq!(
+            startup_requeue_interval(&pod_ready_at("False", start), start + 5 * 60, poll),
+            poll,
+            "past the startup window it should fall back to the poll interval"
+        );
+        assert_eq!(
+            startup_requeue_interval(&pod_ready_at("False", start), start + 60 * 60, poll),
+            Duration::from_secs(60),
+            "a pod un-ready for an hour is wedged, not starting"
+        );
     }
 }
