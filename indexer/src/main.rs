@@ -82,6 +82,12 @@ impl UploadArgs {
 
 #[derive(Args, Debug)]
 struct CleanArgs {
+    /// Where the workspace's archive lives. Without it the manifest object is
+    /// left behind, because nothing in the cluster records its key.
+    #[arg(long, short, env = "AWS_BUCKET")]
+    bucket: Option<String>,
+    #[arg(long, short = 'p', env = "AWS_KEY_PREFIX")]
+    key_prefix: Option<String>,
     name: String,
 }
 
@@ -201,7 +207,14 @@ async fn main() {
         }
         Command::Clean(args) => {
             let client = kube_client().await;
-            upload::clean(&client, &s3, &args.name).await;
+            upload::clean(
+                &client,
+                &s3,
+                &args.name,
+                args.bucket.as_deref(),
+                args.key_prefix.as_deref(),
+            )
+            .await;
         }
     }
 }
