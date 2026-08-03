@@ -58,9 +58,11 @@ const ATTR_SEED_KEY_PREFIX: &str = "seedKeyPrefix";
 /// namespace returns "not found", which every caller here reads as "deleted".
 const ATTR_POD_NAMESPACE: &str = "csi.storage.k8s.io/pod.namespace";
 
-/// Owner of a slot's contents: the `me` user baked into the marimo image.
-const SLOT_UID: u32 = 1000;
-const SLOT_GID: u32 = 1000;
+/// Owner of every slot's contents: the `me` user baked into the marimo image,
+/// so the runner can write without kubelet's `fsGroup` recursion — which on a
+/// shared volume would chown every slot on the node at every pod start.
+pub(crate) const SLOT_UID: u32 = 1000;
+pub(crate) const SLOT_GID: u32 = 1000;
 
 pub struct KubimoIdentity;
 

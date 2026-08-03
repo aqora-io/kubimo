@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
+use csi::{SLOT_GID, SLOT_UID};
 use slot::SlotLayout;
 use store::SlotStore;
 
@@ -194,12 +195,6 @@ fn main() {
         std::process::exit(1);
     }
 }
-
-/// Owner of every slot's contents. Matches the `me` user baked into the marimo
-/// image, so the runner can write without kubelet's `fsGroup` recursion — which
-/// on a shared volume would chown every slot on the node at every pod start.
-const SLOT_UID: u32 = 1000;
-const SLOT_GID: u32 = 1000;
 
 fn inspect(data_root: &std::path::Path) {
     let layout = SlotLayout::new(data_root);
