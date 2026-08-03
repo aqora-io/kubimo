@@ -349,7 +349,7 @@ fn check_kernel(
     match (minimum, allow_unpatched) {
         (Some(minimum), _) => match kernel::require_at_least(minimum) {
             Ok(current) => {
-                tracing::info!(?current, minimum, "kernel meets the required minimum");
+                tracing::info!(%current, minimum, "kernel meets the required minimum");
                 Ok(())
             }
             Err(err) if allow_unpatched => {
