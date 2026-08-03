@@ -29,6 +29,20 @@ image:
 crds:
   enabled: true
 
+# Requires the 'metrics' feature to be enable
+# in the 'controller' crate.
+metrics:
+  enabled: true
+  port: 8080
+  service:
+    enabled: true
+    type: ClusterIP
+    annotations: {}
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
 # This is to override the chart name.
 nameOverride: ""
 fullnameOverride: ""
