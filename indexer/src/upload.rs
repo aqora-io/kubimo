@@ -1296,15 +1296,15 @@ mod tests {
         assert!(hit.is_some(), "unchanged file should hit the cache");
         assert_eq!(hit.unwrap().url.to_string(), "s3://bucket/abc");
 
-        // Touching it invalidates.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Touching it invalidates. The timestamp is the caller's to supply —
+        // `process_content` passes the one the walk already stat'd — so a
+        // synthetic bump stands in for waiting out the filesystem's mtime
+        // resolution.
         std::fs::write(&file, b"import marimo  # edited").unwrap();
         let meta = std::fs::metadata(&file).unwrap();
+        let touched = meta.modified().ok().map(|at| at + Duration::from_secs(1));
         assert!(
-            cache
-                .get(&relative, meta.modified().ok(), meta.len())
-                .await
-                .is_none(),
+            cache.get(&relative, touched, meta.len()).await.is_none(),
             "an edited file must miss"
         );
     }
