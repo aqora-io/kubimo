@@ -77,7 +77,7 @@ fi
 # notebook instead of using the workspace venv.
 ensure_marimo_venv_config() {
   if [ -f pyproject.toml ] && ! is_marimo_venv_configured; then
-    cat >>pyproject.toml <<TOML
+    /bin/cat >>pyproject.toml <<TOML
 
 [tool.marimo.venv]
 path = "$VIRTUAL_ENV"
@@ -98,7 +98,7 @@ TOML
 # `--no-install-package` skips it without touching the user's declared
 # dependencies or their lockfile.
 uv_sync_workspace() {
-  uv sync --no-install-package marimo
+  /usr/local/bin/uv sync --no-install-package marimo
 }
 
 mamba_update_workspace() {
@@ -123,7 +123,7 @@ mamba_update_workspace() {
 }
 
 is_marimo_venv_configured() {
-  python3 -c '
+  /usr/local/bin/python3 -c '
 import sys, tomllib
 with open("pyproject.toml", "rb") as f:
     data = tomllib.load(f)
@@ -157,7 +157,7 @@ if [[ "$CMD" == "edit" ]]; then
   ensure_marimo_venv_config
   export MARIMO_IN_SECURE_ENVIRONMENT=true
   export MARIMO_SESSION_COOKIE_SECURE=true
-  exec marimo \
+  exec /usr/local/bin/marimo \
     "${common_flags[@]}" \
     --yes \
     edit \
@@ -179,7 +179,7 @@ elif [[ "$CMD" == "run" ]]; then
   ensure_marimo_venv_config
   export MARIMO_IN_SECURE_ENVIRONMENT=true
   export MARIMO_SESSION_COOKIE_SECURE=true
-  exec marimo \
+  exec /usr/local/bin/marimo \
     "${common_flags[@]}" \
     --yes \
     run \
@@ -207,7 +207,7 @@ elif [[ "$CMD" == "render" ]]; then
     argv+=(--token "$TOKEN")
   fi
 
-  exec marimo-ssr serve "${argv[@]}" "$directory"
+  exec /usr/local/bin/marimo-ssr serve "${argv[@]}" "$directory"
 
 elif [[ "$CMD" == "cache" ]]; then
   if [[ -n "$UV_PROJECT" ]]; then
