@@ -815,7 +815,14 @@ impl SlotStore {
         let id = SlotId::generate();
         let project_id = self.allocate_project_id()?;
         std::fs::create_dir_all(self.layout.slot_dir(&id)).map_err(io_err("creating slot dir"))?;
-        self.record(namespace, workspace, &id, project_id)?;
+        if let Err(err) = self.record(namespace, workspace, &id, project_id) {
+            // Nothing else will ever find this directory: it has no `ws-` link,
+            // and every reclaim path walks the index rather than `slots/`. It is
+            // still empty at this point — hydration and the venv seed run later
+            // — so the leak is an inode, but it is permanent.
+            let _ = std::fs::remove_dir_all(self.layout.slot_dir(&id));
+            return Err(err);
+        }
         Ok(ResolvedSlot {
             id,
             project_id,
@@ -909,6 +916,38 @@ mod tests {
         let large = std::fs::read(store.counter_path()).unwrap();
 
         assert_eq!(small.len(), large.len(), "{small:?} vs {large:?}");
+    }
+
+    /// A slot whose index entry could not be written has no `ws-` link, and
+    /// every reclaim path walks the index — so if the directory survives,
+    /// nothing will ever remove it.
+    #[test]
+    fn a_slot_that_could_not_be_recorded_leaves_no_directory_behind() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, store) = store();
+        // Gets the index directory and the counter in place, so the failure
+        // lands on `record` rather than earlier.
+        store.resolve_or_create("platform", "bmow-a").unwrap();
+        let index = store.index_dir();
+        std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let failed = store.resolve_or_create("platform", "bmow-b");
+        std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(failed.is_err(), "expected recording to fail");
+
+        let orphans: Vec<_> = std::fs::read_dir(store.layout().slots_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                !store
+                    .index_dir()
+                    .join(format!("projid-{}", entry.file_name().to_string_lossy()))
+                    .exists()
+            })
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(orphans.is_empty(), "unreclaimable slot dirs: {orphans:?}");
     }
 
     /// A slot directory wiped by the LRU reaper must not leave the index
