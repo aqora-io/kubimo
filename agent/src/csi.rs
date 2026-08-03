@@ -426,6 +426,20 @@ impl KubimoNode {
     /// a failed flush is recoverable — whereas refusing to unmount would leave
     /// the pod stuck Terminating and block the node from draining.
     async fn flush_published_slot(&self, published: &crate::store::PublishedSlot) {
+        // A record written before the namespace was part of one, or one whose
+        // namespace line was lost. Every lookup below is namespaced, and an
+        // empty namespace builds a client that asks for `/namespaces//...`:
+        // the 404 that comes back reads as "workspace deleted" and the flush is
+        // skipped with a log line saying so, which is a lie.
+        if published.namespace.is_empty() {
+            tracing::error!(
+                workspace = %published.workspace,
+                slot = %published.slot,
+                "publish record has no namespace, so its final flush is being skipped; \
+                 changes since the last sync exist only on this node"
+            );
+            return;
+        }
         // No bucket recorded means the workspace has no archive configured;
         // there is nowhere to flush to.
         let Some(bucket) = published.bucket.clone() else {
@@ -478,10 +492,32 @@ impl KubimoNode {
         if let Err(err) = self.store.clear_flushed(&published.namespace, workspace) {
             tracing::warn!(%err, workspace, "could not clear the flush marker");
         }
-        if let Err(err) = crate::hydrate::flush_slot(&dir, workspace, &archive, &client, &s3).await
-        {
-            tracing::error!(%err, workspace, "flush failed; slot data is still on disk");
-            return;
+        match crate::hydrate::flush_slot(&dir, workspace, &archive, &client, &s3).await {
+            Ok(true) => {}
+            // The upload pipeline reports what it could not write rather than
+            // failing: a file whose upload failed, a walk that came back empty,
+            // a manifest that never landed. Every one of those leaves the
+            // archive short of the slot, so it is not a durability boundary and
+            // must not be recorded as one.
+            //
+            // A slot with no `workspace` subdirectory lands here too and so
+            // never gets an idle-eviction marker. That is deliberate: it is
+            // still reclaimed by the workspace-deleted path, and inventing a
+            // marker for a tree nothing has ever walked is exactly the claim
+            // this is here to stop making.
+            Ok(false) => {
+                tracing::error!(
+                    workspace,
+                    slot = %published.slot,
+                    "flush did not complete, so the slot is being kept; changes since the \
+                     last sync exist only on this node"
+                );
+                return;
+            }
+            Err(err) => {
+                tracing::error!(%err, workspace, "flush failed; slot data is still on disk");
+                return;
+            }
         }
         // Only now is the slot safe to treat as a cache. The reaper refuses to
         // evict a slot without this marker, precisely so a failed flush — or

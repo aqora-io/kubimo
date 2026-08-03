@@ -22,6 +22,7 @@ name = "agent"
 version = "0.1.34"
 dependencies = [
  "clap",
+ "http",
  "hyper-util",
  "indexer",
  "kubimo",
@@ -1461,6 +1462,7 @@ dependencies = [
  "clap",
  "crc32fast",
  "futures",
+ "http",
  "ignore",
  "kubimo",
  "lazy_static",
@@ -1474,6 +1476,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",

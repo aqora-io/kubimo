@@ -1387,24 +1387,37 @@ mod tests {
         );
     }
 
+    /// A client whose every request fails, without touching the network.
+    ///
+    /// Building one from a `Config` is not an option here: that constructs a
+    /// TLS stack eagerly, which panics in a workspace-wide test run where more
+    /// than one rustls crypto provider is compiled in.
+    fn offline_client() -> kubimo::Client {
+        let service = tower::service_fn(|_req: http::Request<kubimo::kube::client::Body>| async {
+            Err::<http::Response<kubimo::kube::client::Body>, std::io::Error>(
+                std::io::Error::other("no cluster in tests"),
+            )
+        });
+        kubimo::Client::new(
+            kubimo::kube::Client::new(service, "default"),
+            "kubimo-indexer",
+        )
+    }
+
     /// A cycle that could not write everything it walked must say so. The node
     /// agent's flush treats a clean `run` as permission to evict the slot —
     /// the only remaining copy of the tenant's newest work — so a cycle that
     /// reported nothing would trade that copy for a partial archive.
     ///
-    /// Driven through the `WorkspaceDirectory` patch: the client points at a
-    /// closed port, so the patch fails without needing a cluster. The storage
+    /// Driven through the `WorkspaceDirectory` patch: every request this client
+    /// makes fails, so the patch fails without needing a cluster. The storage
     /// status patch fails on the same client and is deliberately *not*
     /// counted, which is what pins the count at one.
     #[tokio::test]
     async fn a_cycle_that_could_not_write_a_directory_reports_a_failure() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notebook.py"), b"import marimo").unwrap();
-        let config = kubimo::kube::Config::new("http://127.0.0.1:1/".parse().unwrap());
-        let client = kubimo::Client::new(
-            kubimo::kube::Client::try_from(config).unwrap(),
-            "kubimo-indexer",
-        );
+        let client = offline_client();
         let options = UploadOptions {
             include_gitignored: false,
             exclude_hidden: false,
