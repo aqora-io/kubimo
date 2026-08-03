@@ -107,7 +107,7 @@ async fn sweep(
         // re-check: the workspace is gone and no flush is coming.
         if why == Reclaim::Idle {
             match store.flushed_ago(&namespace, &workspace) {
-                Ok(Some(age)) if age >= idle_ttl => {}
+                Ok(flushed_ago) if idle_expired(flushed_ago, idle_ttl) => {}
                 Ok(_) => continue,
                 Err(err) => {
                     tracing::warn!(%err, workspace, "could not re-read the flush marker; keeping the slot");
@@ -181,23 +181,27 @@ async fn should_reclaim(
     // Treating an idle slot as a cache is what pooled mode already assumes —
     // S3 is the source of truth, and a dropped slot costs one re-hydrate.
     //
-    // Only ever for a slot this node has actually flushed. Without that marker
-    // the slot may hold the only copy of the tenant's newest work: a flush that
-    // failed, or the deliberate skip when a workspace is being deleted. Age
-    // alone would turn either into data loss.
-    // Zero disables eviction: an operator who would rather pay for the disk
-    // than ever re-hydrate can turn it off outright.
-    if idle_ttl.is_zero() {
-        return None;
-    }
     match store.flushed_ago(namespace, workspace) {
-        Ok(Some(idle)) if idle >= idle_ttl => Some(Reclaim::Idle),
-        Ok(_) => None,
+        Ok(flushed_ago) => idle_expired(flushed_ago, idle_ttl).then_some(Reclaim::Idle),
         Err(err) => {
             tracing::warn!(%err, workspace, "could not read flush marker; keeping the slot");
             None
         }
     }
+}
+
+/// Has a slot been idle long enough to evict?
+///
+/// Zero disables eviction: an operator who would rather pay for the disk than
+/// ever re-hydrate can turn it off outright, and the arithmetic reading —
+/// "age >= 0" — would instead drop every flushed slot on the very next sweep.
+///
+/// Only ever for a slot this node has actually flushed. Without that marker the
+/// slot may hold the only copy of the tenant's newest work: a flush that
+/// failed, or the deliberate skip when a workspace is being deleted. Age alone
+/// would turn either into data loss.
+fn idle_expired(flushed_ago: Option<Duration>, idle_ttl: Duration) -> bool {
+    !idle_ttl.is_zero() && flushed_ago.is_some_and(|age| age >= idle_ttl)
 }
 
 #[cfg(test)]
@@ -249,24 +253,31 @@ mod tests {
     ///
     /// The distinction matters because the two readings are opposite: an
     /// operator who sets 0 wants slots kept forever, and the arithmetic
-    /// reading — "idle >= 0" — would drop every flushed slot on the next sweep.
+    /// reading — "idle >= 0" — would drop every flushed slot on the next sweep,
+    /// however recently it was written.
     #[test]
     fn a_zero_ttl_disables_eviction_rather_than_evicting_everything() {
-        let (_dir, store) = store();
-        store.resolve_or_create("platform", "bmow-keep").unwrap();
-        store.mark_flushed("platform", "bmow-keep").unwrap();
+        let month = Duration::from_secs(30 * 24 * 60 * 60);
+        assert!(!idle_expired(Some(month), Duration::ZERO));
+        assert!(!idle_expired(None, Duration::ZERO));
+    }
 
-        // The marker exists and its age is trivially >= 0, so only the explicit
-        // zero check stops this being reclaimed.
-        let idle = store
-            .flushed_ago("platform", "bmow-keep")
-            .unwrap()
-            .expect("flushed");
-        assert!(idle >= Duration::ZERO);
-        assert!(
-            Duration::ZERO.is_zero(),
-            "the guard `should_reclaim` uses is what keeps this slot"
-        );
+    /// Without a flush marker the slot may hold the only copy of the tenant's
+    /// newest work, so age can never make it evictable.
+    #[test]
+    fn an_unflushed_slot_never_expires() {
+        assert!(!idle_expired(None, DEFAULT_IDLE_TTL));
+    }
+
+    /// The TTL is inclusive: a slot idle for exactly the TTL is evictable, one a
+    /// second short of it is not.
+    #[test]
+    fn idle_expiry_is_inclusive_at_the_ttl() {
+        assert!(idle_expired(Some(DEFAULT_IDLE_TTL), DEFAULT_IDLE_TTL));
+        assert!(!idle_expired(
+            Some(DEFAULT_IDLE_TTL - Duration::from_secs(1)),
+            DEFAULT_IDLE_TTL
+        ));
     }
 
     /// A flush that fails must leave no marker, even if an earlier one
