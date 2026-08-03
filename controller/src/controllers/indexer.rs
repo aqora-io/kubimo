@@ -54,21 +54,45 @@ pub fn upload_args(workspace: &Workspace, watch: bool) -> Result<Vec<String>, ku
     Ok(args)
 }
 
-/// The archive's location is not recorded anywhere the indexer can look it up
-/// on its own, so the purge only reaches the manifest if we hand it over here.
 pub(crate) fn clean_args(workspace: &Workspace) -> Result<Vec<String>, kubimo::Error> {
     let workspace_name = workspace.name()?;
-    let mut args = vec!["clean".to_string()];
-    if let Some(indexer) = workspace.spec.indexer.as_ref() {
-        if let Some(bucket) = indexer.bucket.as_ref() {
-            args.extend(cmd!["--bucket", bucket]);
-        }
-        if let Some(key_prefix) = indexer.key_prefix.as_ref() {
-            args.extend(cmd!["--key-prefix", key_prefix]);
-        }
+    Ok(cmd!["clean", workspace_name])
+}
+
+/// Pod env for the purge, carrying the archive's location.
+///
+/// The archive's location is not recorded anywhere the indexer can look it up
+/// on its own, so the purge only reaches the manifest if we hand it over. It
+/// travels as environment rather than as `--bucket`/`--key-prefix` because the
+/// image running it is pinned separately from this controller
+/// (`controller.marimoImage`): an indexer older than those flags rejects the
+/// whole invocation, and since the deletion finalizer blocks until the Job
+/// succeeds, that leaves every workspace wedged in `Terminating`. An older
+/// indexer ignores an environment variable it does not know instead.
+///
+/// Set explicitly rather than left to the `envFrom` secret, which carries an
+/// `AWS_BUCKET` of its own: the spec is what the rest of the archive layout is
+/// derived from, so it has to win where the two disagree.
+pub(crate) fn clean_env(workspace: &Workspace) -> Option<Vec<EnvVar>> {
+    let mut env = env(workspace).unwrap_or_default();
+    let Some(indexer) = workspace.spec.indexer.as_ref() else {
+        return Some(env);
+    };
+    let mut set = |name: &str, value: &str| {
+        env.retain(|existing| existing.name != name);
+        env.push(EnvVar {
+            name: name.to_string(),
+            value: Some(value.to_string()),
+            ..Default::default()
+        });
+    };
+    if let Some(bucket) = indexer.bucket.as_ref() {
+        set("AWS_BUCKET", bucket);
     }
-    args.push(workspace_name.to_string());
-    Ok(args)
+    if let Some(key_prefix) = indexer.key_prefix.as_ref() {
+        set("AWS_KEY_PREFIX", key_prefix);
+    }
+    Some(env)
 }
 
 pub(crate) fn download_args(restore: &WorkspaceRestoreFrom) -> Vec<String> {
@@ -181,7 +205,7 @@ mod tests {
     /// The purge job is the only thing that ever deletes the manifest, and it
     /// can only do so with the archive's location on its command line.
     #[test]
-    fn test_clean_args_carry_the_archive_location() {
+    fn test_clean_env_carries_the_archive_location() {
         let workspace = kubimo::Workspace::new(
             "ws",
             kubimo::WorkspaceSpec {
@@ -193,17 +217,33 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(
-            clean_args(&workspace).unwrap(),
-            vec![
-                "clean",
-                "--bucket",
-                "bucket",
-                "--key-prefix",
-                "workspace/",
-                "ws"
-            ]
+        let env = clean_env(&workspace).unwrap();
+        let value = |name: &str| {
+            env.iter()
+                .find(|var| var.name == name)
+                .and_then(|var| var.value.clone())
+        };
+        assert_eq!(value("AWS_BUCKET").as_deref(), Some("bucket"));
+        assert_eq!(value("AWS_KEY_PREFIX").as_deref(), Some("workspace/"));
+    }
+
+    /// The purge runs in an image pinned separately from this controller, so an
+    /// indexer that predates the archive-location flags must still be able to
+    /// parse the invocation.
+    #[test]
+    fn test_clean_args_stay_parseable_by_an_older_indexer() {
+        let workspace = kubimo::Workspace::new(
+            "ws",
+            kubimo::WorkspaceSpec {
+                indexer: Some(kubimo::WorkspaceIndexer {
+                    bucket: Some("bucket".to_string()),
+                    key_prefix: Some("workspace/".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
         );
+        assert_eq!(clean_args(&workspace).unwrap(), vec!["clean", "ws"]);
     }
 
     /// A workspace with no bucket has no archive; the CR-driven purge is the

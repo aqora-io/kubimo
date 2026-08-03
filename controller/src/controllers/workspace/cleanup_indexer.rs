@@ -57,7 +57,7 @@ impl WorkspaceReconciler {
                             image: Some(ctx.config.marimo_image.clone()),
                             command: Some(cmd!["/app/indexer"]),
                             args: Some(indexer::clean_args(workspace)?),
-                            env: indexer::env(workspace),
+                            env: indexer::clean_env(workspace),
                             env_from: indexer::env_from(workspace),
                             volume_mounts: Some(vec![VolumeMount {
                                 mount_path: indexer::MOUNT_DIR.to_string(),
