@@ -160,16 +160,31 @@ pub fn bind(source_path: &Path, target: &Path, read_only: bool) -> Result<bool, 
         target: target.display().to_string(),
         source,
     })?;
-    if read_only {
+    if read_only
+        && let Err(source) =
+            rustix::mount::mount_remount(target, MountFlags::BIND | MountFlags::RDONLY, "")
+    {
         // A read-only bind needs a second remount call: the `ro` flag is
         // ignored on the initial bind, which would silently give a Render
         // runner write access to the workspace.
-        rustix::mount::mount_remount(target, MountFlags::BIND | MountFlags::RDONLY, "").map_err(
-            |source| MountError::Remount {
-                target: target.display().to_string(),
-                source,
-            },
-        )?;
+        //
+        // The read-write bind above is already in place, so it has to come back
+        // off before this returns. kubelet retries the publish, and a retry
+        // finds the target `Live` and returns success without ever reaching the
+        // remount — leaving the runner with exactly the writable mount this
+        // call was refusing to hand it. Nothing mounted is the recoverable
+        // state; a silently writable mount is not.
+        if let Err(detach_err) = detach(target) {
+            tracing::error!(
+                target = %target.display(),
+                error = %detach_err,
+                "could not detach a bind mount whose read-only remount failed"
+            );
+        }
+        return Err(MountError::Remount {
+            target: target.display().to_string(),
+            source,
+        });
     }
     Ok(true)
 }
