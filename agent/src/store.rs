@@ -15,6 +15,13 @@ use crate::slot::{SlotId, SlotIdError, SlotLayout};
 /// a shared package cache.
 const FIRST_PROJECT_ID: u32 = 1000;
 
+/// Width the project id counter is written at, zero-padded.
+///
+/// `u32::MAX` is ten digits, so every value the counter can hold fits: the file
+/// can be rewritten in place, and an in-place write can neither leave a
+/// fragment of a longer previous value behind nor pass through an empty state.
+const COUNTER_WIDTH: usize = 10;
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("workspace name {0:?} is not a valid Kubernetes object name")]
@@ -291,6 +298,10 @@ impl SlotStore {
     fn allocate_project_id(&self) -> Result<u32, StoreError> {
         std::fs::create_dir_all(self.index_dir()).map_err(io_err("creating index dir"))?;
         let path = self.counter_path();
+        // Checked before the `create(true)` open below, because a counter that
+        // is present but unreadable is not the same thing as no counter at all:
+        // only the latter may start over at `FIRST_PROJECT_ID`.
+        let existed = path.exists();
         let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -309,15 +320,66 @@ impl SlotStore {
         let mut raw = String::new();
         file.read_to_string(&mut raw)
             .map_err(io_err("reading project id counter"))?;
-        let next = raw.trim().parse::<u32>().unwrap_or(FIRST_PROJECT_ID);
+        let next = match raw.trim().parse::<u32>() {
+            Ok(next) => next,
+            // Nothing has ever been allocated on this volume.
+            Err(_) if !existed => FIRST_PROJECT_ID,
+            // The counter is there but says nothing usable. Starting over would
+            // hand out ids that live slots still hold, and two slots sharing one
+            // XFS project share one quota: each tenant's writes would eat the
+            // other's limit, and setting a limit for one would silently rewrite
+            // the other's. The `projid-` files are the only other record of what
+            // has been issued, so rebuild from them rather than reusing.
+            Err(_) => {
+                let recovered = self
+                    .highest_issued_project_id()
+                    .and_then(|highest| highest.checked_add(1))
+                    .unwrap_or(FIRST_PROJECT_ID);
+                tracing::warn!(
+                    recovered,
+                    "project id counter was empty or unreadable; \
+                     continuing past the highest id still recorded in the index"
+                );
+                recovered
+            }
+        };
         let following = next.checked_add(1).ok_or(StoreError::ProjectIdExhausted)?;
         file.seek(SeekFrom::Start(0))
             .map_err(io_err("rewinding project id counter"))?;
-        file.set_len(0).map_err(io_err("truncating counter"))?;
-        file.write_all(following.to_string().as_bytes())
+        // Fixed width and in place, deliberately: truncating first leaves the
+        // counter momentarily empty on disk, and a crash in that window is
+        // exactly the torn write the recovery above exists to clean up after.
+        file.write_all(format!("{following:0COUNTER_WIDTH$}").as_bytes())
             .map_err(io_err("writing project id counter"))?;
         file.sync_all().map_err(io_err("syncing counter"))?;
         Ok(next)
+    }
+
+    /// The highest project id still recorded in the index.
+    ///
+    /// Only consulted to rebuild a lost counter: the `projid-` files are the
+    /// only record of which ids have been handed out other than the counter
+    /// itself. Ids belonging to slots that were since removed are gone from
+    /// here too, but reissuing one of those is harmless — the slot's whole tree
+    /// went with it, so no inode still carries the project.
+    fn highest_issued_project_id(&self) -> Option<u32> {
+        std::fs::read_dir(self.index_dir())
+            .ok()?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("projid-"))
+            })
+            .filter_map(|entry| {
+                std::fs::read_to_string(entry.path())
+                    .ok()?
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+            })
+            .max()
     }
 
     /// Record that `workspace` in `namespace` owns `id` with `project_id`.
@@ -808,6 +870,45 @@ mod tests {
         }
         assert_eq!(seen.len(), 25);
         assert!(seen.iter().all(|id| *id >= FIRST_PROJECT_ID));
+    }
+
+    /// A crash between truncating the counter and writing it left the file
+    /// present but empty. Reading that as "start from the beginning" hands out
+    /// an id a live slot already holds, and two slots sharing one XFS project
+    /// share one quota: one tenant's writes consume the other's limit.
+    #[test]
+    fn an_empty_counter_cannot_reissue_a_live_project_id() {
+        let (_dir, store) = store();
+        let first = store.resolve_or_create("platform", "bmow-a").unwrap();
+        let second = store.resolve_or_create("platform", "bmow-b").unwrap();
+        let highest = first.project_id.max(second.project_id);
+
+        std::fs::write(store.counter_path(), b"").unwrap();
+
+        let third = store.resolve_or_create("platform", "bmow-c").unwrap();
+        assert!(
+            third.project_id > highest,
+            "reissued {} while {highest} is still held",
+            third.project_id
+        );
+    }
+
+    /// The counter is written at a width that does not depend on its value,
+    /// which is what lets it be rewritten in place: with a variable width it
+    /// has to be truncated first, and a crash in that window is what produced
+    /// the torn counter above.
+    #[test]
+    fn the_counter_width_does_not_depend_on_its_value() {
+        let (_dir, store) = store();
+        store.resolve_or_create("platform", "bmow-a").unwrap();
+        let small = std::fs::read(store.counter_path()).unwrap();
+
+        std::fs::write(store.counter_path(), b"9999999").unwrap();
+        let big = store.resolve_or_create("platform", "bmow-b").unwrap();
+        assert_eq!(big.project_id, 9_999_999);
+        let large = std::fs::read(store.counter_path()).unwrap();
+
+        assert_eq!(small.len(), large.len(), "{small:?} vs {large:?}");
     }
 
     /// A slot directory wiped by the LRU reaper must not leave the index
