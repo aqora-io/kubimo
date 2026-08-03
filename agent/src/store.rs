@@ -90,6 +90,34 @@ pub struct PublishedSlot {
     pub key_prefix: Option<String>,
 }
 
+/// Filename prefix of a publish record in the index directory.
+///
+/// Every scan below filters on it and `publish_path` composes it, so the two
+/// must agree: getting the prefix wrong makes every slot look unpublished, and
+/// the sweep then deletes slots out from under running pods.
+const PUBLISH_PREFIX: &str = "vol-";
+
+/// A publish record as it comes back off disk.
+struct PublishRecord {
+    path: PathBuf,
+    workspace: String,
+    /// Empty for a record written before `PublishedSlot` carried a namespace.
+    namespace: String,
+}
+
+impl PublishRecord {
+    /// Does this record name `(namespace, workspace)`?
+    ///
+    /// A record with no namespace matches by workspace alone. There is nothing
+    /// to compare — it predates the very field a cross-tenant collision hinges
+    /// on — and treating it as a match is the safer of the two mistakes: it can
+    /// only ever keep a slot alive longer, never reclaim one out from under a
+    /// running pod.
+    fn names(&self, namespace: &str, workspace: &str) -> bool {
+        self.workspace == workspace && (self.namespace.is_empty() || self.namespace == namespace)
+    }
+}
+
 /// A slot resolved for a workspace, and whether this call created it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSlot {
@@ -413,7 +441,46 @@ impl SlotStore {
             hash ^= *byte as u64;
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
-        self.index_dir().join(format!("vol-{hash:016x}"))
+        self.index_dir()
+            .join(format!("{PUBLISH_PREFIX}{hash:016x}"))
+    }
+
+    /// Every publish record in the index directory.
+    ///
+    /// An entry that cannot be named, read, or that holds no workspace at all is
+    /// skipped rather than failing the whole scan: one unreadable record must
+    /// not blind a caller to every other published slot on the node.
+    fn publish_records(&self) -> Result<Vec<PublishRecord>, StoreError> {
+        let entries = match std::fs::read_dir(self.index_dir()) {
+            Ok(entries) => entries,
+            // No index yet means nothing published yet.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(io_err("listing index dir")(err)),
+        };
+        let mut records = Vec::new();
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.starts_with(PUBLISH_PREFIX) {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let mut lines = raw.lines();
+            let Some(workspace) = lines.next() else {
+                continue;
+            };
+            lines.next(); // slot
+            lines.next(); // bucket
+            lines.next(); // key prefix
+            records.push(PublishRecord {
+                path: entry.path(),
+                workspace: workspace.to_string(),
+                namespace: lines.next().unwrap_or_default().to_string(),
+            });
+        }
+        Ok(records)
     }
 
     /// Remember what a published volume maps to.
@@ -484,34 +551,13 @@ impl SlotStore {
     /// [`Self::published_workspaces`] report the workspace as mounted forever, which
     /// stops the reaper reclaiming its slot for as long as this data volume lives.
     fn forget_publishes_for(&self, namespace: &str, workspace: &str) {
-        let Ok(entries) = std::fs::read_dir(self.index_dir()) else {
+        let Ok(records) = self.publish_records() else {
             return;
         };
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if !name.starts_with("vol-") {
-                continue;
+        for record in records {
+            if record.names(namespace, workspace) {
+                let _ = std::fs::remove_file(&record.path);
             }
-            let Ok(raw) = std::fs::read_to_string(entry.path()) else {
-                continue;
-            };
-            let mut lines = raw.lines();
-            if lines.next() != Some(workspace) {
-                continue;
-            }
-            lines.next(); // slot
-            lines.next(); // bucket
-            lines.next(); // key prefix
-            let recorded_namespace = lines.next().unwrap_or_default();
-            // A record written before `PublishedSlot` carried a namespace has
-            // none to compare against; matching by workspace alone is what it
-            // always did, and is no less safe here — this record predates the
-            // very field the cross-tenant collision hinges on.
-            if !recorded_namespace.is_empty() && recorded_namespace != namespace {
-                continue;
-            }
-            let _ = std::fs::remove_file(entry.path());
         }
     }
 
@@ -579,79 +625,29 @@ impl SlotStore {
     pub fn published_workspaces(
         &self,
     ) -> Result<std::collections::HashSet<(String, String)>, StoreError> {
-        let entries = match std::fs::read_dir(self.index_dir()) {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
-            Err(err) => return Err(io_err("listing index dir")(err)),
-        };
-        let mut published = std::collections::HashSet::new();
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            // Must match `publish_path`. Getting this prefix wrong makes every
-            // slot look unpublished, and the sweep then deletes slots out from
-            // under running pods.
-            if !name.starts_with("vol-") {
-                continue;
-            }
-            let Ok(raw) = std::fs::read_to_string(entry.path()) else {
-                continue;
-            };
-            let mut lines = raw.lines();
-            let Some(workspace) = lines.next() else {
-                continue;
-            };
-            lines.next(); // slot
-            lines.next(); // bucket
-            lines.next(); // key prefix
-            // Empty for a record written before `PublishedSlot` carried a
-            // namespace at all. Collecting it as the empty string rather than
-            // dropping the record keeps it visible to `should_reclaim`, which is
-            // the safer of the two mistakes: an unmatched published slot can
-            // only ever cause it to be kept a little longer, never reclaimed
-            // out from under a running pod.
-            let namespace = lines.next().unwrap_or_default();
-            published.insert((namespace.to_string(), workspace.to_string()));
-        }
-        Ok(published)
+        Ok(self
+            .publish_records()?
+            .into_iter()
+            // A legacy record's namespace is the empty string. Collecting it as
+            // such rather than dropping the record keeps it visible to
+            // `should_reclaim`, which is the safer of the two mistakes: an
+            // unmatched published slot can only ever cause a slot to be kept a
+            // little longer, never reclaimed out from under a running pod.
+            .map(|record| (record.namespace, record.workspace))
+            .collect())
     }
 
     /// Whether `(namespace, workspace)` has a live publish record right now.
     ///
-    /// Scans the same `vol-` records [`Self::forget_publishes_for`] does, and
-    /// matches a legacy record (no namespace on line 5) by workspace alone for
-    /// the same reason: that field predates the very check a cross-tenant
-    /// collision depends on.
+    /// Matched by [`PublishRecord::names`], legacy empty-namespace records
+    /// included.
     pub fn is_published(&self, namespace: &str, workspace: &str) -> Result<bool, StoreError> {
         validate_workspace_name(namespace)?;
         validate_workspace_name(workspace)?;
-        let entries = match std::fs::read_dir(self.index_dir()) {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(err) => return Err(io_err("listing index dir")(err)),
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if !name.starts_with("vol-") {
-                continue;
-            }
-            let Ok(raw) = std::fs::read_to_string(entry.path()) else {
-                continue;
-            };
-            let mut lines = raw.lines();
-            if lines.next() != Some(workspace) {
-                continue;
-            }
-            lines.next(); // slot
-            lines.next(); // bucket
-            lines.next(); // key prefix
-            let recorded_namespace = lines.next().unwrap_or_default();
-            if recorded_namespace.is_empty() || recorded_namespace == namespace {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(self
+            .publish_records()?
+            .iter()
+            .any(|record| record.names(namespace, workspace)))
     }
 
     /// Whether a `vol-` record *other than* `excluding_volume_id`'s names
@@ -676,38 +672,11 @@ impl SlotStore {
     ) -> Result<bool, StoreError> {
         validate_workspace_name(namespace)?;
         validate_workspace_name(workspace)?;
-        let excluded = self.publish_path(excluding_volume_id);
-        let excluded = excluded.file_name().and_then(|name| name.to_str());
-        let entries = match std::fs::read_dir(self.index_dir()) {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(err) => return Err(io_err("listing index dir")(err)),
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if !name.starts_with("vol-") {
-                continue;
-            }
-            if Some(name) == excluded {
-                continue;
-            }
-            let Ok(raw) = std::fs::read_to_string(entry.path()) else {
-                continue;
-            };
-            let mut lines = raw.lines();
-            if lines.next() != Some(workspace) {
-                continue;
-            }
-            lines.next(); // slot
-            lines.next(); // bucket
-            lines.next(); // key prefix
-            let recorded_namespace = lines.next().unwrap_or_default();
-            if recorded_namespace.is_empty() || recorded_namespace == namespace {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let excluded_path = self.publish_path(excluding_volume_id);
+        let excluded = excluded_path.file_name();
+        Ok(self.publish_records()?.iter().any(|record| {
+            record.path.file_name() != excluded && record.names(namespace, workspace)
+        }))
     }
 
     /// Drop a workspace's slot and everything indexing it.
@@ -1206,6 +1175,52 @@ mod tests {
         assert!(
             !store
                 .other_published_volumes("tenant-a", "workspace", "csi-runner")
+                .unwrap()
+        );
+    }
+
+    /// A record written before `PublishedSlot` carried a namespace has an empty
+    /// namespace line, and every scan matches it by workspace alone — there is
+    /// nothing else left to match on, and reading it as "not published" would
+    /// let the reaper pull the slot out from under whatever still has it
+    /// mounted.
+    #[test]
+    fn a_record_with_no_namespace_matches_by_workspace_alone() {
+        let (_tmp, store) = store();
+        let slot = store.resolve_or_create("tenant-a", "workspace").unwrap();
+        // The four-line body the older agent wrote.
+        std::fs::write(
+            store.publish_path("csi-legacy"),
+            format!("workspace\n{slot}\n\n", slot = slot.id),
+        )
+        .unwrap();
+
+        assert!(store.is_published("tenant-a", "workspace").unwrap());
+        assert!(
+            store
+                .other_published_volumes("tenant-a", "workspace", "csi-elsewhere")
+                .unwrap()
+        );
+        assert!(
+            store
+                .published_workspaces()
+                .unwrap()
+                .contains(&(String::new(), "workspace".to_string()))
+        );
+    }
+
+    /// The same workspace name in another tenant is a different workspace, so
+    /// its record must not pin this one.
+    #[test]
+    fn a_record_naming_another_namespace_is_not_a_match() {
+        let (_tmp, store) = store();
+        let slot = store.resolve_or_create("tenant-a", "workspace").unwrap();
+        publish(&store, "csi-a", "tenant-a", "workspace", slot.id.clone());
+
+        assert!(!store.is_published("tenant-b", "workspace").unwrap());
+        assert!(
+            !store
+                .other_published_volumes("tenant-b", "workspace", "csi-elsewhere")
                 .unwrap()
         );
     }
