@@ -667,11 +667,35 @@ async fn clean_workspace_dir(client: &kubimo::Client, name: String) {
     }
 }
 
-pub async fn clean(client: &kubimo::Client, s3: &S3Client, name: &str) {
+/// Purge everything a deleted workspace left behind: its `WorkspaceDirectory`
+/// CRs and every object they name, plus the archive manifest.
+///
+/// The manifest is passed in rather than discovered because its key is built
+/// from the bucket and prefix alone, never from the CRs. Leaving it behind is
+/// not merely litter: a workspace recreated at the same fixed `keyPrefix` finds
+/// that manifest, reads it as proof that an archive exists, and refuses to
+/// index itself until a file appears.
+///
+/// Known limitation: the sweep is driven by the CRs, so an archive whose CRs
+/// are already gone is missed entirely. Deleting by prefix instead would need a
+/// list API that `S3Client` does not have.
+pub async fn clean(
+    client: &kubimo::Client,
+    s3: &S3Client,
+    name: &str,
+    bucket: Option<&str>,
+    key_prefix: Option<&str>,
+) {
     let mut workspace_dirs = client
         .api::<WorkspaceDir>()
         .list(&FilterParams::new().with_fields((WorkspaceDirField::Workspace, name)));
     let futs = FuturesUnordered::new();
+    if let Some(bucket) = bucket {
+        match kubimo::manifest_url(bucket, key_prefix) {
+            Ok(url) => futs.push(clean_url(s3, url).boxed()),
+            Err(err) => tracing::error!("Error building manifest url: {err}"),
+        }
+    }
     while let Some(workspace_dir) = workspace_dirs.next().await {
         let workspace_dir = match workspace_dir {
             Ok(dir) => dir.item,
