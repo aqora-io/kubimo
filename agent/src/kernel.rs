@@ -28,7 +28,19 @@ pub enum KernelError {
 /// Compared component-wise so `6.8.0-99` sorts before `6.8.0-124`, which a
 /// plain string comparison gets wrong.
 #[derive(Debug, Clone)]
-pub struct KernelVersion(Vec<u64>);
+pub struct KernelVersion {
+    /// The string this was parsed from, kept verbatim for display. Spelling the
+    /// components back out would print `6.8.0.124` — a release that exists
+    /// nowhere, and that an operator cannot match against `uname -r`.
+    release: String,
+    components: Vec<u64>,
+}
+
+impl std::fmt::Display for KernelVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.release)
+    }
+}
 
 // Equality is defined by `cmp`, not by the underlying Vec: `Ord` treats absent
 // trailing components as zero, so `6.8` and `6.8.0` compare Equal and must
@@ -51,7 +63,10 @@ impl KernelVersion {
         if numeric.is_empty() {
             return Err(KernelError::Parse(release.to_string()));
         }
-        Ok(Self(numeric))
+        Ok(Self {
+            release: release.to_string(),
+            components: numeric,
+        })
     }
 
     pub fn current() -> Result<Self, KernelError> {
@@ -69,10 +84,10 @@ impl PartialOrd for KernelVersion {
 impl Ord for KernelVersion {
     fn cmp(&self, other: &Self) -> Ordering {
         // Missing trailing components count as zero, so `6.8` < `6.8.1`.
-        let len = self.0.len().max(other.0.len());
+        let len = self.components.len().max(other.components.len());
         for index in 0..len {
-            let ours = self.0.get(index).copied().unwrap_or(0);
-            let theirs = other.0.get(index).copied().unwrap_or(0);
+            let ours = self.components.get(index).copied().unwrap_or(0);
+            let theirs = other.components.get(index).copied().unwrap_or(0);
             match ours.cmp(&theirs) {
                 Ordering::Equal => continue,
                 other => return other,
@@ -91,7 +106,7 @@ pub fn require_at_least(minimum: &str) -> Result<KernelVersion, String> {
     let current = KernelVersion::current().map_err(|err| err.to_string())?;
     if current < minimum {
         return Err(format!(
-            "kernel {current:?} is older than the required {minimum:?}. A shared node volume \
+            "kernel {current} is older than the required {minimum}. A shared node volume \
              makes kernel filesystem bugs cross-tenant (see CVE-2026-64600); patch the node or \
              pass --allow-unpatched-kernel to accept the risk."
         ));
@@ -106,13 +121,32 @@ mod tests {
     #[test]
     fn parses_a_distro_release_string() {
         assert_eq!(
-            KernelVersion::parse("6.8.0-124-generic").unwrap(),
-            KernelVersion(vec![6, 8, 0, 124])
+            KernelVersion::parse("6.8.0-124-generic")
+                .unwrap()
+                .components,
+            vec![6, 8, 0, 124]
         );
         assert_eq!(
-            KernelVersion::parse("6.12.5").unwrap(),
-            KernelVersion(vec![6, 12, 5])
+            KernelVersion::parse("6.12.5").unwrap().components,
+            vec![6, 12, 5]
         );
+    }
+
+    /// The rendered version is read against `uname -r`, so it has to be the
+    /// release string itself: neither the components spelled back out
+    /// (`6.8.0.124`, a release that exists nowhere) nor the derived `Debug`
+    /// (`KernelVersion { .. }`) is something an operator can act on.
+    #[test]
+    fn renders_the_release_it_was_parsed_from() {
+        assert_eq!(
+            KernelVersion::parse("6.8.0-124-generic")
+                .unwrap()
+                .to_string(),
+            "6.8.0-124-generic"
+        );
+        // ...including in the refusal, which is the one an operator sees.
+        let err = require_at_least("99.0.0").unwrap_err();
+        assert!(err.contains("required 99.0.0"), "got: {err}");
     }
 
     /// The reason for component-wise comparison: as strings, "6.8.0-99" sorts
