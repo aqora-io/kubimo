@@ -184,6 +184,19 @@ async fn main() {
                 if result.refused {
                     std::process::exit(2);
                 }
+                // Same reasoning, one step further in: the archive was
+                // rewritten, but not from a complete picture of the tree. A
+                // caller must not read that as "this workspace is now safely
+                // in S3". Its own exit code, since the two need different
+                // remedies — this one is a retry.
+                if result.failures > 0 {
+                    tracing::error!(
+                        failures = result.failures,
+                        "Indexed with failures; the archive does not fully represent {}",
+                        args.directory.display()
+                    );
+                    std::process::exit(3);
+                }
             }
         }
         Command::Clean(args) => {

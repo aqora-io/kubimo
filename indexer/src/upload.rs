@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::{
@@ -116,6 +117,9 @@ pub struct WorkerOptions {
     keys: WorkspaceKeys,
     /// Lets an unchanged file skip being read and HEADed entirely.
     content_cache: ContentCache,
+    /// Shared with the run that spawned these workers: what they could not
+    /// upload is what the archive is missing, and only the run can report it.
+    failures: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -369,14 +373,22 @@ impl EntryWorker {
             self.process_content(&path, size),
         )
         .await;
+        // Deliberately not counted as a failure: the file's own content is
+        // uploaded either way, so the archive still restores this file. All
+        // that is lost is the notebook metadata a later cycle recomputes.
         let marimo = marimo
             .inspect_err(|err| {
                 tracing::error!("Error reading marimo for {}: {}", path.display(), err)
             })
             .ok()
             .flatten();
+        // This one is counted. A file with no content url is absent from the
+        // live url set, so the sweep deletes whatever was uploaded for it last
+        // time and the manifest is rewritten without it: the archive stops
+        // being a complete copy of the tree.
         let content = content
             .inspect_err(|err| {
+                self.opts.failures.fetch_add(1, Ordering::Relaxed);
                 tracing::error!("Error uploading content for {}: {}", path.display(), err)
             })
             .ok()
@@ -433,6 +445,9 @@ pub struct WalkOptions {
     include_gitignored: bool,
     exclude_hidden: bool,
     git_dir: Option<PathBuf>,
+    /// Shared with the run that started the walk: a subtree the walk could not
+    /// read is a subtree missing from the archive.
+    failures: Arc<AtomicUsize>,
 }
 
 pub fn walk(join_set: &mut JoinSet<()>, options: WalkOptions, buffer: usize) -> Receiver<PathBuf> {
@@ -448,6 +463,10 @@ pub fn walk(join_set: &mut JoinSet<()>, options: WalkOptions, buffer: usize) -> 
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(err) => {
+                        // Whatever this entry was — a file or a whole subtree —
+                        // never reaches the workers, so the manifest is written
+                        // as if it did not exist.
+                        options.failures.fetch_add(1, Ordering::Relaxed);
                         tracing::error!("Error reading entry: {}", err);
                         return ignore::WalkState::Continue;
                     }
@@ -754,6 +773,9 @@ async fn get_relative_git_dir(dir: impl AsRef<Path>) -> Result<PathBuf, GitDirEr
     Ok(dir.as_ref().join(relative))
 }
 
+/// `#[must_use]` because dropping this is how a caller silently promotes a
+/// half-written archive to a successful one.
+#[must_use]
 #[derive(Debug, Default)]
 pub struct RunResult {
     names: BTreeSet<String>,
@@ -762,6 +784,10 @@ pub struct RunResult {
     /// The cycle refused to touch the archive because the walk came back empty.
     /// One-shot runs turn this into a non-zero exit; the watcher keeps going.
     pub refused: bool,
+    /// Operations that failed in this cycle, so the archive no longer fully
+    /// represents the tree. Callers that treat a successful upload as a
+    /// durability boundary must not do so when this is non-zero.
+    pub failures: usize,
 }
 
 /// What the archive looked like before this cycle, as far as S3 can tell.
@@ -878,6 +904,11 @@ pub async fn run(
         }
     };
 
+    // One counter for the whole cycle, shared with the walk and the workers:
+    // every path that increments it is a path where the archive ends up
+    // narrower than the tree on disk.
+    let failures = Arc::new(AtomicUsize::new(0));
+
     let mut join_set = JoinSet::new();
     let rx = walk(
         &mut join_set,
@@ -886,6 +917,7 @@ pub async fn run(
             include_gitignored: args.include_gitignored,
             exclude_hidden: args.exclude_hidden,
             git_dir,
+            failures: failures.clone(),
         },
         1000,
     );
@@ -902,6 +934,7 @@ pub async fn run(
             upload_content: args.upload_content,
             upload_permits: upload_permits.clone(),
             keys: keys.clone(),
+            failures: failures.clone(),
         },
         1000,
         std::thread::available_parallelism()
@@ -973,6 +1006,7 @@ pub async fn run(
             urls: previous_urls.clone(),
             paths: take_paths(paths).await,
             refused: true,
+            failures: failures.load(Ordering::Relaxed),
         };
     }
     let names_to_delete = previous_names
@@ -987,13 +1021,18 @@ pub async fn run(
     // Upload the manifest before deleting stale objects so a concurrent
     // reader never holds a manifest referencing objects deleted by this
     // batch. The manifest url is never part of the stale-url bookkeeping.
-    if let Some(bucket) = args.bucket.as_deref() {
-        upload_manifest(args, s3, bucket, &workspace_dirs, &upload_permits).await;
+    if let Some(bucket) = args.bucket.as_deref()
+        && !upload_manifest(args, s3, bucket, &workspace_dirs, &upload_permits).await
+    {
+        // Without a manifest the archive cannot be restored at all, however
+        // many objects reached the bucket.
+        failures.fetch_add(1, Ordering::Relaxed);
     }
 
     let futs = FuturesUnordered::new();
     for mut dir in workspace_dirs.into_values() {
         let bmowds = client.api::<WorkspaceDir>();
+        let failures = failures.clone();
         futs.push(tokio::spawn(async move {
             if let Some(entries) = dir.spec.entries.as_mut() {
                 entries.sort_by_key(|entry| entry.name.clone())
@@ -1002,10 +1041,19 @@ pub async fn run(
             let name = dir.name().unwrap_or_default();
             match bmowds.patch(&dir).await {
                 Ok(_) => tracing::info!("Patched workspace dir {name} [{path}]"),
-                Err(err) => tracing::error!("Error creating workspace dir {name} [{path}]: {err}"),
+                Err(err) => {
+                    // The CRs are how the next cycle recovers this directory's
+                    // key layout, so one that never lands leaves the archive
+                    // and the cluster's view of it out of step.
+                    failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!("Error creating workspace dir {name} [{path}]: {err}")
+                }
             }
         }));
     }
+    // Neither sweep is counted as a failure: a stale CR or a stale object that
+    // survives is a leak, and the next cycle tries again. Nothing the tenant
+    // wrote is lost by it.
     for name in names_to_delete {
         let bmowds = client.api::<WorkspaceDir>();
         futs.push(tokio::spawn(async move {
@@ -1044,6 +1092,7 @@ pub async fn run(
         urls,
         paths,
         refused: false,
+        failures: failures.load(Ordering::Relaxed),
     }
 }
 
@@ -1052,33 +1101,43 @@ pub async fn run(
 /// Note the manifest reflects whatever the walk produced: a partially failed
 /// walk shrinks the manifest until a later batch repairs it (same semantics
 /// as the `WorkspaceDirectory` CR sweep).
+///
+/// Returns whether the manifest reached the bucket, because "the next batch
+/// rewrites it" is only true while there is a next batch — a one-shot flush
+/// has none, and restoring needs this object.
 async fn upload_manifest(
     args: &UploadOptions,
     s3: &S3Client,
     bucket: &str,
     workspace_dirs: &BTreeMap<String, WorkspaceDir>,
     upload_permits: &Semaphore,
-) {
+) -> bool {
     let manifest = kubimo::build_manifest(&args.name, args.upload_content, workspace_dirs);
     let url = match kubimo::manifest_url(bucket, args.key_prefix.as_deref()) {
         Ok(url) => url,
         Err(err) => {
             tracing::error!("Error building manifest url: {err}");
-            return;
+            return false;
         }
     };
     let bytes = match serde_json::to_vec(&manifest) {
         Ok(bytes) => bytes,
         Err(err) => {
             tracing::error!("Error serializing manifest: {err}");
-            return;
+            return false;
         }
     };
     let size = bytes.len() as u64;
     let input = std::io::Cursor::new(bytes);
     match s3.upload(&url, input, size, upload_permits).await {
-        Ok(_) => tracing::info!("Uploaded manifest to {url}"),
-        Err(err) => tracing::error!("Error uploading manifest to {url}: {err}"),
+        Ok(_) => {
+            tracing::info!("Uploaded manifest to {url}");
+            true
+        }
+        Err(err) => {
+            tracing::error!("Error uploading manifest to {url}: {err}");
+            false
+        }
     }
 }
 
@@ -1313,6 +1372,7 @@ mod tests {
                 include_gitignored: false,
                 exclude_hidden: false,
                 git_dir: None,
+                failures: Arc::new(AtomicUsize::new(0)),
             },
             16,
         );
@@ -1324,6 +1384,66 @@ mod tests {
         assert_eq!(
             count, 0,
             "an empty directory must yield no indexable paths, only the root that edit_paths drops"
+        );
+    }
+
+    /// A cycle that could not write everything it walked must say so. The node
+    /// agent's flush treats a clean `run` as permission to evict the slot —
+    /// the only remaining copy of the tenant's newest work — so a cycle that
+    /// reported nothing would trade that copy for a partial archive.
+    ///
+    /// Driven through the `WorkspaceDirectory` patch: the client points at a
+    /// closed port, so the patch fails without needing a cluster. The storage
+    /// status patch fails on the same client and is deliberately *not*
+    /// counted, which is what pins the count at one.
+    #[tokio::test]
+    async fn a_cycle_that_could_not_write_a_directory_reports_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notebook.py"), b"import marimo").unwrap();
+        let config = kubimo::kube::Config::new("http://127.0.0.1:1/".parse().unwrap());
+        let client = kubimo::Client::new(
+            kubimo::kube::Client::try_from(config).unwrap(),
+            "kubimo-indexer",
+        );
+        let options = UploadOptions {
+            include_gitignored: false,
+            exclude_hidden: false,
+            max_file_size: 1024,
+            max_upload_concurrency: 1,
+            // No bucket and no content: nothing here touches S3, so the only
+            // thing that can fail is the write to the cluster.
+            bucket: None,
+            key_prefix: None,
+            watch: false,
+            upload_content: false,
+            allow_empty: false,
+            watch_debounce_millis: 0,
+            watch_max_wait_millis: 0,
+            watch_poll_millis: 0,
+            name: "bmow-abc".to_string(),
+            directory: dir.path().to_path_buf(),
+        };
+        let keys = WorkspaceKeys::new(
+            WorkspaceDirNameSet::new("bmow-abc".to_string()),
+            WorkspaceFileUrlSet::new("bucket".to_string(), None).unwrap(),
+        );
+        let result = run(
+            &options,
+            &ContentCache::new(),
+            &client,
+            &S3Client::from_env(),
+            &keys,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+        .await;
+        assert!(
+            !result.refused,
+            "the walk found a file, so nothing to refuse"
+        );
+        assert_eq!(
+            result.failures, 1,
+            "the unwritable directory CR must be reported"
         );
     }
 }
