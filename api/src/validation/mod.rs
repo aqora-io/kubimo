@@ -45,6 +45,22 @@ pub fn workspace_restore_from_not_indexer_prefix() -> Rule {
     .field_path(".spec.restoreFrom")
 }
 
+/// A workspace that is Pooled — by spec *or* by materialized status — may never
+/// be told it is Dedicated.
+///
+/// `status.mode` is written on every reconcile path, so on a cluster whose
+/// default is Pooled a client-created workspace carries `spec.mode: None` plus
+/// `status.mode: Pooled`. Keying only on `oldSelf.spec.mode` therefore admitted
+/// `spec.mode: Dedicated` on exactly those objects. `effective_mode` prefers the
+/// status, so nothing breaks the moment it is applied — but the object now
+/// contradicts itself, and any event that drops the status (a spec-only restore,
+/// a status replace, a CRD re-create) resolves it to Dedicated and the
+/// controller provisions a PVC and an init Job for a workspace whose files live
+/// in a pooled slot.
+///
+/// Stated as "was Pooled ⇒ the new spec must not say Dedicated" rather than
+/// "⇒ must be Pooled": the latter would make every status-only-Pooled workspace
+/// unpatchable, since its spec has no mode to satisfy the requirement with.
 pub fn workspace_mode_no_downgrade() -> Rule {
     Rule::new(include_str!("./workspace_mode_no_downgrade.cel"))
         .message("workspace mode cannot be changed back from Pooled to Dedicated")
