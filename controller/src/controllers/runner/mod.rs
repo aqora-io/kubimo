@@ -52,7 +52,7 @@ impl Reconciler for RunnerReconciler {
             .api_namespaced::<Workspace>(namespace)
             .get_opt(&runner.spec.workspace)
             .await?;
-        match workspace {
+        let workspace = match workspace {
             // Workspace does not exist
             None => {
                 return Err(kubimo::Error::Custom(format!(
@@ -65,14 +65,18 @@ impl Reconciler for RunnerReconciler {
                 return Ok(Action::requeue(Duration::from_secs(5)));
             }
             // Workspace is ready
-            Some(_) => {}
-        }
+            Some(workspace) => workspace,
+        };
 
         let applied = futures::future::try_join_all([
-            self.apply_owner_reference(ctx, runner).boxed(),
-            self.apply_pod(ctx, runner).map_ok(|_| ()).boxed(),
-            self.apply_service(ctx, runner).map_ok(|_| ()).boxed(),
-            self.apply_ingress(ctx, runner).map_ok(|_| ()).boxed(),
+            self.apply_owner_reference(ctx, runner)
+                .map_ok(|_| false)
+                .boxed(),
+            self.apply_pod(ctx, runner, &workspace)
+                .map_ok(|applied| matches!(applied, apply_pod::PodApply::Replaced))
+                .boxed(),
+            self.apply_service(ctx, runner).map_ok(|_| false).boxed(),
+            self.apply_ingress(ctx, runner).map_ok(|_| false).boxed(),
         ])
         .await;
 
@@ -82,22 +86,29 @@ impl Reconciler for RunnerReconciler {
         // deletes a runner, and on every manual pod delete — which is exactly when
         // someone is reading these logs.
         //
-        // A 422 means the apply hit an immutable pod field; when apply_pod confirmed the
-        // known runtime-class drift it has already deleted the pod, and this requeue is
-        // what recreates it once the old one finishes terminating.
-        if let Err(err) = applied {
-            if is_already_exists(&err) {
+        // Everything else propagates, 422s included. A 422 that apply_pod did *not*
+        // confirm as the known runtime-class drift is an ordinary validation failure —
+        // a Runner whose resources put requests over limits, say — and never converges;
+        // requeuing those on a fixed 2s timer would spin forever instead of letting the
+        // controller's backoff space them out.
+        let replaced = match applied {
+            Ok(outcomes) => outcomes.into_iter().any(|replaced| replaced),
+            Err(err) if is_already_exists(&err) => {
                 return Ok(Action::requeue(Duration::from_secs(2)));
             }
-            if is_immutable_conflict(&err) {
-                // Not every 422 is the runtime-class drift apply_pod handles: any other
-                // validation failure returns 422 too and never converges, so warn rather
-                // than loop on it invisibly every 2s. A few lines during a legitimate
-                // drift replacement are acceptable noise.
-                tracing::warn!(%err, "pod apply returned 422; requeuing to recreate the pod");
-                return Ok(Action::requeue(Duration::from_secs(2)));
-            }
-            return Err(err);
+            Err(err) => return Err(err),
+        };
+
+        if replaced {
+            // apply_pod deleted a pod whose immutable runtimeClassName had drifted.
+            // Nothing has recreated it, and its deletion is not a change this
+            // controller can wait on, so come back once the old one has finished
+            // terminating and the name is free again.
+            tracing::info!(
+                runner = runner.name()?,
+                "replaced a drifted pod; requeuing to recreate it"
+            );
+            return Ok(Action::requeue(Duration::from_secs(2)));
         }
 
         Ok(Action::await_change())
@@ -116,15 +127,14 @@ fn is_already_exists(err: &kubimo::Error) -> bool {
     )
 }
 
-/// A 422 from the API server — what an apply that tries to change an immutable
-/// field (e.g. a pod's `runtimeClassName`) returns, and one that never resolves
-/// on its own retry: the field stays wrong forever unless the object is
-/// replaced.
+/// A 422 from the API server, and nothing more specific than that.
 ///
-/// A 422 is also what any other validation failure returns, so this alone must
-/// not justify anything destructive: apply_pod confirms the actual drift
-/// against the live pod before deleting.
-fn is_immutable_conflict(err: &kubimo::Error) -> bool {
+/// An apply that tries to change an immutable field (e.g. a pod's
+/// `runtimeClassName`) returns one, but so does every other validation failure,
+/// so this is only ever a cheap pre-filter: apply_pod confirms the actual drift
+/// against the live pod before deleting anything, and a 422 it cannot account
+/// for is returned to the caller unchanged.
+fn is_invalid_request(err: &kubimo::Error) -> bool {
     matches!(
         err,
         kubimo::Error::Kube(kubimo::kube::Error::Api(status)) if status.code == 422
@@ -170,19 +180,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_422_reads_as_an_immutable_field_conflict() {
+    fn only_a_422_reads_as_an_invalid_request() {
         let invalid = kubimo::Error::Kube(kubimo::kube::Error::Api(
             kubimo::kube::core::Status::failure("pod updates may not change fields", "Invalid")
                 .with_code(422)
                 .boxed(),
         ));
-        assert!(is_immutable_conflict(&invalid));
+        assert!(is_invalid_request(&invalid));
 
         let conflict = kubimo::Error::Kube(kubimo::kube::Error::Api(
             kubimo::kube::core::Status::failure("still terminating", "Conflict")
                 .with_code(409)
                 .boxed(),
         ));
-        assert!(!is_immutable_conflict(&conflict));
+        assert!(!is_invalid_request(&conflict));
     }
 }

@@ -1,5 +1,13 @@
 {{- if .Values.agent.enabled }}
-{{- if semverCompare "< 1.29.0" .Capabilities.KubeVersion.Version }}
+{{- /*
+  `-0` on the bound, deliberately: every managed distribution reports a version
+  with a build suffix (`v1.28.5-gke.1091002`, `v1.28.8-eks-a737599`), which
+  semver reads as a *pre-release*, and a constraint with no pre-release of its
+  own never matches one. So the plain `< 1.29.0` form silently passed on
+  exactly the clusters this guard exists for. The lowest possible pre-release
+  makes the comparison fall back to major/minor/patch.
+*/ -}}
+{{- if semverCompare "< 1.29.0-0" .Capabilities.KubeVersion.Version }}
 {{- fail "the kubimo agent requires Kubernetes >= 1.29 (native sidecar containers for the CSI registrar)" }}
 {{- end }}
 apiVersion: apps/v1

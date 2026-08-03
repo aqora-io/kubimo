@@ -73,20 +73,23 @@ pub async fn seed_from_template(data_root: &Path, slot_dir: &Path) -> Result<boo
         .output()
         .await?;
     if !output.status.success() {
-        // Whatever landed is a venv missing an arbitrary subset of its
-        // packages, and the skip-if-present check above would keep it forever.
-        // The quota is applied before this runs, so a workspace whose
-        // `spec.storage.max` is below the ~920MB template reliably gets EDQUOT
-        // partway. Removing it puts the slot back to "no template staged",
+        // Whatever landed is an arbitrary prefix of the skeleton, and the
+        // skip-if-present check above would keep it forever. The quota is
+        // applied before this runs, so a workspace whose `spec.storage.max` is
+        // below the ~920MB template reliably gets EDQUOT partway.
+        //
+        // The whole slot goes, not just the venv: `cp` copies the entire home
+        // skeleton, so it can equally die on a truncated
+        // `workspace/pyproject.toml` — the one file whose absence or corruption
+        // makes `uv sync` fail and the runner never start. Seeding only ever
+        // runs on a freshly created slot, so there is nothing here but our own
+        // partial copy. Clearing it puts the slot back to "no template staged",
         // where the runner builds its own venv — slow, but working.
-        let venv = slot_dir.join(VENV_SUBDIR);
-        if let Err(err) = std::fs::remove_dir_all(&venv)
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
+        if let Err(err) = clear_dir_contents(slot_dir) {
             tracing::error!(
                 %err,
-                venv = %venv.display(),
-                "could not remove a partially copied venv template"
+                slot = %slot_dir.display(),
+                "could not clear a partially copied venv template"
             );
         }
         return Err(VenvError::Copy(
@@ -94,6 +97,24 @@ pub async fn seed_from_template(data_root: &Path, slot_dir: &Path) -> Result<boo
         ));
     }
     Ok(true)
+}
+
+/// Remove everything inside `dir`, keeping `dir` itself.
+///
+/// The directory has to stay: it is the slot, already stamped with its XFS
+/// project id and chowned to the runner, and recreating it would drop both.
+fn clear_dir_contents(dir: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        // `file_type` on the entry, not `metadata`: it does not follow symlinks,
+        // so a link to a directory is unlinked rather than recursed into.
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -137,9 +158,14 @@ mod tests {
 
     /// A copy that dies partway — the slot's quota is applied before it runs,
     /// so any workspace smaller than the ~920MB template hits `EDQUOT` mid-tree
-    /// — must not leave a half venv behind. The caller only warns, so the slot
-    /// would be published with a venv missing an arbitrary subset of its
+    /// — must not leave a half skeleton behind. The caller only warns, so the
+    /// slot would be published with a venv missing an arbitrary subset of its
     /// packages, and the skip-if-present check would never let it be repaired.
+    ///
+    /// The whole slot is cleared, not just the venv: `cp` can equally die on a
+    /// truncated `workspace/pyproject.toml`, and that one makes `uv sync` fail
+    /// outright. Which files landed before the failure is up to readdir order,
+    /// so the assertion is that *nothing* survives.
     #[tokio::test]
     async fn a_failed_copy_leaves_no_venv_and_the_next_call_re_seeds() {
         use std::os::unix::fs::PermissionsExt;
@@ -148,6 +174,8 @@ mod tests {
         let template = dir.path().join(TEMPLATE_SUBDIR);
         std::fs::create_dir_all(template.join(VENV_SUBDIR).join("lib")).unwrap();
         std::fs::write(template.join(VENV_SUBDIR).join("lib/marimo.py"), b"x").unwrap();
+        std::fs::create_dir_all(template.join("workspace")).unwrap();
+        std::fs::write(template.join("workspace/pyproject.toml"), b"[project]").unwrap();
         // Unreadable to this (non-root) process, so `cp` copies part of the
         // tree and then fails — standing in for the `EDQUOT` partway through.
         let locked = template.join(VENV_SUBDIR).join("locked.py");
@@ -158,10 +186,16 @@ mod tests {
 
         let err = seed_from_template(dir.path(), &slot).await.unwrap_err();
         assert!(matches!(err, VenvError::Copy(_)), "{err:?}");
+        let leftovers: Vec<_> = std::fs::read_dir(&slot)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
         assert!(
-            !slot.join(VENV_SUBDIR).exists(),
-            "a partial venv would be published as if it were complete"
+            leftovers.is_empty(),
+            "a partial skeleton would be published as if it were complete: {leftovers:?}"
         );
+        assert!(slot.is_dir(), "the slot itself must survive");
 
         // With the obstacle gone the next publish re-seeds, rather than
         // skipping because a venv is already there.

@@ -628,11 +628,15 @@ impl SlotStore {
         Ok(self
             .publish_records()?
             .into_iter()
-            // A legacy record's namespace is the empty string. Collecting it as
-            // such rather than dropping the record keeps it visible to
-            // `should_reclaim`, which is the safer of the two mistakes: an
-            // unmatched published slot can only ever cause a slot to be kept a
-            // little longer, never reclaimed out from under a running pod.
+            // A legacy record's namespace is the empty string, and it is
+            // collected as such — the reaper's `should_reclaim` matches this set
+            // by exact tuple, so an empty namespace will *not* match the
+            // workspace's real one and does not protect the slot here. What
+            // protects it is the reaper's `is_published` re-check under the
+            // lock, which goes through [`PublishRecord::names`] and does match a
+            // record with no namespace by workspace alone. Reporting the record
+            // rather than dropping it keeps this set an honest account of what
+            // is on disk.
             .map(|record| (record.namespace, record.workspace))
             .collect())
     }
@@ -783,15 +787,23 @@ impl SlotStore {
         }
         let id = SlotId::generate();
         let project_id = self.allocate_project_id()?;
+        // Indexed *before* the directory exists, deliberately. Neither step can
+        // be made atomic with the other, so the question is only which order
+        // survives being killed in between:
+        //
+        // - directory first leaves one nothing will ever find, since it has no
+        //   `ws-` link and every reclaim path walks the index rather than
+        //   `slots/`. That leak is permanent.
+        // - index first leaves a link pointing at a missing directory, which
+        //   [`Self::lookup`] already reads as "no slot" — so the next publish
+        //   allocates a fresh one and overwrites the link, and the reaper can
+        //   still find and clear it in the meantime.
+        //
+        // The same reasoning covers `create_dir_all` failing outright: the
+        // index entry it leaves behind is self-correcting, so there is nothing
+        // to roll back.
+        self.record(namespace, workspace, &id, project_id)?;
         std::fs::create_dir_all(self.layout.slot_dir(&id)).map_err(io_err("creating slot dir"))?;
-        if let Err(err) = self.record(namespace, workspace, &id, project_id) {
-            // Nothing else will ever find this directory: it has no `ws-` link,
-            // and every reclaim path walks the index rather than `slots/`. It is
-            // still empty at this point — hydration and the venv seed run later
-            // — so the leak is an inode, but it is permanent.
-            let _ = std::fs::remove_dir_all(self.layout.slot_dir(&id));
-            return Err(err);
-        }
         Ok(ResolvedSlot {
             id,
             project_id,
