@@ -210,20 +210,29 @@ async fn wait_until_deleted(client: &kubimo::Client, workspace: &str) {
 /// The archive scope is deliberately unchanged from the standalone indexer —
 /// `.gitignore` is honoured and only `<slot>/workspace` is walked. Tracked
 /// files are durable; the venv and other scratch are not, and are rebuilt.
+///
+/// `true` means the archive now fully represents the slot, and only then may
+/// the caller record a flush. `false` means part of the tree — or all of it —
+/// is still only on this node: the upload pipeline logs its own failures and
+/// carries on, because in the watcher's world the next cycle repairs them, but
+/// a one-shot flush has no next cycle. Anything that reads the flush marker as
+/// permission to discard the slot would be discarding the only copy.
 pub async fn flush_slot(
     slot_dir: &Path,
     workspace: &str,
     archive: &ArchiveLocation,
     client: &kubimo::Client,
     s3: &indexer::s3::S3Client,
-) -> Result<(), HydrateError> {
+) -> Result<bool, HydrateError> {
     if !slot_dir.join(WORKSPACE_SUBDIR).is_dir() {
-        // Nothing was ever hydrated here; there is nothing to push back.
-        return Ok(());
+        // Nothing was ever hydrated here, so nothing was pushed back either.
+        // Not an error, but not a flush: the archive has not been shown to
+        // match a slot whose contents were never walked.
+        return Ok(false);
     }
     let (options, keys, previous) =
         upload_inputs(slot_dir, workspace, archive, false, client, s3).await?;
-    indexer::upload::run(
+    let result = indexer::upload::run(
         &options,
         // One-shot flush; the watcher keeps its own long-lived cache.
         &indexer::fingerprint::ContentCache::new(),
@@ -234,7 +243,10 @@ pub async fn flush_slot(
         &previous.urls,
     )
     .await;
-    Ok(())
+    // A refusal means the walk came back empty while an archive exists, so the
+    // archive was deliberately left alone — it describes some older state of
+    // this slot, not this one.
+    Ok(!result.refused && result.failures == 0)
 }
 
 /// Restore `archive` into `slot_dir/workspace`.
@@ -276,5 +288,54 @@ pub async fn hydrate_slot(
             ..
         }))) => Ok(false),
         Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A slot with no `workspace` subdirectory has had nothing pushed to S3,
+    /// and saying otherwise is what lets the reaper evict it. Reporting `Ok` on
+    /// this path once meant the caller marked the slot flushed without a single
+    /// byte having been uploaded.
+    ///
+    /// Nothing here reaches the cluster or S3: the check runs before either
+    /// client is touched, which is the point — an empty slot must be decided
+    /// locally.
+    #[tokio::test]
+    async fn a_slot_without_a_workspace_directory_is_not_a_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        // Every request this client makes fails, so reaching the cluster at all
+        // would be visible as an error rather than passing quietly. Building
+        // one from a `Config` is not an option: that constructs a TLS stack
+        // eagerly, which panics in a workspace-wide test run where more than
+        // one rustls crypto provider is compiled in.
+        let service = tower::service_fn(|_req: http::Request<kubimo::kube::client::Body>| async {
+            Err::<http::Response<kubimo::kube::client::Body>, std::io::Error>(
+                std::io::Error::other("no cluster in tests"),
+            )
+        });
+        let client = kubimo::Client::new(
+            kubimo::kube::Client::new(service, "default"),
+            "kubimo-indexer",
+        );
+        let archive = ArchiveLocation {
+            bucket: "bucket".to_string(),
+            key_prefix: None,
+        };
+        let flushed = flush_slot(
+            dir.path(),
+            "bmow-abc",
+            &archive,
+            &client,
+            &indexer::s3::S3Client::from_env(),
+        )
+        .await
+        .expect("an unhydrated slot is not an error");
+        assert!(
+            !flushed,
+            "nothing was uploaded, so this must not be recorded as a flush"
+        );
     }
 }
