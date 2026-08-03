@@ -35,13 +35,25 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Set up Helm
         uses: azure/setup-helm@v5.0.1
+        with:
+          version: "v4.2.3"
         id: install
+      - name: Set up helm-unittest
+        # https://github.com/helm-unittest/helm-unittest/blob/main/README.md#install
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest.git --verify=false --version "v1.1.2"
       - name: Lint charts
         run: |
           for chart in charts/*/; do
             helm lint "$chart"
+          done
+      - name: Test charts
+        run: |
+          for chart in charts/*/; do
+            helm unittest -u "$chart"
           done
 
   cache-py:
