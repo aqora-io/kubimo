@@ -4,6 +4,8 @@ mod config;
 mod context;
 pub mod controllers;
 mod error;
+#[cfg(feature = "metrics")]
+pub mod metrics;
 mod reconciler;
 mod resources;
 mod service;

@@ -46,6 +46,12 @@ async fn main() -> ExitCode {
         .expect("Could not install default crypto provider");
     let config = Config::load().unwrap();
 
+    #[cfg(feature = "metrics")]
+    if config.metrics.enabled {
+        #[cfg(feature = "metrics")]
+        kubimo_controller::metrics::install(config.metrics.bind_addr);
+    }
+
     let mut builder = kubimo::Client::builder();
     builder.name(&config.manager_name);
     let client = builder.build().await.unwrap();

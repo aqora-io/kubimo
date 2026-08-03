@@ -36,6 +36,18 @@ fn default_runner_proxy_timeout_secs() -> u32 {
     3600
 }
 
+#[cfg(feature = "metrics")]
+#[inline]
+fn default_metrics_enabled() -> bool {
+    true
+}
+
+#[cfg(feature = "metrics")]
+#[inline]
+fn default_metrics_bind_addr() -> std::net::SocketAddr {
+    ([0, 0, 0, 0], 8080).into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "method")]
 pub enum StatusCheckResolution {
@@ -59,6 +71,25 @@ impl Default for StatusCheck {
         Self {
             resolution: Default::default(),
             interval_secs: default_runner_status_check_interval_secs(),
+        }
+    }
+}
+
+#[cfg(feature = "metrics")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsConfig {
+    #[serde(default = "default_metrics_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_metrics_bind_addr")]
+    pub bind_addr: std::net::SocketAddr,
+}
+
+#[cfg(feature = "metrics")]
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_metrics_enabled(),
+            bind_addr: default_metrics_bind_addr(),
         }
     }
 }
@@ -99,6 +130,9 @@ pub struct Config {
     pub runner_proxy_timeout_secs: u32,
     #[serde(default)]
     pub runner_status: StatusCheck,
+    #[cfg(feature = "metrics")]
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 impl Config {

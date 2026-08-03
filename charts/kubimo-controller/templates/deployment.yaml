@@ -33,6 +33,12 @@ spec:
           {{- end }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -89,6 +95,13 @@ spec:
             {{- if .intervalSecs }}
             - name: KUBIMO__RUNNER_STATUS__INTERVAL_SECS
               value: {{ .intervalSecs | quote }}
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: KUBIMO__METRICS__BIND_ADDR
+              value: "0.0.0.0:{{ .Value.metrics.port }}"
+            {{- else}}
+            - name: KUBIMO__METRICS__ENABLED
+              value: false
             {{- end }}
             {{- end }}
           {{- end }}

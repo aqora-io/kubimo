@@ -9,6 +9,8 @@ use tower::{Service, ServiceBuilder};
 
 use crate::backoff::{BackoffError, DefaultBackoffLayer};
 use crate::context::Context;
+#[cfg(feature = "metrics")]
+use crate::metrics::{MetricsLayer, controller_name};
 use crate::service::{Finalizer, FinalizerError, reconcile};
 use crate::tracing::TraceLayer;
 
@@ -56,8 +58,10 @@ pub trait ReconcilerExt: Reconciler {
         <Self::Resource as Resource>::DynamicType: Default,
         Self::Error: std::error::Error + Send + 'static,
     {
-        ServiceBuilder::new()
-            .layer(TraceLayer)
+        let builder = ServiceBuilder::new().layer(TraceLayer);
+        #[cfg(feature = "metrics")]
+        let builder = builder.layer(MetricsLayer::new(controller_name::<Self>()));
+        builder
             .layer(DefaultBackoffLayer::default())
             .service(Finalizer::new(name, self))
     }
