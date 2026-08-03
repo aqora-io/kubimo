@@ -33,7 +33,7 @@ crds:
 # in the 'controller' crate.
 metrics:
   enabled: true
-  port: 8080
+  port: 9090
   service:
     enabled: true
     type: ClusterIP
