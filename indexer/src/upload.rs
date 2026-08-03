@@ -157,6 +157,11 @@ impl EntryWorker {
             let entry = match self.process(&path).await {
                 Ok(entry) => entry,
                 Err(err) => {
+                    // Dropping the entry does not merely leave it stale in the
+                    // archive: its urls never join the live set, so the sweep
+                    // deletes the objects a previous cycle uploaded for it and
+                    // the manifest is rewritten as if the file did not exist.
+                    self.opts.failures.fetch_add(1, Ordering::Relaxed);
                     tracing::error!("Error processing entry {}: {}", path.display(), err);
                     continue;
                 }
@@ -1428,6 +1433,27 @@ mod tests {
         )
     }
 
+    /// No bucket and no content upload: nothing in such a run touches S3, so
+    /// the only things that can fail are local and the writes to the cluster.
+    fn offline_options(directory: &Path) -> UploadOptions {
+        UploadOptions {
+            include_gitignored: false,
+            exclude_hidden: false,
+            max_file_size: 1024,
+            max_upload_concurrency: 1,
+            bucket: None,
+            key_prefix: None,
+            watch: false,
+            upload_content: false,
+            allow_empty: false,
+            watch_debounce_millis: 0,
+            watch_max_wait_millis: 0,
+            watch_poll_millis: 0,
+            name: "bmow-abc".to_string(),
+            directory: directory.to_path_buf(),
+        }
+    }
+
     /// A cycle that could not write everything it walked must say so. The node
     /// agent's flush treats a clean `run` as permission to evict the slot —
     /// the only remaining copy of the tenant's newest work — so a cycle that
@@ -1442,24 +1468,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notebook.py"), b"import marimo").unwrap();
         let client = offline_client();
-        let options = UploadOptions {
-            include_gitignored: false,
-            exclude_hidden: false,
-            max_file_size: 1024,
-            max_upload_concurrency: 1,
-            // No bucket and no content: nothing here touches S3, so the only
-            // thing that can fail is the write to the cluster.
-            bucket: None,
-            key_prefix: None,
-            watch: false,
-            upload_content: false,
-            allow_empty: false,
-            watch_debounce_millis: 0,
-            watch_max_wait_millis: 0,
-            watch_poll_millis: 0,
-            name: "bmow-abc".to_string(),
-            directory: dir.path().to_path_buf(),
-        };
+        let options = offline_options(dir.path());
         let keys = WorkspaceKeys::new(
             WorkspaceDirNameSet::new("bmow-abc".to_string()),
             WorkspaceFileUrlSet::new("bucket".to_string(), None).unwrap(),
@@ -1481,6 +1490,39 @@ mod tests {
         assert_eq!(
             result.failures, 1,
             "the unwritable directory CR must be reported"
+        );
+    }
+
+    /// An entry the workers could not process is not a gap in the archive that
+    /// heals itself: it is absent from the live url set, which is exactly what
+    /// marks its previously uploaded objects stale.
+    ///
+    /// A dangling symlink is the cheap way to reach that branch — the walk
+    /// happily yields it, and the `metadata` call in `process` follows it and
+    /// fails. It is the only entry, so nothing else in the cycle can fail: no
+    /// bucket, and no directory CR to write.
+    #[tokio::test]
+    async fn a_dropped_entry_reports_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(dir.path().join("gone.py"), dir.path().join("dangling.py"))
+            .unwrap();
+        let keys = WorkspaceKeys::new(
+            WorkspaceDirNameSet::new("bmow-abc".to_string()),
+            WorkspaceFileUrlSet::new("bucket".to_string(), None).unwrap(),
+        );
+        let result = run(
+            &offline_options(dir.path()),
+            &ContentCache::new(),
+            &offline_client(),
+            &S3Client::from_env(),
+            &keys,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+        .await;
+        assert_eq!(
+            result.failures, 1,
+            "the entry that never reached a WorkspaceDirectory must be reported"
         );
     }
 }
