@@ -283,7 +283,25 @@ impl RunnerStatusReconciler {
                 ))
             && is_inactive_past_deadline(runner, delete_after_secs_inactive, now.timestamp())
         {
-            ctx.api_for(runner)?.delete(runner.name()?).await?;
+            let name = runner.name()?;
+            // Nothing else records this at info level — `Api::delete` traces at
+            // debug — so a user's runner otherwise vanishes without a word, and
+            // "where did my notebook go" has no answer. Log the inputs the
+            // decision was actually made on, including whether the poll reached
+            // the runner at all: an unreachable-but-collectable runner is a very
+            // different story from an idle one.
+            tracing::info!(
+                runner = %name,
+                is_active,
+                delete_after_secs_inactive,
+                reachable = connections.is_some(),
+                pod_ready_age_secs = ?conditions::pod_ready_age_secs(
+                    status.conditions.as_deref().unwrap_or_default(),
+                    now.timestamp(),
+                ),
+                "Deleting an inactive runner",
+            );
+            ctx.api_for(runner)?.delete(name).await?;
             return Ok(None);
         }
         Ok(Some(Action::requeue(interval)))
