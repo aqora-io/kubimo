@@ -55,27 +55,25 @@ jobs:
           for chart in charts/*/; do
             helm lint "$chart"
           done
+      # No -u: that rewrites the committed snapshots to match whatever the
+      # chart currently renders, so a snapshot assertion could never fail here.
       - name: Test charts
         run: |
           for chart in charts/*/; do
-            helm unittest -u "$chart"
+            helm unittest "$chart"
           done
-
-  helm:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Lint
-        run: helm lint charts/kubimo-controller
       - name: Template (defaults)
         run: helm template charts/kubimo-controller
       # agent.enabled renders four extra templates (DaemonSet, CSIDriver, RBAC,
       # StorageClass) gated behind the drain fail() guard in _helpers.tpl; the
       # default drain values already satisfy it, so this exercises the real
       # relationship rather than disabling the check.
+      #
+      # Pinned to 1.29.0 — the agent's own minimum — rather than left to the
+      # helm binary's built-in default, so the DaemonSet's Kubernetes version
+      # guard is rendered right at the boundary it checks.
       - name: Template (agent enabled)
-        run: helm template charts/kubimo-controller --set agent.enabled=true
+        run: helm template charts/kubimo-controller --set agent.enabled=true --kube-version 1.29.0
 
   cache-py:
     runs-on: ubuntu-latest

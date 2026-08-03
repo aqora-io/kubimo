@@ -1120,6 +1120,21 @@ mod tests {
     use proto::node_client::NodeClient;
     use tokio::net::UnixStream;
 
+    /// Whether a temp directory would land on a filesystem that *does* enforce
+    /// project quotas.
+    ///
+    /// The refusal tests below assert the `(false, false)` branch, which only
+    /// happens without enforcement. `tempfile` follows `TMPDIR`, so on a host
+    /// whose temp filesystem is XFS mounted `prjquota` they would take the
+    /// opposite branch and fail on a quota syscall this unprivileged test
+    /// process cannot make — a failure about the host, not the code. CI and
+    /// every dev machine seen so far are ext4/tmpfs, so this normally returns
+    /// `false` and the tests run.
+    fn quotas_would_be_enforced() -> bool {
+        tempfile::tempdir()
+            .is_ok_and(|dir| quota::project_quota_enforced(dir.path()).unwrap_or(false))
+    }
+
     fn node() -> (tempfile::TempDir, KubimoNode) {
         let dir = tempfile::tempdir().unwrap();
         let store = SlotStore::new(crate::slot::SlotLayout::new(dir.path()));
@@ -1347,6 +1362,9 @@ mod tests {
     /// silently hand out a slot with no capacity limit.
     #[tokio::test]
     async fn publish_refuses_unquotaed_slots_by_default() {
+        if quotas_would_be_enforced() {
+            return;
+        }
         let (_dir, channel) = connected_with(false).await;
         let status = NodeClient::new(channel)
             .node_publish_volume(proto::NodePublishVolumeRequest {
@@ -1429,6 +1447,9 @@ mod tests {
     /// provisioning refuses in its quota branch — the failure this exercises.
     #[tokio::test]
     async fn a_refused_publish_leaves_no_slot_behind() {
+        if quotas_would_be_enforced() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let store = SlotStore::new(crate::slot::SlotLayout::new(dir.path()));
         let node = KubimoNode::new("test-node".into(), store, 1024, false, None);
@@ -1451,6 +1472,9 @@ mod tests {
     /// the publish, not to destroy the slot.
     #[tokio::test]
     async fn a_refused_publish_on_an_existing_slot_keeps_it() {
+        if quotas_would_be_enforced() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         // Record the slot directly through the store, bypassing full
         // provisioning (its chown step needs privileges this test does not

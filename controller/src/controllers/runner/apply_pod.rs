@@ -15,24 +15,29 @@ use crate::resources::Resources;
 
 use super::RunnerReconciler;
 
+/// What an apply did to the live pod.
+///
+/// `Replaced` is the one outcome the caller has to act on: the drifted pod has
+/// been deleted and nothing has recreated it yet, so the reconcile has to come
+/// back rather than wait for a change.
+pub(crate) enum PodApply {
+    Applied,
+    Replaced,
+}
+
 impl RunnerReconciler {
     pub(crate) async fn apply_pod(
         &self,
         ctx: &Context,
         runner: &Runner,
-    ) -> Result<Pod, kubimo::Error> {
+        // The workspace decides how storage is attached. Passed in rather than
+        // fetched again: the caller has already read it to gate on Ready, and a
+        // second GET could see a different generation than the gate did.
+        workspace: &Workspace,
+    ) -> Result<PodApply, kubimo::Error> {
         let namespace = runner.require_namespace()?;
-        // The workspace decides how storage is attached. It is guaranteed to
-        // exist here: the reconciler already gated on it being Ready.
-        let workspace = ctx
-            .api_namespaced::<Workspace>(namespace)
-            .get_opt(&runner.spec.workspace)
-            .await?;
-        let mode = workspace
-            .as_ref()
-            .map(|workspace| workspace.effective_mode(ctx.config.default_workspace_mode))
-            .unwrap_or(ctx.config.default_workspace_mode);
-        let sources = slot_volume::SlotSources::from_workspace(workspace.as_ref());
+        let mode = workspace.effective_mode(ctx.config.default_workspace_mode);
+        let sources = slot_volume::SlotSources::from_workspace(Some(workspace));
         let ingress_path = ingress_path(runner)?;
         let path_prefix = ingress_path.strip_suffix('/').unwrap_or(&ingress_path);
         let mut command = cmd!["bash", "/setup/start.sh", "--base-url", ingress_path,];
@@ -147,7 +152,7 @@ impl RunnerReconciler {
             ..Default::default()
         };
         match ctx.api_namespaced::<Pod>(namespace).patch(&pod).await {
-            Err(err) if super::is_immutable_conflict(&err) => {
+            Err(err) if super::is_invalid_request(&err) => {
                 // A live pod's spec is almost entirely immutable, so an apply that needs to
                 // change one of those fields — the sandbox runtimeClassName on a pod created
                 // before Render was sandboxed — can only be honoured by replacement. But a
@@ -156,9 +161,10 @@ impl RunnerReconciler {
                 // working pod over one of those would take a user's notebook down for a
                 // bad input. So fetch the live pod and delete only on the one drift this
                 // replacement exists for; every other 422, and any failure to fetch,
-                // propagates untouched. Pods carry a termination grace period, so
-                // recreation must wait for the next reconcile rather than racing the
-                // delete.
+                // propagates untouched — those never converge on their own, and the
+                // caller's backoff is what keeps them from spinning. Pods carry a
+                // termination grace period, so recreation must wait for the next reconcile
+                // rather than racing the delete.
                 let live = ctx
                     .api_namespaced::<Pod>(namespace)
                     .get_opt(runner.name()?)
@@ -167,10 +173,11 @@ impl RunnerReconciler {
                     ctx.api_namespaced::<Pod>(namespace)
                         .delete_opt(runner.name()?)
                         .await?;
+                    return Ok(PodApply::Replaced);
                 }
                 Err(err)
             }
-            result => result,
+            result => result.map(|_| PodApply::Applied),
         }
     }
 }
