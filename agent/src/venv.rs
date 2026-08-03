@@ -62,15 +62,33 @@ pub async fn seed_from_template(data_root: &Path, slot_dir: &Path) -> Result<boo
     }
     // Trailing `/.` copies the *contents* into the existing slot directory
     // rather than nesting a `home-template` directory inside it.
+    let mut source = template.into_os_string();
+    source.push("/.");
     let output = tokio::process::Command::new("cp")
         .arg("--archive")
         .arg("--reflink=auto")
-        .arg(format!("{}/.", template.display()))
+        .arg(source)
         .arg(slot_dir)
         .stdin(Stdio::null())
         .output()
         .await?;
     if !output.status.success() {
+        // Whatever landed is a venv missing an arbitrary subset of its
+        // packages, and the skip-if-present check above would keep it forever.
+        // The quota is applied before this runs, so a workspace whose
+        // `spec.storage.max` is below the ~920MB template reliably gets EDQUOT
+        // partway. Removing it puts the slot back to "no template staged",
+        // where the runner builds its own venv — slow, but working.
+        let venv = slot_dir.join(VENV_SUBDIR);
+        if let Err(err) = std::fs::remove_dir_all(&venv)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::error!(
+                %err,
+                venv = %venv.display(),
+                "could not remove a partially copied venv template"
+            );
+        }
         return Err(VenvError::Copy(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));
@@ -115,6 +133,44 @@ mod tests {
         );
         // Contents, not a nested `home-template` directory.
         assert!(!slot.join(TEMPLATE_SUBDIR).exists());
+    }
+
+    /// A copy that dies partway — the slot's quota is applied before it runs,
+    /// so any workspace smaller than the ~920MB template hits `EDQUOT` mid-tree
+    /// — must not leave a half venv behind. The caller only warns, so the slot
+    /// would be published with a venv missing an arbitrary subset of its
+    /// packages, and the skip-if-present check would never let it be repaired.
+    #[tokio::test]
+    async fn a_failed_copy_leaves_no_venv_and_the_next_call_re_seeds() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let template = dir.path().join(TEMPLATE_SUBDIR);
+        std::fs::create_dir_all(template.join(VENV_SUBDIR).join("lib")).unwrap();
+        std::fs::write(template.join(VENV_SUBDIR).join("lib/marimo.py"), b"x").unwrap();
+        // Unreadable to this (non-root) process, so `cp` copies part of the
+        // tree and then fails — standing in for the `EDQUOT` partway through.
+        let locked = template.join(VENV_SUBDIR).join("locked.py");
+        std::fs::write(&locked, b"y").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let slot = dir.path().join("slot");
+        std::fs::create_dir(&slot).unwrap();
+
+        let err = seed_from_template(dir.path(), &slot).await.unwrap_err();
+        assert!(matches!(err, VenvError::Copy(_)), "{err:?}");
+        assert!(
+            !slot.join(VENV_SUBDIR).exists(),
+            "a partial venv would be published as if it were complete"
+        );
+
+        // With the obstacle gone the next publish re-seeds, rather than
+        // skipping because a venv is already there.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(seed_from_template(dir.path(), &slot).await.unwrap());
+        assert_eq!(
+            std::fs::read(slot.join(VENV_SUBDIR).join("lib/marimo.py")).unwrap(),
+            b"x"
+        );
     }
 
     /// A reused slot keeps whatever the tenant installed; re-seeding would
