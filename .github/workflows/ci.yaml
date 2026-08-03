@@ -28,6 +28,21 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+  helm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Helm
+        uses: azure/setup-helm@v5.0.1
+        id: install
+      - name: Lint charts
+        run: |
+          for chart in charts/*/; do
+            helm lint "$chart"
+          done
 
   cache-py:
     runs-on: ubuntu-latest
