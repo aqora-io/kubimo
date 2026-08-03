@@ -164,9 +164,11 @@ mod tests {
 
         let fired = tokio::time::timeout(Duration::from_secs(5), watcher.wait()).await;
         churn.abort();
-        assert!(
-            fired.is_ok(),
-            "debouncer starved: never fired despite the max-wait ceiling"
-        );
+        // Both layers matter: a `wait()` that returns because the debouncer task
+        // ended returns immediately, so checking only the timeout would pass on
+        // exactly the failure this test exists to catch.
+        fired
+            .expect("debouncer starved: never fired despite the max-wait ceiling")
+            .expect("watcher closed instead of firing");
     }
 }
