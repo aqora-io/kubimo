@@ -393,3 +393,62 @@ async fn test_pooled_cannot_be_downgraded_to_dedicated() {
     })
     .await;
 }
+
+/// The same guard, for the workspace that never says Pooled in its spec.
+///
+/// On a cluster whose default mode is Pooled, a client-created workspace has no
+/// `spec.mode` at all — the controller materializes `status.mode: Pooled` on the
+/// first reconcile, and that is the only record of the choice. A rule keyed on
+/// `oldSelf.spec.mode` sees nothing there and admits `spec.mode: Dedicated`,
+/// leaving an object that contradicts itself until something drops the status
+/// and the controller provisions a PVC for files that live in a pooled slot.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_status_materialized_pooled_cannot_be_downgraded() {
+    with_namespace("test-cel-status-downgrade", |client, ns| async move {
+        let workspaces = client.api_namespaced::<Workspace>(&ns);
+
+        // No mode in the spec: the client left it to the operator default.
+        let mut workspace = Workspace::new("test-status-mode", WorkspaceSpec::default());
+        workspace.metadata.namespace = Some(ns.clone());
+        workspaces
+            .patch(&workspace)
+            .await
+            .expect("creating a workspace without a mode");
+
+        // What the controller writes once it resolves the default.
+        let mut materialized = Workspace::new("test-status-mode", WorkspaceSpec::default());
+        materialized.status = Some(kubimo::WorkspaceStatus {
+            mode: Some(kubimo::WorkspaceMode::Pooled),
+            ..Default::default()
+        });
+        workspaces
+            .patch_status(&materialized)
+            .await
+            .expect("materializing status.mode");
+
+        let mut downgraded = Workspace::new(
+            "test-status-mode",
+            WorkspaceSpec {
+                mode: Some(kubimo::WorkspaceMode::Dedicated),
+                ..Default::default()
+            },
+        );
+        downgraded.metadata.namespace = Some(ns.clone());
+        assert!(
+            workspaces.patch(&downgraded).await.is_err(),
+            "a materialized Pooled status must count as Pooled"
+        );
+
+        // ...and the rule must not have gone the other way and demanded a Pooled
+        // spec, which no status-only-Pooled workspace can satisfy: an unrelated
+        // spec change has to keep working.
+        let mut edited = Workspace::new("test-status-mode", spec_with_storage(Some("2Gi"), None));
+        edited.metadata.namespace = Some(ns.clone());
+        workspaces
+            .patch(&edited)
+            .await
+            .expect("a spec change unrelated to the mode must still be accepted");
+    })
+    .await;
+}

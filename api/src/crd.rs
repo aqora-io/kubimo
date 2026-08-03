@@ -740,10 +740,24 @@ mod tests {
         );
     }
 
+    /// The expression's shape is the contract, not just its presence: a
+    /// workspace is Pooled whenever *either* its spec or its materialized status
+    /// says so, and only an explicit Dedicated spec is refused.
     #[test]
     fn workspace_crd_has_mode_downgrade_validation() {
         let crd = serde_json::to_string(&Workspace::crd()).unwrap();
         assert!(crd.contains("cannot be changed back from Pooled to Dedicated"));
+
+        let expression = include_str!("./validation/workspace_mode_no_downgrade.cel");
+        assert!(
+            expression.contains("oldSelf.status.mode == \"Pooled\""),
+            "status.mode is materialized on every reconcile, so a Pooled workspace \
+             need not say so in its spec"
+        );
+        // Refusing only an explicit Dedicated is what keeps those same
+        // status-only-Pooled workspaces patchable at all: their spec has no mode,
+        // so demanding `self.spec.mode == \"Pooled\"` would reject every apply.
+        assert!(expression.contains("self.spec.mode == \"Dedicated\""));
     }
 
     /// `cloneWorkspaceName` is implemented only for `Dedicated` — `apply_pvc`
