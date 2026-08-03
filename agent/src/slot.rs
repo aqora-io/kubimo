@@ -24,6 +24,9 @@ pub enum SlotIdError {
     MissingPrefix,
     #[error("slot id must be {expected} characters, got {actual}")]
     BadLength { expected: usize, actual: usize },
+    /// Carries the offending *byte*, rendered as Latin-1: validation is
+    /// byte-wise, so a byte from the middle of a multi-byte sequence has no
+    /// character of its own to report.
     #[error("slot id contains an illegal character {0:?}")]
     IllegalCharacter(char),
 }
@@ -59,11 +62,16 @@ impl SlotId {
                 actual: random.len(),
             });
         }
+        // Byte-wise, to match the byte length checked above. Comparing `char as
+        // u8` instead truncates the scalar value, so a multi-byte character
+        // whose low byte happens to be in the alphabet passes both checks and
+        // the id is accepted with bytes in it that were never validated.
         if let Some(bad) = random
-            .chars()
-            .find(|ch| !SLOT_ALPHABET.contains(&(*ch as u8)))
+            .as_bytes()
+            .iter()
+            .find(|byte| !SLOT_ALPHABET.contains(byte))
         {
-            return Err(SlotIdError::IllegalCharacter(bad));
+            return Err(SlotIdError::IllegalCharacter(char::from(*bad)));
         }
         Ok(Self(raw.to_string()))
     }
@@ -167,6 +175,24 @@ mod tests {
                 Err(SlotIdError::IllegalCharacter(_)),
             ));
         }
+    }
+
+    /// The length check counts bytes, so validation has to as well. `'š'` is
+    /// U+0161, whose low byte is `b'a'` — comparing `char as u8` truncates it
+    /// into the alphabet, and this 26-*byte* id passes every check while
+    /// carrying two bytes nothing ever looked at.
+    #[test]
+    fn parse_rejects_a_multi_byte_character_that_truncates_into_the_alphabet() {
+        let raw = format!("{SLOT_PREFIX}š{}", "a".repeat(SLOT_RANDOM_LEN - 2));
+        assert_eq!(
+            raw.len() - SLOT_PREFIX.len(),
+            SLOT_RANDOM_LEN,
+            "the id must be the right byte length, or the length check catches it instead"
+        );
+        assert!(matches!(
+            SlotId::parse(&raw),
+            Err(SlotIdError::IllegalCharacter(_))
+        ));
     }
 
     #[test]
