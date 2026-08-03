@@ -1,0 +1,85 @@
+suite: deployment
+templates:
+  - deployment.yaml
+
+tests:
+  - it: should expose the metrics port when enabled
+    set:
+      metrics:
+        enabled: true
+        port: 8080
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 8080
+            protocol: TCP
+
+  - it: should set KUBIMO__METRICS__ENABLED to true when enabled
+    set:
+      metrics:
+        enabled: true
+        port: 8080
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__METRICS__ENABLED
+            value: "true"
+
+  - it: should set the bind addr to 0.0.0.0:<port> when enabled
+    set:
+      metrics:
+        enabled: true
+        port: 8080
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__METRICS__BIND_ADDR
+            value: "0.0.0.0:8080"
+
+  - it: should not have a ports section when metrics is disabled
+    set:
+      metrics:
+        enabled: false
+        port: 8080
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].ports
+
+  - it: should still set env vars (enabled=false) with correct values
+    set:
+      metrics:
+        enabled: false
+        port: 8080
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__METRICS__ENABLED
+            value: "false"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__METRICS__BIND_ADDR
+            value: "0.0.0.0:8080"
+
+  - it: should respect a custom metrics port
+    set:
+      metrics:
+        enabled: true
+        port: 9095
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 9095
+            protocol: TCP
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__METRICS__BIND_ADDR
+            value: "0.0.0.0:9095"
