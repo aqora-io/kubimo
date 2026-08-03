@@ -45,7 +45,7 @@ fn default_metrics_enabled() -> bool {
 #[cfg(feature = "metrics")]
 #[inline]
 fn default_metrics_bind_addr() -> std::net::SocketAddr {
-    ([0, 0, 0, 0], 8080).into()
+    ([0, 0, 0, 0], 9090).into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
