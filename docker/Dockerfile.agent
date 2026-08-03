@@ -2,7 +2,7 @@ FROM rust:1.94-trixie AS build
 
 # pkg-config for the object_store TLS stack. build.rs vendors its own protoc,
 # so no system protobuf-compiler is needed.
-RUN apt-get update && apt-get install -y wget pkg-config
+RUN apt-get update && apt-get install -y --no-install-recommends wget pkg-config
 
 ARG SCCACHE_VERSION=0.9.1
 RUN ARCH="$(uname -m)-unknown-linux-musl" && \
@@ -32,7 +32,7 @@ FROM debian:trixie-slim
 # `mount` and `umount` are not invoked directly — the agent uses the mount(2)
 # and quotactl_fd(2) syscalls — but ca-certificates is needed to reach S3.
 RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
-  apt-get update && apt-get install -y ca-certificates
+  apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=build /bin/kubimo-agent /bin/kubimo-agent
 ENV RUST_LOG=info
 ENTRYPOINT ["kubimo-agent"]
