@@ -131,6 +131,12 @@ pub enum QuotaError {
          (is the filesystem mounted with `prjquota`?)"
     )]
     SetLimit { project_id: u32, source: io::Error },
+    #[error(
+        "refusing a zero byte limit for project {project_id}: XFS reads a zero \
+         block limit as *unlimited*, so the slot would be able to fill the node \
+         volume"
+    )]
+    ZeroLimit { project_id: u32 },
     #[error("reading mount options: {0}")]
     MountOptions(String),
 }
@@ -224,11 +230,20 @@ pub fn assign_project(dir: &Path, project_id: u32) -> Result<(), QuotaError> {
 /// Soft and hard are set to the same value for both: a soft limit only starts
 /// a grace timer, and we want the write to fail at the boundary rather than
 /// days later.
+///
+/// A zero limit is rejected rather than applied. `spec.storage.max: "0"` passes
+/// the CRD's validation, and XFS reads a zero block limit as *no limit at all*,
+/// so applying it would hand out precisely the unbounded slot the
+/// unquotaed-slot refusal exists to prevent — and silently, since the quota
+/// would look set.
 pub fn set_project_limit(
     fs_root: &Path,
     project_id: u32,
     limit_bytes: u64,
 ) -> Result<(), QuotaError> {
+    if limit_bytes == 0 {
+        return Err(QuotaError::ZeroLimit { project_id });
+    }
     let file = File::open(fs_root).map_err(|source| QuotaError::Open {
         path: fs_root.display().to_string(),
         source,
@@ -251,9 +266,9 @@ pub fn set_project_limit(
     let rc = unsafe {
         libc::syscall(
             SYS_QUOTACTL_FD,
-            file.as_raw_fd() as libc::c_int,
-            qcmd(Q_XSETQLIM, PRJQUOTA) as libc::c_uint,
-            project_id as libc::c_uint,
+            file.as_raw_fd() as libc::c_long,
+            qcmd(Q_XSETQLIM, PRJQUOTA) as libc::c_long,
+            project_id as libc::c_long,
             &raw const quota as *const libc::c_void,
         )
     };
@@ -308,6 +323,19 @@ mod tests {
         assert_eq!(bytes_to_basic_blocks(513), 2);
         // 64 GiB, the platform's spec.storage.max
         assert_eq!(bytes_to_basic_blocks(64 * 1024 * 1024 * 1024), 134_217_728);
+    }
+
+    /// `spec.storage.max: "0"` reaches here as `limit_bytes == 0`, and
+    /// `bytes_to_basic_blocks(0)` is 0 — which XFS reads as *unlimited*. The
+    /// call must fail before it opens or converts anything, so the publish is
+    /// refused rather than silently granting an unbounded slot.
+    #[test]
+    fn a_zero_byte_limit_is_refused_rather_than_applied() {
+        let err = set_project_limit(Path::new("/"), 4242, 0).unwrap_err();
+        assert!(
+            matches!(err, QuotaError::ZeroLimit { project_id: 4242 }),
+            "{err:?}"
+        );
     }
 
     #[test]
