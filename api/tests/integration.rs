@@ -402,6 +402,64 @@ async fn test_clone_is_refused_for_pooled_workspaces() {
     .await;
 }
 
+/// The same refusal, for the workspace that never says Pooled in its spec.
+///
+/// On a cluster whose default mode is Pooled — which is what the rollout makes
+/// of production — a client-created workspace has no `spec.mode`, and
+/// `status.mode` is the only record that it is Pooled. A rule keyed on the spec
+/// admitted `cloneWorkspaceName` on exactly those, and the controller then went
+/// looking for a source PVC that pooled mode never creates: the workspace came
+/// up empty, Ready, and silent.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_clone_is_refused_for_status_materialized_pooled_workspaces() {
+    with_namespace("test-cel-status-clone", |client, ns| async move {
+        let workspaces = client.api_namespaced::<Workspace>(&ns);
+
+        // No mode in the spec: the client left it to the operator default.
+        let mut workspace = Workspace::new("test-status-clone", WorkspaceSpec::default());
+        workspace.metadata.namespace = Some(ns.clone());
+        workspaces
+            .patch(&workspace)
+            .await
+            .expect("creating a workspace without a mode");
+
+        // What the controller writes once it resolves that default.
+        let mut materialized = Workspace::new("test-status-clone", WorkspaceSpec::default());
+        materialized.status = Some(kubimo::WorkspaceStatus {
+            mode: Some(kubimo::WorkspaceMode::Pooled),
+            ..Default::default()
+        });
+        workspaces
+            .patch_status(&materialized)
+            .await
+            .expect("materializing status.mode");
+
+        let mut cloned = Workspace::new(
+            "test-status-clone",
+            WorkspaceSpec {
+                clone_workspace_name: Some("bmow-source".to_string()),
+                ..Default::default()
+            },
+        );
+        cloned.metadata.namespace = Some(ns.clone());
+        assert!(
+            workspaces.patch(&cloned).await.is_err(),
+            "a materialized Pooled status must count as Pooled: there is no PVC to clone"
+        );
+
+        // The rule must still leave everything else about the workspace
+        // writable, or the controller could not reconcile it at all.
+        let mut edited = Workspace::new("test-status-clone", spec_with_storage(Some("2Gi"), None));
+        edited.metadata.namespace = Some(ns.clone());
+        workspaces
+            .patch(&edited)
+            .await
+            .expect("a spec change that does not clone must still be accepted");
+    })
+    .await;
+}
+
 /// Restoring from an archive and cloning a PVC are two ways to seed the same
 /// workspace, and doing both would race.
 #[tokio::test]
