@@ -842,9 +842,9 @@ mod tests {
     /// workspace came up empty with nothing reporting a problem.
     ///
     /// The expression is asserted rather than just the message because its shape
-    /// is the contract: it must fire only when the mode is *explicitly* Pooled,
-    /// so that a Dedicated workspace can still clone and a spec without a mode
-    /// is not rejected on a guess about the operator's default.
+    /// is the contract: Pooled by spec *or* by materialized status is what
+    /// counts, since a workspace on a Pooled-default cluster carries no
+    /// `spec.mode` at all and reading only that admitted the clone.
     #[test]
     fn workspace_crd_refuses_clone_under_pooled() {
         let crd = serde_json::to_string(&Workspace::crd()).unwrap();
@@ -854,16 +854,20 @@ mod tests {
         );
 
         let expression = include_str!("./validation/workspace_clone_not_pooled.cel");
-        // Explicitly Pooled + a clone is the rejected combination...
+        // Pooled + a clone is the rejected combination, whichever half of the
+        // object says Pooled...
         assert!(expression.contains("self.spec.mode == \"Pooled\""));
-        assert!(expression.contains("has(self.spec.cloneWorkspaceName)"));
-        // ...and `has(self.spec.mode)` is what keeps a mode-less spec valid, so
-        // the rule never rejects on an assumption about the operator default.
         assert!(
-            expression.contains("has(self.spec.mode)"),
-            "a spec without a mode must not be rejected: CEL cannot see \
-             KUBIMO__DEFAULT_WORKSPACE_MODE, so that case stays uncaught by design"
+            expression.contains("self.status.mode == \"Pooled\""),
+            "a workspace that is Pooled only by materialized status still has \
+             no PVC to clone"
         );
+        assert!(expression.contains("has(self.spec.cloneWorkspaceName)"));
+        // ...and every read is guarded, so a workspace that has neither a spec
+        // mode nor a status is not rejected on a guess about the operator
+        // default, which CEL cannot see.
+        assert!(expression.contains("has(self.spec.mode)"));
+        assert!(expression.contains("has(self.status)"));
     }
 
     #[test]

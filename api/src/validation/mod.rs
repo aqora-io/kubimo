@@ -78,10 +78,23 @@ pub fn workspace_mode_no_downgrade() -> Rule {
 /// anywhere. Under `Pooled`, cloning is expressed as a `restoreFrom` pointing at
 /// the source's archive instead.
 ///
-/// Only catches an *explicitly* Pooled spec: a workspace that omits `spec.mode`
-/// and inherits a Pooled operator default still slips through, because CEL
-/// cannot see `KUBIMO__DEFAULT_WORKSPACE_MODE`. Setting the mode explicitly is
-/// what makes this enforceable at all — one more reason for clients to do so.
+/// Pooled by *effective* mode, the same resolution `effective_mode` performs:
+/// on a cluster whose default is Pooled a client-created workspace says nothing
+/// about its mode, and `status.mode` — written on the first reconcile — is the
+/// only record of the choice. Keying on `spec.mode` alone therefore accepted a
+/// clone on exactly those workspaces, which is the population pooled mode is
+/// being rolled out to.
+///
+/// One window stays uncaught, and cannot be closed here: between the create and
+/// the first reconcile there is no `status.mode` and no `spec.mode` either, and
+/// CEL cannot see `KUBIMO__DEFAULT_WORKSPACE_MODE`. Setting the mode explicitly
+/// is what makes admission decide it — one more reason for clients to do so.
+///
+/// The rule sees the whole object, so it also refuses the *status* write that
+/// would make a workspace Pooled while its spec still names a clone source: the
+/// controller cannot materialize the mode, the workspace never goes Ready, and
+/// the failure is in the reconcile log. That is the intended outcome — the
+/// alternative is the silent empty workspace this rule exists to prevent.
 pub fn workspace_clone_not_pooled() -> Rule {
     Rule::new(include_str!("./workspace_clone_not_pooled.cel"))
         .message("cloneWorkspaceName is not supported for Pooled workspaces; use restoreFrom")
