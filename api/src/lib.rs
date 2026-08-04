@@ -19,6 +19,10 @@ mod quantity;
 pub mod selector;
 mod validation;
 
+// Re-exported because the CRDs use them in their public types: a client cannot
+// write `status.archive.lastSyncedAt` without constructing a `chrono` timestamp
+// of the same version this crate was built against.
+pub use chrono;
 pub use json_patch_macros;
 pub use k8s_crd_snapshot_storage;
 pub use k8s_openapi;

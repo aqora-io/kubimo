@@ -39,6 +39,16 @@ const INDEXER_MANAGER: &str = "kubimo-indexer";
 /// never overlap, so neither can revoke the other's.
 const AGENT_MANAGER: &str = "kubimo-agent";
 
+/// Field manager for what a completed flush establishes:
+/// `status.archive.lastSyncedAt` and `status.archive.totalContentBytes`.
+///
+/// A third name for the same reason there is a second one. These two fields are
+/// written at unpublish, where the slot's quota is not known — a publish record
+/// does not carry it — so an apply from here cannot re-send [`AGENT_MANAGER`]'s
+/// fields, and under server-side apply omitting them is how they get deleted.
+/// Owning a disjoint pair of fields makes that impossible instead of careful.
+const FLUSH_MANAGER: &str = "kubimo-agent-flush";
+
 /// Cache of per-namespace clients, cheap to clone and shared between the CSI
 /// plugin and the reaper.
 #[derive(Clone, Default)]
@@ -69,6 +79,12 @@ impl NamespacedClients {
     /// fields, under a manager the indexer does not share.
     pub async fn get_for_slot_status(&self, namespace: &str) -> Option<kubimo::Client> {
         self.get_as(namespace, AGENT_MANAGER).await
+    }
+
+    /// A client scoped to `namespace` that records a completed flush, under a
+    /// manager that owns nothing else.
+    pub async fn get_for_flush_status(&self, namespace: &str) -> Option<kubimo::Client> {
+        self.get_as(namespace, FLUSH_MANAGER).await
     }
 
     async fn get_as(&self, namespace: &str, manager: &'static str) -> Option<kubimo::Client> {

@@ -34,11 +34,21 @@ impl WorkspaceReconciler {
             // and no init Job to complete. The slot is created on demand by the
             // node agent when kubelet publishes the runner's inline volume.
             //
-            // TODO: gate this on the S3 archive existing — HEAD
-            // `<keyPrefix>manifest.json`, seeding an empty manifest for a new
-            // workspace and copying the source archive for clone/restore. Until
-            // that lands a pooled workspace starts empty, which is why pooled
-            // mode is still opt-in.
+            // Ready deliberately does not wait on the archive existing, and
+            // could not: the controller has no S3 client, and the credentials
+            // for a workspace's bucket are in its own `spec.indexer.pod` env,
+            // handed to pods and never to this process. Both components that
+            // do hold them check it instead — the client writes and verifies a
+            // workspace's seed archive before creating the CR, and the agent
+            // records `status.archive.lastSyncedAt` once a slot's content has
+            // actually reached S3, which is what tells a workspace that has
+            // never been persisted from one that is genuinely empty.
+            //
+            // Ready therefore keeps meaning "nothing is left to provision".
+            // Changing it is not a local decision: runners are not reconciled
+            // until their workspace is Ready, and a brand-new pooled workspace
+            // has no archive by definition, so gating on one would stop it ever
+            // starting its first runner.
             let workspace =
                 update_workspace_status(workspace.clone(), None, StatusKind::PooledReady, mode);
             ctx.api_namespaced::<Workspace>(namespace)

@@ -211,8 +211,8 @@ async fn wait_until_deleted(client: &kubimo::Client, workspace: &str) {
 /// `.gitignore` is honoured and only `<slot>/workspace` is walked. Tracked
 /// files are durable; the venv and other scratch are not, and are rebuilt.
 ///
-/// `true` means the archive now fully represents the slot, and only then may
-/// the caller record a flush. `false` means part of the tree — or all of it —
+/// `Some` means the archive now fully represents the slot, and only then may
+/// the caller record a flush. `None` means part of the tree — or all of it —
 /// is still only on this node: the upload pipeline logs its own failures and
 /// carries on, because in the watcher's world the next cycle repairs them, but
 /// a one-shot flush has no next cycle. Anything that reads the flush marker as
@@ -223,12 +223,12 @@ pub async fn flush_slot(
     archive: &ArchiveLocation,
     client: &kubimo::Client,
     s3: &indexer::s3::S3Client,
-) -> Result<bool, HydrateError> {
+) -> Result<Option<Flushed>, HydrateError> {
     if !slot_dir.join(WORKSPACE_SUBDIR).is_dir() {
         // Nothing was ever hydrated here, so nothing was pushed back either.
         // Not an error, but not a flush: the archive has not been shown to
         // match a slot whose contents were never walked.
-        return Ok(false);
+        return Ok(None);
     }
     let (options, keys, previous) =
         upload_inputs(slot_dir, workspace, archive, false, client, s3).await?;
@@ -246,7 +246,22 @@ pub async fn flush_slot(
     // A refusal means the walk came back empty while an archive exists, so the
     // archive was deliberately left alone — it describes some older state of
     // this slot, not this one.
-    Ok(!result.refused && result.failures == 0)
+    if result.refused || result.failures > 0 {
+        return Ok(None);
+    }
+    Ok(Some(Flushed {
+        content_bytes: result.content_bytes,
+    }))
+}
+
+/// What a completed flush put in the archive.
+#[derive(Debug, Clone, Copy)]
+pub struct Flushed {
+    /// Total size of the workspace's tracked files, as the flush walked them.
+    /// Small next to the slot's disk usage — the venv is the bulk of that and
+    /// is never archived — which is why it is reported separately rather than
+    /// folded into `status.storage`.
+    pub content_bytes: u64,
 }
 
 /// Restore `archive` into `slot_dir/workspace`.
@@ -334,7 +349,7 @@ mod tests {
         .await
         .expect("an unhydrated slot is not an error");
         assert!(
-            !flushed,
+            flushed.is_none(),
             "nothing was uploaded, so this must not be recorded as a flush"
         );
     }
