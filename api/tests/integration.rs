@@ -229,6 +229,81 @@ async fn test_agent_status_survives_indexer_writes() {
     .await;
 }
 
+/// A rename of the field manager is only survivable because an apply can be
+/// forced.
+///
+/// Ownership under server-side apply is per field and per manager name, so
+/// renaming a client's manager leaves every field of every object it ever wrote
+/// belonging to the old name. The first write to each object then conflicts —
+/// permanently, since nothing else is going to relinquish those fields. Forcing
+/// is how the new name takes them over, and it must stay a per-call choice:
+/// `patch` conflicting is what
+/// [`test_agent_status_survives_indexer_writes`] depends on.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_a_forced_apply_takes_ownership_from_another_manager() {
+    with_namespace("test-force-apply", |_client, ns| async move {
+        let old = Client::builder()
+            .name("kubimo")
+            .namespace(&ns)
+            .build()
+            .await
+            .expect("Failed to build a client for the old manager");
+        let mut owned = Workspace::new(TEST_WORKSPACE, spec_with_storage(Some("2Gi"), None));
+        owned.metadata.namespace = Some(ns.clone());
+        old.api_namespaced::<Workspace>(&ns)
+            .patch(&owned)
+            .await
+            .expect("the old manager creates the workspace and owns its fields");
+
+        // The same client under its new name, changing a field the old name
+        // owns. This is every existing object, on the first write after a
+        // rename.
+        let renamed = Client::builder()
+            .name("aqora-platform")
+            .namespace(&ns)
+            .build()
+            .await
+            .expect("Failed to build a client for the renamed manager");
+        let mut changed = Workspace::new(TEST_WORKSPACE, spec_with_storage(Some("4Gi"), None));
+        changed.metadata.namespace = Some(ns.clone());
+        assert!(
+            renamed
+                .api_namespaced::<Workspace>(&ns)
+                .patch(&changed)
+                .await
+                .is_err(),
+            "an unforced apply must not take a field another manager owns"
+        );
+
+        let applied = renamed
+            .api_namespaced::<Workspace>(&ns)
+            .patch_force(&changed)
+            .await
+            .expect("a forced apply takes the field over");
+        assert_eq!(
+            applied
+                .spec
+                .storage
+                .and_then(|storage| storage.min)
+                .map(|min| min.to_string()),
+            Some("4Gi".to_string())
+        );
+
+        // Ownership really moved: the old name is now the one that conflicts.
+        let mut reverted = Workspace::new(TEST_WORKSPACE, spec_with_storage(Some("2Gi"), None));
+        reverted.metadata.namespace = Some(ns.clone());
+        assert!(
+            old.api_namespaced::<Workspace>(&ns)
+                .patch(&reverted)
+                .await
+                .is_err(),
+            "the forced apply must leave the field owned by the manager that forced it"
+        );
+    })
+    .await;
+}
+
 /// Build a spec with a storage requirement, leaving everything else default.
 fn spec_with_storage(min: Option<&str>, max: Option<&str>) -> WorkspaceSpec {
     WorkspaceSpec {

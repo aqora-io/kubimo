@@ -46,6 +46,33 @@ where
 
     #[tracing::instrument(level = "debug", skip(self), ret, err)]
     pub async fn patch(&self, resource: &T) -> Result<T> {
+        self.apply(resource, self.patch_params()).await
+    }
+
+    /// Apply `resource`, taking over every field it sets even where another
+    /// field manager already owns them.
+    ///
+    /// Server-side apply lets a manager change only the fields it owns; a write
+    /// to anyone else's comes back `409 Conflict`. That is what [`Self::patch`]
+    /// does, and it is load-bearing — it is the reason two writers with
+    /// different identities, such as the node agent and the indexer, cannot
+    /// clobber each other's halves of a status.
+    ///
+    /// A client that *renames* its field manager has no way through that on its
+    /// own: every field of every object it has ever written still belongs to the
+    /// old name, so its first write to each conflicts, and keeps conflicting
+    /// until something takes the fields over. Forcing is that takeover.
+    ///
+    /// Deliberately opt-in and per call rather than a property of the client:
+    /// forcing is right for a migration that knows the fields it is claiming
+    /// were its own, and wrong everywhere else, where a conflict is the API
+    /// server reporting that two components disagree about who owns what.
+    #[tracing::instrument(level = "debug", skip(self), ret, err)]
+    pub async fn patch_force(&self, resource: &T) -> Result<T> {
+        self.apply(resource, self.patch_params().force()).await
+    }
+
+    async fn apply(&self, resource: &T, params: PatchParams) -> Result<T> {
         let mut json = serde_json::to_value(resource)?;
         let Some(object) = json.as_object_mut() else {
             return Err(crate::Error::expected_json_type("object", &json));
@@ -57,11 +84,7 @@ where
         );
         Ok(self
             .inner
-            .patch(
-                resource.name()?,
-                &self.patch_params(),
-                &Patch::Apply(&object),
-            )
+            .patch(resource.name()?, &params, &Patch::Apply(&object))
             .await?)
     }
 
