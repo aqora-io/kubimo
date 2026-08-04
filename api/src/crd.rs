@@ -51,7 +51,9 @@ impl JsonSchema for LogLevel {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Requirement<T> {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub min: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max: Option<T>,
 }
 
@@ -65,10 +67,13 @@ pub struct AutoScale {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageRequirement {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub min: Option<StorageQuantity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max: Option<StorageQuantity>,
     /// DEPRECATED: only honoured in `Dedicated` mode. `Pooled` workspaces take
     /// their slot quota from `max`, so there is nothing to grow.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auto: Option<AutoScale>,
 }
 
@@ -90,16 +95,22 @@ pub enum WorkspaceMode {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceIndexerPod {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<Vec<EnvVar>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env_from: Option<Vec<EnvFromSource>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceIndexer {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bucket: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub key_prefix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub upload_content: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pod: Option<WorkspaceIndexerPod>,
 }
 
@@ -178,12 +189,28 @@ pub struct WorkspaceStorageStatus {
 pub struct WorkspaceRestoreFrom {
     /// Bucket holding the source archive.
     pub bucket: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub key_prefix: Option<String>,
     /// Env for the restore init container (AWS credentials), same shape as
     /// `indexer.pod`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pod: Option<WorkspaceIndexerPod>,
 }
 
+// Every optional field in this spec — and in the structs it nests — skips
+// serializing when unset.
+//
+// Under server-side apply a serialized `null` is a claim on the field, not an
+// absence. A client that fills in only the fields it cares about, which is what
+// building a spec from `Default` produces, therefore ended up owning the whole
+// tree: fields it never set were either taken over as empty, or the apply was
+// refused outright with a conflict because another manager owned them. The
+// controller, the platform and the indexer all write parts of a Workspace, so
+// this was not hypothetical.
+//
+// It is not on its own protection against a *rollback*: relinquishing a field
+// by omitting it deletes it just as surely as nulling it, once the manager
+// owns it. Only writing under a manager name of one's own separates those two.
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
     group = "kubimo.aqora.io",
@@ -207,28 +234,33 @@ pub struct WorkspaceSpec {
     /// `KUBIMO__DEFAULT_WORKSPACE_MODE` only applies to workspaces that have
     /// not yet materialized `status.mode`.
     ///
-    /// Skipped when unset, unlike its neighbours, because this one is an enum:
-    /// the generated schema lists the permitted values, and an explicit `null`
-    /// is not among them. Serializing it anyway made every spec built from
+    /// This one had to skip before the rest, because it is an enum: the
+    /// generated schema lists the permitted values, and an explicit `null` is
+    /// not among them. Serializing it anyway made every spec built from
     /// `Default` — which is what the integration tests and any client that
     /// fills in only the fields it cares about produce — rejected outright with
     /// "Unsupported value: null". Nullable object fields tolerate it, so the
     /// breakage arrived with this field and went unnoticed while those tests
-    /// were ignored. Omitting it also avoids claiming the field under
-    /// server-side apply, the same reason the status structs skip theirs.
+    /// were ignored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<WorkspaceMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageRequirement>,
     /// DEPRECATED: only honoured in `Dedicated` mode. `Pooled` workspaces have
     /// no init Job to run these in; seeding is expressed via `restoreFrom` or
     /// `cloneWorkspaceName` instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub init_containers: Option<Vec<Container>>,
     /// DEPRECATED: only ever applied to the init Job's pod, so it has no effect
     /// in `Pooled` mode.
     #[schemars(length(max = 25))]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub volumes: Option<Vec<Volume>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub indexer: Option<WorkspaceIndexer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub clone_workspace_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub restore_from: Option<WorkspaceRestoreFrom>,
 }
 
@@ -667,6 +699,50 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         assert!(!json.contains("null"), "status patch had a null: {json}");
         assert!(json.contains("node-1"));
+    }
+
+    /// The same rule as [`a_partial_status_serializes_no_nulls`], for the spec.
+    ///
+    /// A spec is assembled from `Default` plus the handful of fields the caller
+    /// actually has an opinion about. Serializing the rest as `null` made that
+    /// apply a claim on the entire tree: fields the caller never set were taken
+    /// over as empty, or the write was refused with a conflict because the
+    /// controller or the indexer owned them.
+    #[test]
+    fn a_partial_spec_serializes_no_nulls() {
+        let spec = WorkspaceSpec {
+            storage: Some(StorageRequirement {
+                min: Some("2Gi".parse().expect("a quantity")),
+                ..Default::default()
+            }),
+            indexer: Some(WorkspaceIndexer {
+                bucket: Some("archive".to_string()),
+                pod: Some(WorkspaceIndexerPod::default()),
+                ..Default::default()
+            }),
+            restore_from: Some(WorkspaceRestoreFrom {
+                bucket: "seeds".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("null"), "spec apply had a null: {json}");
+        assert!(json.contains("2Gi"));
+        assert!(json.contains("archive"));
+    }
+
+    /// A Runner's cpu and memory bounds, which are the same shape and are
+    /// written by the same partial applies.
+    #[test]
+    fn a_partial_requirement_serializes_no_nulls() {
+        let cpu = Requirement::<CpuQuantity> {
+            min: Some("500m".parse().expect("a quantity")),
+            max: None,
+        };
+        let json = serde_json::to_string(&cpu).unwrap();
+        assert!(!json.contains("null"), "requirement had a null: {json}");
+        assert!(json.contains("500m"));
     }
 
     #[test]
