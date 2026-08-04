@@ -141,18 +141,26 @@ where
         Ok(self.inner.delete(name, &Default::default()).await?.left())
     }
 
+    /// Delete `name`, treating an object that is already gone as success.
+    ///
+    /// Goes to the inner client directly rather than through [`Self::delete`],
+    /// the way [`Self::get_opt`] does, because `err` on a `tracing::instrument`
+    /// emits at ERROR regardless of the span's level and does so on the way out
+    /// of the instrumented function — before this one can look at the status
+    /// code. Delegating therefore logged every *expected* not-found as an error,
+    /// and expecting one is the normal case here: the reconcilers converge by
+    /// deleting objects that mostly do not exist. In production that was around
+    /// one and a half ERROR lines a second, which is enough to hide the errors
+    /// that mean something.
+    ///
+    /// A delete that fails for any other reason still takes this function's own
+    /// `err` and stays as loud as it was.
     #[tracing::instrument(level = "debug", skip(self), ret, err)]
     pub async fn delete_opt(&self, name: &str) -> Result<Option<T>> {
-        match self.delete(name).await {
-            Ok(res) => Ok(res),
-            Err(Error::Kube(kube::Error::Api(status))) => {
-                if status.code == 404 {
-                    Ok(None)
-                } else {
-                    Err(kube::Error::Api(status).into())
-                }
-            }
-            Err(err) => Err(err),
+        match self.inner.delete(name, &Default::default()).await {
+            Ok(deleted) => Ok(deleted.left()),
+            Err(kube::Error::Api(status)) if status.code == 404 => Ok(None),
+            Err(err) => Err(err.into()),
         }
     }
 
@@ -184,5 +192,89 @@ where
                 &Patch::Apply(&object),
             )
             .await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use crate::Workspace;
+
+    /// Counts ERROR events, which is what `err` on a `tracing::instrument`
+    /// produces — at that level whatever the span's own level is.
+    struct CountErrors(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountErrors {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// A client whose every request comes back as the API server's own 404.
+    fn client_that_always_404s() -> crate::Client {
+        let service = tower::service_fn(|_req: http::Request<kube::client::Body>| async {
+            http::Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(kube::client::Body::from(
+                    br#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                        "message":"workspaces.kubimo.aqora.io \"missing\" not found",
+                        "reason":"NotFound","code":404}"#
+                        .to_vec(),
+                ))
+                .map_err(std::io::Error::other)
+        });
+        crate::Client::new(kube::Client::new(service, "default"), "kubimo")
+    }
+
+    async fn errors_logged_by<F, Fut, T>(f: F) -> (T, usize)
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = T>,
+    {
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(CountErrors(count.clone()));
+        let out = f().with_subscriber(subscriber).await;
+        (out, count.load(Ordering::Relaxed))
+    }
+
+    /// Deleting something that is already gone is not an error, and must not be
+    /// logged as one.
+    ///
+    /// The reconcilers converge by deleting objects that mostly do not exist —
+    /// an indexer pod for a workspace that has none, a snapshot that was never
+    /// taken — so this path runs constantly. While it delegated to `delete`,
+    /// whose `err` fires before the status code is looked at, that was around
+    /// one and a half ERROR lines a second in production.
+    #[tokio::test]
+    async fn an_expected_not_found_is_not_logged_as_an_error() {
+        let client = client_that_always_404s();
+        let (deleted, errors) =
+            errors_logged_by(|| async { client.api::<Workspace>().delete_opt("missing").await })
+                .await;
+        assert!(deleted.expect("a 404 is not a failure here").is_none());
+        assert_eq!(errors, 0, "an expected not-found logged {errors} error(s)");
+    }
+
+    /// ...and the loudness it used to borrow from `delete` is still there for a
+    /// caller that did not ask for the 404 to be swallowed.
+    #[tokio::test]
+    async fn an_unexpected_not_found_is_still_logged_as_an_error() {
+        let client = client_that_always_404s();
+        let (deleted, errors) =
+            errors_logged_by(|| async { client.api::<Workspace>().delete("missing").await }).await;
+        assert!(deleted.is_err());
+        assert!(errors > 0, "a failed delete logged nothing");
     }
 }

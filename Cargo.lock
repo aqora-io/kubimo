@@ -1843,6 +1843,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "http",
  "hyper-util",
  "json-patch",
  "json-patch-macros",
@@ -1858,6 +1859,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
