@@ -358,6 +358,77 @@ async fn test_storage_validation_accepts_equal_min_and_max() {
     .await;
 }
 
+/// A runner pinned to an exact size is a legitimate spec, and both rules'
+/// messages promise "greater than or equal to".
+///
+/// They compared strictly — the defect already found and fixed for workspace
+/// storage — so `min == max` was refused at admission, which is precisely what
+/// a client that sizes a runner's request and limit alike produces.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_runner_validation_accepts_equal_min_and_max() {
+    with_namespace("test-cel-runner-bounds", |client, ns| async move {
+        let runners = client.api_namespaced::<Runner>(&ns);
+
+        let mut pinned = Runner::new(
+            "test-pinned",
+            RunnerSpec {
+                workspace: TEST_WORKSPACE.to_string(),
+                cpu: Some(kubimo::Requirement {
+                    min: Some("500m".parse().expect("a quantity")),
+                    max: Some("500m".parse().expect("a quantity")),
+                }),
+                memory: Some(kubimo::Requirement {
+                    min: Some("2Gi".parse().expect("a quantity")),
+                    max: Some("2Gi".parse().expect("a quantity")),
+                }),
+                ..Default::default()
+            },
+        );
+        pinned.metadata.namespace = Some(ns.clone());
+        runners
+            .patch(&pinned)
+            .await
+            .expect("min == max must be accepted; the rules promise >=, not >");
+
+        // A ceiling below the floor is still nonsense and must be refused.
+        let mut inverted = Runner::new(
+            "test-inverted-cpu",
+            RunnerSpec {
+                workspace: TEST_WORKSPACE.to_string(),
+                cpu: Some(kubimo::Requirement {
+                    min: Some("2".parse().expect("a quantity")),
+                    max: Some("500m".parse().expect("a quantity")),
+                }),
+                ..Default::default()
+            },
+        );
+        inverted.metadata.namespace = Some(ns.clone());
+        assert!(
+            runners.patch(&inverted).await.is_err(),
+            "cpu max < min must be rejected"
+        );
+
+        let mut inverted_memory = Runner::new(
+            "test-inverted-memory",
+            RunnerSpec {
+                workspace: TEST_WORKSPACE.to_string(),
+                memory: Some(kubimo::Requirement {
+                    min: Some("4Gi".parse().expect("a quantity")),
+                    max: Some("2Gi".parse().expect("a quantity")),
+                }),
+                ..Default::default()
+            },
+        );
+        inverted_memory.metadata.namespace = Some(ns.clone());
+        assert!(
+            runners.patch(&inverted_memory).await.is_err(),
+            "memory max < min must be rejected"
+        );
+    })
+    .await;
+}
+
 /// `cloneWorkspaceName` is implemented only for `Dedicated` — its readers are
 /// the workspace reconciler's `apply_pvc` and `apply_job`, neither of which
 /// runs under `Pooled`. Before the rule existed the field was accepted and then

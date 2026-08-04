@@ -107,12 +107,21 @@ pub fn runner_immutable_fields() -> Rule {
         .field_path(".spec.workspace")
 }
 
+/// `max >= min`, for the same reason and in the same shape as
+/// [`workspace_max_storage_greater_than_min`].
+///
+/// These two kept the strict comparison after storage was fixed, so a runner
+/// pinned to an exact size — `min == max`, which is how a runner that must not
+/// burst is written, and what a platform that sizes requests and limits alike
+/// produces — was refused at admission by a rule whose message promised
+/// "greater than or equal to".
 pub fn runner_max_memory_greater_than_min() -> Rule {
     Rule::new(include_str!("./runner_max_memory_greater_than_min.cel"))
         .message("runner max memory must be greater than or equal to min memory")
         .field_path(".spec.memory.max")
 }
 
+/// See [`runner_max_memory_greater_than_min`].
 pub fn runner_max_cpu_greater_than_min() -> Rule {
     Rule::new(include_str!("./runner_max_cpu_greater_than_min.cel"))
         .message("runner max cpu must be greater than or equal to min cpu")
