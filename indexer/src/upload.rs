@@ -817,6 +817,13 @@ pub struct RunResult {
     /// represents the tree. Callers that treat a successful upload as a
     /// durability boundary must not do so when this is non-zero.
     pub failures: usize,
+    /// Total size of the files this cycle tracked — the archive's contents as
+    /// the walk saw them, not the bytes transferred, since unchanged files are
+    /// served from the fingerprint cache. This is what a pooled workspace
+    /// reports as `status.archive.totalContentBytes`, and it is deliberately
+    /// far smaller than `status.storage.used`: the venv, gitignored files and
+    /// everything outside the workspace directory are never walked.
+    pub content_bytes: u64,
 }
 
 /// What the archive looked like before this cycle, as far as S3 can tell.
@@ -973,8 +980,11 @@ pub async fn run(
 
     let mut urls = BTreeSet::new();
     let mut workspace_dirs = BTreeMap::new();
+    let mut content_bytes = 0u64;
     while let Some((path, entry)) = rx.recv().await {
         let name = keys.dir_name(path.clone()).await;
+        content_bytes = content_bytes
+            .saturating_add(entry.file.as_ref().and_then(|file| file.size).unwrap_or(0));
         // Content urls belong in the live set too: `previous_urls` minus this
         // is what gets deleted from S3, so leaving content out meant a removed
         // or renamed file's object was never swept.
@@ -1036,6 +1046,7 @@ pub async fn run(
             paths: take_paths(paths).await,
             refused: true,
             failures: failures.load(Ordering::Relaxed),
+            content_bytes,
         };
     }
     let names_to_delete = previous_names
@@ -1122,6 +1133,7 @@ pub async fn run(
         paths,
         refused: false,
         failures: failures.load(Ordering::Relaxed),
+        content_bytes,
     }
 }
 
