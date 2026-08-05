@@ -120,7 +120,7 @@ impl Reconciler for RunnerReconciler {
 /// For a pod being recreated after a delete this is transient — the name frees up once
 /// the previous one finishes terminating — so it should requeue rather than surface as a
 /// reconcile failure.
-fn is_already_exists(err: &kubimo::Error) -> bool {
+pub(crate) fn is_already_exists(err: &kubimo::Error) -> bool {
     matches!(
         err,
         kubimo::Error::Kube(kubimo::kube::Error::Api(status)) if status.code == 409
@@ -131,10 +131,10 @@ fn is_already_exists(err: &kubimo::Error) -> bool {
 ///
 /// An apply that tries to change an immutable field (e.g. a pod's
 /// `runtimeClassName`) returns one, but so does every other validation failure,
-/// so this is only ever a cheap pre-filter: apply_pod confirms the actual drift
+/// so this is only ever a cheap pre-filter: the caller confirms the actual drift
 /// against the live pod before deleting anything, and a 422 it cannot account
 /// for is returned to the caller unchanged.
-fn is_invalid_request(err: &kubimo::Error) -> bool {
+pub(crate) fn is_invalid_request(err: &kubimo::Error) -> bool {
     matches!(
         err,
         kubimo::Error::Kube(kubimo::kube::Error::Api(status)) if status.code == 422
