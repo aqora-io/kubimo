@@ -2,6 +2,16 @@ apiVersion: v1
 entries:
   kubimo-controller:
   - apiVersion: v2
+    appVersion: 0.2.4
+    created: "2026-08-05T11:48:01.102842096Z"
+    description: Kubimo Controller
+    digest: 93246ef4a29045f10108beae657244afd42af66daf4a92c93308b5f09a5e0ada
+    name: kubimo-controller
+    type: application
+    urls:
+    - https://github.com/aqora-io/kubimo/releases/download/kubimo-controller-0.2.4/kubimo-controller-0.2.4.tgz
+    version: 0.2.4
+  - apiVersion: v2
     appVersion: 0.2.3
     created: "2026-08-05T10:38:04.019418643Z"
     description: Kubimo Controller
@@ -871,4 +881,4 @@ entries:
     urls:
     - https://github.com/aqora-io/kubimo/releases/download/kubimo-controller-0.1.0/kubimo-controller-0.1.0.tgz
     version: 0.1.0
-generated: "2026-08-05T10:38:04.01984498Z"
+generated: "2026-08-05T11:48:01.103251508Z"
