@@ -15,8 +15,8 @@
 # This is a content hash rather than a git revision on purpose. A release commit bumps
 # `[workspace.package] version` in Cargo.toml and every workspace member's version in
 # Cargo.lock — both are agent inputs — so `git log -1 -- <paths>` would move on every
-# release and the agent would roll anyway. The workspace version is normalized out
-# below; nothing else is.
+# release and the agent would roll anyway. Normalizing that away is delicate enough to
+# live in its own script: see scripts/normalize-cargo-version, and the bug it documents.
 #
 #   agent-image-rev            print the hash
 #   agent-image-rev --check    verify the path list still covers the agent
@@ -72,22 +72,14 @@ check() {
 }
 
 rev() {
-    version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
-    [ -n "$version" ] || {
-        echo "error: could not read [workspace.package] version from Cargo.toml" >&2
-        exit 1
-    }
-    # Match the quoted version only, so a coincidental substring elsewhere is untouched.
-    escaped=$(printf '%s' "$version" | sed 's/[].[^$*\\/]/\\&/g')
+    normalize="$(dirname "$0")/normalize-cargo-version"
 
     {
         git ls-files -- $AGENT_PATHS | sort | while IFS= read -r file; do
             # Name as well as content, so a rename or deletion moves the hash.
             echo "$file"
             case "$file" in
-                Cargo.toml | Cargo.lock)
-                    sed "s/\"$escaped\"/\"0.0.0-normalized\"/g" "$file"
-                    ;;
+                Cargo.toml | Cargo.lock) "$normalize" "$file" ;;
                 *) cat "$file" ;;
             esac
         done
