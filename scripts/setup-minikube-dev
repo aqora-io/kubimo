@@ -8,3 +8,36 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 
 minikube addons enable dashboard
 minikube addons enable metrics-server
+
+# The node agent, so `Pooled` workspaces have something to mount. Its CSI plugin is
+# the only thing that can serve a slot, and a workspace created without one comes up
+# unmountable *permanently*: kubimo pins the mode into `status.mode` on first
+# reconcile and a CEL rule refuses Pooled -> Dedicated.
+#
+# The agent only. The controller is meant to run on the host under `cargo run` so it
+# can be iterated on, and a second one in-cluster would reconcile the same objects.
+#
+# `KUBIMO__MARIMO_IMAGE` is the same variable the README has you export for the
+# controller, and using it for both is deliberate: the agent stages one venv per node
+# that every slot reflinks, so a runner started from a different image gets a venv
+# built for another interpreter.
+# Two settings differ from a real cluster, both because minikube cannot do what the
+# defaults assume:
+#   allowUnquotaedSlots - minikube's filesystem has no XFS project quotas, and the
+#     agent refuses to create a slot it cannot cap. Development only: slots then have
+#     no size limit at all, so `status.storage` reports the whole node volume.
+#   dataVolume - the chart provisions its own StorageClass for Scaleway XFS, which
+#     does not exist here. setup-minikube.sh makes csi-hostpath-sc the default.
+kubectl create namespace kubimo --dry-run=client -o yaml | kubectl apply -f -
+helm template kubimo-controller "$SCRIPT_DIR/../charts/kubimo-controller" \
+  --namespace kubimo \
+  --set agent.enabled=true \
+  --set agent.allowUnquotaedSlots=true \
+  --set agent.dataVolume.createStorageClass=false \
+  --set agent.dataVolume.storageClassName=csi-hostpath-sc \
+  --set agent.dataVolume.size=8Gi \
+  --set controller.marimoImage="${KUBIMO__MARIMO_IMAGE:-ghcr.io/aqora-io/kubimo-marimo:dev}" \
+  --show-only templates/agent-daemonset.yaml \
+  --show-only templates/agent-csidriver.yaml \
+  --show-only templates/agent-rbac.yaml \
+  | kubectl --namespace kubimo apply -f -
