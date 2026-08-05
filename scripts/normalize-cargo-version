@@ -1,0 +1,63 @@
+#!/bin/sh
+# Rewrite the workspace's own version to a constant in Cargo.toml or Cargo.lock, so that
+# a release commit does not move an image's source hash. Reads a file, writes to stdout.
+#
+#   normalize-cargo-version <Cargo.toml|Cargo.lock>
+#
+# Keyed on which package a version belongs to, never on the version string itself. The
+# obvious implementation — replace every occurrence of "$version" — also rewrites
+# third-party crates that happen to carry the same number, and *which* crates collide
+# changes from one release to the next. At v0.2.2 that caught utf8parse and zerotrie; at
+# v0.2.3 it caught pathdiff instead. The normalized text therefore differed between
+# releases even when nothing an image contains had changed, the hash moved, and the agent
+# rolled on every release — destroying each node's data volume — despite being pinned to
+# its source hash precisely so it would not. Silent, and it defeated the whole mechanism.
+#
+# Cargo.lock: a `[[package]]` stanza with no `source` field is a workspace/path member;
+# every crate from a registry has one. That is the discriminator, so this needs no
+# `cargo metadata` call and cannot go stale when a member is added or renamed. The
+# stanza is buffered because `version` precedes `source` in cargo's output order.
+#
+# The lockfile's own `version = 3` header has no quotes, so requiring the quote leaves it
+# alone — normalizing it would be a silent format downgrade.
+set -eu
+
+file=${1:?usage: normalize-cargo-version <Cargo.toml|Cargo.lock>}
+
+case "$(basename "$file")" in
+    Cargo.lock)
+        awk '
+        function flush_stanza(   i, has_source) {
+            if (n == 0) return
+            has_source = 0
+            for (i = 0; i < n; i++) if (buf[i] ~ /^source = /) has_source = 1
+            for (i = 0; i < n; i++) {
+                if (!has_source && buf[i] ~ /^version = "/)
+                    print "version = \"0.0.0-normalized\""
+                else
+                    print buf[i]
+            }
+            n = 0
+        }
+        /^\[\[package\]\]/ { flush_stanza() }
+        { buf[n++] = $0 }
+        END { flush_stanza() }
+        ' "$file"
+        ;;
+    Cargo.toml)
+        # Only the `[workspace.package]` version. A dependency pinned to the same number
+        # elsewhere in the file is somebody else's version and not ours to rewrite.
+        awk '
+        /^\[/ { section = $0 }
+        section == "[workspace.package]" && /^version = "/ {
+            print "version = \"0.0.0-normalized\""
+            next
+        }
+        { print }
+        ' "$file"
+        ;;
+    *)
+        echo "error: $file is neither Cargo.toml nor Cargo.lock" >&2
+        exit 2
+        ;;
+esac

@@ -21,7 +21,8 @@
 # that reason, though only its MARIMO_GIT variable feeds this image.
 #
 # This is a content hash rather than a git revision on purpose, and the workspace version
-# is normalized out, for exactly the reasons agent-image-rev explains.
+# is normalized out by scripts/normalize-cargo-version, for exactly the reasons
+# agent-image-rev explains.
 #
 #   marimo-image-rev            print the hash
 #   marimo-image-rev --check    verify the path list still covers the image
@@ -82,22 +83,14 @@ check() {
 }
 
 rev() {
-    version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
-    [ -n "$version" ] || {
-        echo "error: could not read [workspace.package] version from Cargo.toml" >&2
-        exit 1
-    }
-    # Match the quoted version only, so a coincidental substring elsewhere is untouched.
-    escaped=$(printf '%s' "$version" | sed 's/[].[^$*\\/]/\\&/g')
+    normalize="$(dirname "$0")/normalize-cargo-version"
 
     {
         git ls-files -- $MARIMO_PATHS | sort | while IFS= read -r file; do
             # Name as well as content, so a rename or deletion moves the hash.
             echo "$file"
             case "$file" in
-                Cargo.toml | Cargo.lock)
-                    sed "s/\"$escaped\"/\"0.0.0-normalized\"/g" "$file"
-                    ;;
+                Cargo.toml | Cargo.lock) "$normalize" "$file" ;;
                 *) cat "$file" ;;
             esac
         done
