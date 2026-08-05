@@ -16,7 +16,7 @@ variable "MARIMO_GIT" {
 }
 
 group "default" {
-  targets = ["marimo", "marimo-conda", "controller"]
+  targets = ["marimo", "conda-marimo", "controller"]
 }
 
 target "docker-metadata-controller" {}
@@ -55,7 +55,7 @@ target "agent" {
 }
 
 target "docker-metadata-marimo" {}
-target "docker-metadata-marimo-conda" {}
+target "docker-metadata-conda-marimo" {}
 
 target "marimo" {
   inherits = ["docker-metadata-marimo"]
@@ -75,7 +75,7 @@ target "marimo" {
   ]
 }
 
-target "marimo-conda" {
-  inherits = ["marimo", "docker-metadata-marimo-conda"]
-  target = "miniconda"
+target "conda-marimo" {
+  inherits = ["marimo", "docker-metadata-conda-marimo"]
+  target = "micromamba"
 }
