@@ -2,6 +2,18 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.2.6-conda.0 - 2026-08-05
+#### Features
+- (**controller**) add "pythonRuntime" field to workspace spec - (c0da32b) - Antoine Chauvin
+- (**docker**) add conda image - (e5b99bc) - Antoine Chauvin
+- (**marimo**) upgrade 0.23.11 => 0.23.15 - (be6ff15) - Antoine Chauvin
+#### Bug Fixes
+- (**docker**) use absolute paths when calling binaries - (5d0cc2b) - Antoine Chauvin
+#### Build system
+- install the node agent in the minikube dev setup - (670b6a1) - Julian Popescu
+
+- - -
+
 ## v0.1.33 - 2026-07-01
 #### Features
 - storage budget - (cb27f3f) - Julian Popescu
