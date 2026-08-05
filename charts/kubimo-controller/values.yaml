@@ -10,6 +10,22 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
 
+# The marimo image: what runners are started with, and what the agent stages its venv
+# template from. Both resolve through one helper so they cannot drift apart — see
+# `kubimo-controller.marimoImage` in templates/_helpers.tpl.
+marimo:
+  repository: ghcr.io/aqora-io/kubimo-marimo
+  # Written by CI at release time to `src-<hash>`, hashed over the marimo image's own
+  # inputs: the indexer's sources (the image ships it), the Dockerfile and the files
+  # baked into it, and the pinned marimo fork. See scripts/marimo-image-rev.
+  #
+  # This exists so a controller-only release leaves this tag alone. Moving it recreates
+  # every runner pod *and* rolls the agent DaemonSet, which destroys each node's data
+  # volume and re-hydrates every slot on it. Generated — do not hand-edit.
+  sourceTag: ""
+  # Overrides sourceTag. Empty means follow sourceTag, then the chart appVersion.
+  tag: ""
+
 # controller:
 #   rustLog: info
 #   managerName: kubimo-controller

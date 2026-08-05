@@ -1,0 +1,111 @@
+#!/bin/sh
+# Resolve the git revision that defines the marimo image's contents.
+#
+# The marimo image is tagged by its own source (`src-<rev>`) rather than by the release
+# version, for the same reason the agent image is — see scripts/agent-image-rev — but
+# with a wider blast radius. This one image is referenced twice:
+#
+#   * runners are started from it, so moving the tag recreates every runner pod, and
+#   * the agent stages its venv template from it, so moving the tag rolls the agent
+#     DaemonSet, which destroys each node's data volume and re-hydrates every slot on it.
+#
+# Tagging it by the release version meant a controller-only release did both. The agent's
+# own `src-` tag did not prevent it: the tag protects the agent *container*, while the
+# venv-template initContainer still followed the chart appVersion.
+#
+# The path list is every input that ends up in the image: the indexer binary's sources
+# (the image ships it), the Dockerfile and the files baked into it, and the bake file
+# that pins the marimo fork. As with the agent, err toward including — over-including
+# costs an unnecessary roll, under-including ships a stale image against a newer
+# controller, and only the second is dangerous. docker-bake.hcl is included whole for
+# that reason, though only its MARIMO_GIT variable feeds this image.
+#
+# This is a content hash rather than a git revision on purpose, and the workspace version
+# is normalized out, for exactly the reasons agent-image-rev explains.
+#
+#   marimo-image-rev            print the hash
+#   marimo-image-rev --check    verify the path list still covers the image
+set -eu
+
+MARIMO_PATHS="indexer api notebook_meta json-patch-macros k8s-crd-snapshot-storage Cargo.toml Cargo.lock docker/Dockerfile.marimo docker/setup docker/app docker-bake.hcl"
+
+# The members deliberately excluded: neither ends up in this image. If the indexer ever
+# depends on one, the scheme is unsound — a change there would alter the image's contents
+# without moving the tag.
+EXCLUDED_MEMBERS="controller agent"
+
+check() {
+    status=0
+
+    # 1. Every workspace member except the excluded ones must be hashed, so that a newly
+    #    added crate the indexer depends on cannot silently fail to trigger a rebuild.
+    members=$(cargo metadata --format-version 1 --no-deps \
+        | jq -r '.workspace_root as $root
+                 | .packages[]
+                 | (.manifest_path | rtrimstr("/Cargo.toml") | ltrimstr($root + "/"))')
+
+    for member in $members; do
+        skip=0
+        for excluded in $EXCLUDED_MEMBERS; do
+            [ "$member" = "$excluded" ] && skip=1
+        done
+        [ "$skip" -eq 1 ] && continue
+        case " $MARIMO_PATHS " in
+            *" $member "*) ;;
+            *)
+                echo "error: workspace member '$member' is not in MARIMO_PATHS." >&2
+                echo "       Add it, or the marimo image will not be rebuilt when it changes." >&2
+                status=1
+                ;;
+        esac
+    done
+
+    # 2. The indexer must not depend on an excluded member, directly or transitively.
+    for excluded in $EXCLUDED_MEMBERS; do
+        excluded_pkg=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r --arg root "$excluded" '.workspace_root as $wr
+                     | .packages[]
+                     | select((.manifest_path | rtrimstr("/Cargo.toml") | ltrimstr($wr + "/")) == $root)
+                     | .name')
+
+        if [ -n "$excluded_pkg" ] \
+            && cargo tree --package indexer --edges normal,build --prefix none 2>/dev/null \
+            | grep -qx "$excluded_pkg v.*"; then
+            echo "error: indexer depends on '$excluded_pkg', which is excluded from MARIMO_PATHS." >&2
+            echo "       A change there could then alter the marimo image without moving its tag." >&2
+            status=1
+        fi
+    done
+
+    [ "$status" -eq 0 ] && echo "marimo image path list is consistent"
+    return "$status"
+}
+
+rev() {
+    version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+    [ -n "$version" ] || {
+        echo "error: could not read [workspace.package] version from Cargo.toml" >&2
+        exit 1
+    }
+    # Match the quoted version only, so a coincidental substring elsewhere is untouched.
+    escaped=$(printf '%s' "$version" | sed 's/[].[^$*\\/]/\\&/g')
+
+    {
+        git ls-files -- $MARIMO_PATHS | sort | while IFS= read -r file; do
+            # Name as well as content, so a rename or deletion moves the hash.
+            echo "$file"
+            case "$file" in
+                Cargo.toml | Cargo.lock)
+                    sed "s/\"$escaped\"/\"0.0.0-normalized\"/g" "$file"
+                    ;;
+                *) cat "$file" ;;
+            esac
+        done
+    } | sha256sum | cut -c1-16
+}
+
+case "${1:-}" in
+    --check) check ;;
+    "") rev ;;
+    *) echo "usage: $0 [--check]" >&2; exit 2 ;;
+esac
