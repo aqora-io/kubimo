@@ -48,6 +48,14 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           env:
+            # Set unconditionally, unlike its neighbours. The binary's own default is
+            # derived from its crate version (default_marimo_image in
+            # controller/src/config.rs), so leaving this out when `controller.marimoImage`
+            # is unset would put the version-derived tag back — the one this helper exists
+            # to avoid — and let the runners' image drift from the venv template the agent
+            # stages from `kubimo-controller.marimoImage`.
+            - name: KUBIMO__MARIMO_IMAGE
+              value: {{ include "kubimo-controller.marimoImage" . | quote }}
             {{- with .Values.controller }}
             {{- if .rustLog }}
             - name: RUST_LOG
@@ -56,10 +64,6 @@ spec:
             {{- if .managerName }}
             - name: KUBIMO__MANAGER_NAME
               value: {{ .managerName | quote }}
-            {{- end }}
-            {{- if .marimoImage }}
-            - name: KUBIMO__MARIMO_IMAGE
-              value: {{ .marimoImage | quote }}
             {{- end }}
             {{- if .busyboxImage }}
             - name: KUBIMO__BUSYBOX_IMAGE

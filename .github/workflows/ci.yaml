@@ -27,6 +27,10 @@ jobs:
       # against a newer controller.
       - name: Agent image path list
         run: ./scripts/agent-image-rev --check
+      # Same for the marimo image, which ships the indexer binary. Missing a crate here
+      # ships a stale indexer, and leaves runners on a venv the agent no longer stages.
+      - name: Marimo image path list
+        run: ./scripts/marimo-image-rev --check
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy

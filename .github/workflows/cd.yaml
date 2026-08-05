@@ -110,12 +110,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # Tags the agent image by its own source, so a controller-only release leaves the
-      # DaemonSet pod template unchanged and Kubernetes does not roll the agent.
-      - name: Agent source hash
+      # Tags the agent and marimo images by their own sources, so a controller-only
+      # release leaves both the DaemonSet pod template and the runners' image unchanged
+      # and Kubernetes rolls neither. The marimo image needs this as much as the agent:
+      # it is referenced by both the runners and the agent's venv-template initContainer,
+      # so a version-derived tag rolls the agent even though the agent image itself is
+      # pinned. Script names follow the image names.
+      - name: Image source hash
         id: rev
-        if: matrix.image.name == 'agent'
-        run: echo "rev=$(./scripts/agent-image-rev)" >> "$GITHUB_OUTPUT"
+        if: matrix.image.name == 'agent' || matrix.image.name == 'marimo'
+        run: echo "rev=$(./scripts/${{ matrix.image.name }}-image-rev)" >> "$GITHUB_OUTPUT"
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
@@ -141,7 +145,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            ${{ matrix.image.name == 'agent' && format('type=raw,value=src-{0}', steps.rev.outputs.rev) || '' }}
+            ${{ steps.rev.outputs.rev && format('type=raw,value=src-{0}', steps.rev.outputs.rev) || '' }}
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
@@ -186,6 +190,22 @@ jobs:
           fi
           rev=$(./scripts/agent-image-rev)
           sed -i "s|^    sourceTag: \"\"$|    sourceTag: \"src-${rev}\"|" "$values"
+          grep -n 'sourceTag:' "$values"
+      # Same again for the marimo image, which the runners and the agent's venv-template
+      # initContainer both resolve to. Left on the appVersion it would roll the agent on
+      # every release regardless of the pin above, and recreate every runner pod besides.
+      # The two keys are told apart by indentation: marimo.sourceTag sits at the top
+      # level, agent.image.sourceTag one level deeper.
+      - name: Pin marimo image to its source hash
+        run: |
+          set -eu
+          values=charts/kubimo-controller/values.yaml
+          if [ "$(grep -c '^  sourceTag: ""$' "$values")" -ne 1 ]; then
+            echo "error: expected exactly one empty marimo.sourceTag in $values" >&2
+            exit 1
+          fi
+          rev=$(./scripts/marimo-image-rev)
+          sed -i "s|^  sourceTag: \"\"$|  sourceTag: \"src-${rev}\"|" "$values"
           grep -n 'sourceTag:' "$values"
       - name: Configure Git
         run: |
