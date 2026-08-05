@@ -533,51 +533,16 @@ impl KubimoNode {
                 "could not record the flush; the slot will be kept rather than evicted"
             );
         }
-        self.record_archive_flush(workspace, &published.namespace, flushed)
-            .await;
-    }
-
-    /// Record on the CR that this workspace's files have reached S3.
-    ///
-    /// `status.archive.lastSyncedAt` is the only cluster-visible evidence that a
-    /// pooled workspace has ever been persisted. Without it, a workspace whose
-    /// archive was never written and one that is genuinely empty are the same
-    /// object as far as anything outside the node can tell — and the only way to
-    /// distinguish them is to find the node holding the slot and read the
-    /// agent's logs.
-    ///
-    /// It marks a *flush*, not a sync: the watcher uploads continuously while a
-    /// runner is up, but this is the point at which the whole tree has been
-    /// walked and shown to have landed, which is the only claim worth writing
-    /// down.
-    ///
-    /// A field manager of its own again, for the reason [`Self::publish_slot_status`]
-    /// gives: an apply owns exactly the fields it contains, and this one carries
-    /// neither `status.slot` nor `status.archive.keyPrefix`. Writing it as the
-    /// agent's publish-time manager would relinquish those — the slot quota
-    /// especially, which is not recorded in a publish record and so cannot be
-    /// re-sent from here.
-    async fn record_archive_flush(
-        &self,
-        workspace: &str,
-        namespace: &str,
-        flushed: crate::hydrate::Flushed,
-    ) {
-        let Some(client) = self.clients.get_for_flush_status(namespace).await else {
-            return;
-        };
-        let mut patch = kubimo::Workspace::new(workspace, Default::default());
-        patch.status = Some(kubimo::WorkspaceStatus {
-            archive: Some(kubimo::WorkspaceArchiveStatus {
-                last_synced_at: Some(kubimo::chrono::Utc::now()),
-                total_content_bytes: Some(flushed.content_bytes),
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-        if let Err(err) = client.api::<kubimo::Workspace>().patch_status(&patch).await {
-            tracing::warn!(%err, workspace, "could not record the archive flush");
-        }
+        // `status.archive` is not written here. The flush runs `indexer::upload`,
+        // which records the sync itself on any batch that lands cleanly — the same
+        // path the watcher takes. Writing it again from here under a second field
+        // manager would put two owners on one field and make every flush a 409.
+        tracing::info!(
+            workspace,
+            slot = %published.slot,
+            content_bytes = flushed.content_bytes,
+            "flushed slot to its archive"
+        );
     }
 
     /// Record where a pooled workspace actually lives, on the CR.
