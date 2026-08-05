@@ -18,10 +18,10 @@ use futures::{
 };
 use kubimo::FilterParams;
 use kubimo::{
-    ResourceNameExt, Workspace, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory,
-    WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo,
-    WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceStatus,
-    WorkspaceStorageStatus, url::Url,
+    ResourceNameExt, Workspace, WorkspaceArchiveStatus, WorkspaceDir, WorkspaceDirContentUrl,
+    WorkspaceDirDirectory, WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile,
+    WorkspaceDirMarimo, WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink,
+    WorkspaceStatus, WorkspaceStorageStatus, url::Url,
 };
 use thiserror::Error;
 use tokio::{
@@ -1061,12 +1061,15 @@ pub async fn run(
     // Upload the manifest before deleting stale objects so a concurrent
     // reader never holds a manifest referencing objects deleted by this
     // batch. The manifest url is never part of the stale-url bookkeeping.
-    if let Some(bucket) = args.bucket.as_deref()
-        && !upload_manifest(args, s3, bucket, &workspace_dirs, &upload_permits).await
-    {
-        // Without a manifest the archive cannot be restored at all, however
-        // many objects reached the bucket.
-        failures.fetch_add(1, Ordering::Relaxed);
+    let mut manifest_uploaded = false;
+    if let Some(bucket) = args.bucket.as_deref() {
+        manifest_uploaded =
+            upload_manifest(args, s3, bucket, &workspace_dirs, &upload_permits).await;
+        if !manifest_uploaded {
+            // Without a manifest the archive cannot be restored at all, however
+            // many objects reached the bucket.
+            failures.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     let futs = FuturesUnordered::new();
@@ -1115,7 +1118,14 @@ pub async fn run(
     if let Err(err) = futs.try_collect::<()>().await {
         tracing::error!("Error waiting for tasks: {}", err);
     }
-    update_workspace_storage_status(args, client).await;
+    // A sync is only claimed when the manifest landed *and* nothing in this batch
+    // was left behind. A manifest naming an object whose upload failed describes
+    // an archive that cannot be restored, and saying it synced would make an
+    // incomplete archive look durable — the one claim this field exists to make
+    // honestly.
+    let synced_content_bytes =
+        (manifest_uploaded && failures.load(Ordering::Relaxed) == 0).then_some(content_bytes);
+    update_workspace_status(args, client, synced_content_bytes).await;
     let paths = take_paths(paths).await;
     // Drop fingerprints for files that no longer exist, so a watcher running
     // for days does not accumulate an entry per file ever seen. `paths` holds
@@ -1182,37 +1192,64 @@ async fn upload_manifest(
     }
 }
 
-/// Measure how much space the mounted workspace volume is using and publish it
-/// to the Workspace's status. Best-effort: failures are logged and never abort
-/// indexing.
-async fn update_workspace_storage_status(args: &UploadOptions, client: &kubimo::Client) {
+/// Publish what this batch established to the Workspace's status: how much space
+/// the volume is using, and — when the batch completed cleanly — that its content
+/// reached S3.
+///
+/// `status.archive.lastSyncedAt` is written here, on every batch that lands, rather
+/// than only when the last runner unmounts. The unmount flush is a real durability
+/// boundary but a rare one: the platform gives every workspace both an Edit and a
+/// Run runner, and the flush is deferred while any sibling volume still mounts the
+/// slot, so the field sat at the value it was given minutes after creation while the
+/// watcher archived the workspace continuously for hours. A staleness signal that
+/// lags reality by days is worse than none, because it reads as "never persisted".
+///
+/// Best-effort: failures are logged and never abort indexing.
+async fn update_workspace_status(
+    args: &UploadOptions,
+    client: &kubimo::Client,
+    synced_content_bytes: Option<u64>,
+) {
+    // Losing disk usage must not cost the sync record: they describe different
+    // things and only one of them is a durability claim.
     let usage = match disk::disk_usage(&args.directory) {
-        Ok(usage) => usage,
+        Ok(usage) => Some(usage),
         Err(err) => {
             tracing::error!(
                 "Could not determine disk usage for {:?}: {err}",
                 args.directory
             );
-            return;
+            None
         }
     };
+    if usage.is_none() && synced_content_bytes.is_none() {
+        return;
+    }
     let mut workspace = Workspace::new(&args.name, Default::default());
     workspace.status = Some(WorkspaceStatus {
-        storage: Some(WorkspaceStorageStatus {
+        storage: usage.map(|usage| WorkspaceStorageStatus {
             used: Some(disk::storage_quantity(usage.used)),
             capacity: Some(disk::storage_quantity(usage.capacity)),
             available: Some(disk::storage_quantity(usage.available)),
         }),
+        // `keyPrefix` is deliberately absent: the agent owns it, and an apply owns
+        // exactly the fields it carries, so naming it here would take it over and
+        // then drop it on the first batch that has nothing to say.
+        archive: synced_content_bytes.map(|content_bytes| WorkspaceArchiveStatus {
+            last_synced_at: Some(kubimo::chrono::Utc::now()),
+            total_content_bytes: Some(content_bytes),
+            ..Default::default()
+        }),
         ..Default::default()
     });
     if let Err(err) = client.api::<Workspace>().patch_status(&workspace).await {
-        tracing::error!("Failed to update workspace storage status: {err}");
+        tracing::error!("Failed to update workspace status: {err}");
     } else {
         tracing::info!(
-            "Updated workspace {} storage status: {} / {} bytes used",
+            "Updated workspace {} status: {:?} bytes used, synced {:?}",
             args.name,
-            usage.used,
-            usage.capacity
+            usage.map(|usage| usage.used),
+            synced_content_bytes
         );
     }
 }
