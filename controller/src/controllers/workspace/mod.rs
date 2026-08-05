@@ -22,6 +22,7 @@ use kubimo::{Runner, Workspace, WorkspaceMode};
 
 use crate::backoff::default_error_policy;
 use crate::context::Context;
+use crate::controllers::runner::is_already_exists;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 
@@ -53,16 +54,46 @@ impl Reconciler for WorkspaceReconciler {
             self.apply_budget_status(ctx, workspace, &reason).await?;
             return Ok(Action::requeue(BUDGET_REQUEUE_INTERVAL));
         }
-        futures::future::try_join_all([
+        let applied = futures::future::try_join_all([
             self.apply_pvc(ctx, workspace, plan.request, current_limit)
-                .map_ok(|_| ())
+                .map_ok(|_| false)
                 .boxed(),
-            self.apply_job(ctx, workspace).map_ok(|_| ()).boxed(),
-            self.apply_indexer_rbac(ctx, workspace).boxed(),
-            self.apply_indexer(ctx, workspace).boxed(),
-            self.apply_status(ctx, workspace).boxed(),
+            self.apply_job(ctx, workspace).map_ok(|_| false).boxed(),
+            self.apply_indexer_rbac(ctx, workspace)
+                .map_ok(|_| false)
+                .boxed(),
+            self.apply_indexer(ctx, workspace)
+                .map_ok(|applied| matches!(applied, apply_indexer::IndexerApply::Replaced))
+                .boxed(),
+            self.apply_status(ctx, workspace).map_ok(|_| false).boxed(),
         ])
-        .await?;
+        .await;
+        // Recreating the indexer pod while the previous one is still Terminating is a
+        // 409, and a transient one: the name frees up as soon as it finishes. Left to
+        // propagate, it would log a reconcile error on every reconcile that lands in a
+        // replaced pod's termination window.
+        //
+        // Everything else propagates, 422s included. A 422 that apply_indexer did *not*
+        // confirm as the known spec drift is an ordinary validation failure and never
+        // converges; requeuing those on a fixed 2s timer would spin forever instead of
+        // letting the controller's backoff space them out.
+        let replaced = match applied {
+            Ok(outcomes) => outcomes.into_iter().any(|replaced| replaced),
+            Err(err) if is_already_exists(&err) => {
+                return Ok(Action::requeue(Duration::from_secs(2)));
+            }
+            Err(err) => return Err(err),
+        };
+        if replaced {
+            // apply_indexer deleted a pod whose immutable spec had drifted. Nothing has
+            // recreated it, and its deletion is not a change this controller can wait on,
+            // so come back once the old one has finished terminating and the name is free.
+            tracing::info!(
+                workspace = workspace.name()?,
+                "replaced a drifted indexer pod; requeuing to recreate it"
+            );
+            return Ok(Action::requeue(Duration::from_secs(2)));
+        }
         Ok(Action::await_change())
     }
 
