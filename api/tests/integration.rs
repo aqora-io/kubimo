@@ -455,18 +455,37 @@ async fn test_clone_is_refused_for_pooled_workspaces() {
              not silently ignored"
         );
 
-        // Dedicated really does clone the PVC, so it stays legal.
-        let mut dedicated = Workspace::new(
+        // Dedicated really does clone the PVC, so clone stays legal there. A
+        // fresh Dedicated is now refused at create, so the only Dedicated that
+        // can exist is one the controller already materialized: grandfather one
+        // via status, then clone it.
+        let mut grandfathered = Workspace::new("test-dedicated-clone", WorkspaceSpec::default());
+        grandfathered.metadata.namespace = Some(ns.clone());
+        workspaces
+            .patch(&grandfathered)
+            .await
+            .expect("creating a workspace without a mode");
+
+        let mut materialized = Workspace::new("test-dedicated-clone", WorkspaceSpec::default());
+        materialized.status = Some(kubimo::WorkspaceStatus {
+            mode: Some(kubimo::WorkspaceMode::Dedicated),
+            ..Default::default()
+        });
+        workspaces
+            .patch_status(&materialized)
+            .await
+            .expect("materializing status.mode: Dedicated");
+
+        let mut cloned = Workspace::new(
             "test-dedicated-clone",
             WorkspaceSpec {
-                mode: Some(kubimo::WorkspaceMode::Dedicated),
                 clone_workspace_name: Some("bmow-source".to_string()),
                 ..Default::default()
             },
         );
-        dedicated.metadata.namespace = Some(ns.clone());
+        cloned.metadata.namespace = Some(ns.clone());
         workspaces
-            .patch(&dedicated)
+            .patch(&cloned)
             .await
             .expect("Dedicated clones the source PVC and must still be allowed");
     })
@@ -541,7 +560,6 @@ async fn test_restore_from_and_clone_are_mutually_exclusive() {
         let mut both = Workspace::new(
             "test-both",
             WorkspaceSpec {
-                mode: Some(kubimo::WorkspaceMode::Dedicated),
                 clone_workspace_name: Some("bmow-source".to_string()),
                 restore_from: Some(kubimo::WorkspaceRestoreFrom {
                     bucket: "some-bucket".to_string(),
@@ -653,6 +671,68 @@ async fn test_status_materialized_pooled_cannot_be_downgraded() {
             .patch(&edited)
             .await
             .expect("a spec change unrelated to the mode must still be accepted");
+    })
+    .await;
+}
+
+/// `Dedicated` is deprecated: no new workspace may be created in it, but the ones
+/// that already exist must keep working. The grandfather signal is `status.mode`
+/// — forge-proof, since status is ignored on create — so a fresh
+/// `spec.mode: Dedicated` is refused while a materialized Dedicated stays fully
+/// writable.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_new_dedicated_is_refused_but_existing_is_grandfathered() {
+    with_namespace("test-cel-no-new-dedicated", |client, ns| async move {
+        let workspaces = client.api_namespaced::<Workspace>(&ns);
+
+        // A fresh, explicit Dedicated is refused at create.
+        let mut fresh = Workspace::new(
+            "test-fresh-dedicated",
+            WorkspaceSpec {
+                mode: Some(kubimo::WorkspaceMode::Dedicated),
+                ..Default::default()
+            },
+        );
+        fresh.metadata.namespace = Some(ns.clone());
+        assert!(
+            workspaces.patch(&fresh).await.is_err(),
+            "a newly-submitted Dedicated workspace must be refused"
+        );
+
+        // An existing Dedicated — one the controller already materialized — is
+        // grandfathered: create without a mode, materialize status.mode:
+        // Dedicated, and a later spec change (even one that re-states
+        // spec.mode: Dedicated, as the platform does) must still be accepted.
+        let mut existing = Workspace::new("test-existing-dedicated", WorkspaceSpec::default());
+        existing.metadata.namespace = Some(ns.clone());
+        workspaces
+            .patch(&existing)
+            .await
+            .expect("creating a workspace without a mode");
+
+        let mut materialized = Workspace::new("test-existing-dedicated", WorkspaceSpec::default());
+        materialized.status = Some(kubimo::WorkspaceStatus {
+            mode: Some(kubimo::WorkspaceMode::Dedicated),
+            ..Default::default()
+        });
+        workspaces
+            .patch_status(&materialized)
+            .await
+            .expect("materializing status.mode: Dedicated");
+
+        let mut updated = Workspace::new(
+            "test-existing-dedicated",
+            WorkspaceSpec {
+                mode: Some(kubimo::WorkspaceMode::Dedicated),
+                ..spec_with_storage(Some("2Gi"), None)
+            },
+        );
+        updated.metadata.namespace = Some(ns.clone());
+        workspaces
+            .patch(&updated)
+            .await
+            .expect("an existing Dedicated workspace must stay writable");
     })
     .await;
 }

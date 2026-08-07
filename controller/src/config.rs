@@ -175,9 +175,9 @@ mod tests {
     }
 
     #[test]
-    fn default_workspace_mode_is_dedicated_when_unset() {
+    fn default_workspace_mode_is_pooled_when_unset() {
         let config = load_from(&[]).unwrap();
-        assert_eq!(config.default_workspace_mode, WorkspaceMode::Dedicated);
+        assert_eq!(config.default_workspace_mode, WorkspaceMode::Pooled);
     }
 
     /// The cutover switch. If this does not deserialize, flipping the default

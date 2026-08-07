@@ -101,6 +101,33 @@ pub fn workspace_clone_not_pooled() -> Rule {
         .field_path(".spec.cloneWorkspaceName")
 }
 
+/// `Dedicated` is deprecated: no new workspace may be created in it. Existing
+/// `Dedicated` workspaces keep running.
+///
+/// The grandfather signal is `status.mode`, not `spec.mode`, because it is
+/// forge-proof: a Workspace has a status subresource, so a client-supplied
+/// status is ignored on create. `status.mode == "Dedicated"` is therefore only
+/// ever true for a workspace the controller already materialized — an existing
+/// one — while a newly-submitted `spec.mode: Dedicated` has no status and is
+/// refused. Keying on `oldSelf` instead would need `optionalOldSelf` to also
+/// fire on create, which kube-core 3.0.1 cannot express and which the ≥ 1.29
+/// clusters this targets do not enable.
+///
+/// A plain (non-transition) rule is what keeps existing `Dedicated` workspaces
+/// writable: every reconcile re-materializes `status.mode: Dedicated`, so their
+/// status writes and spec patches carry it and pass the second clause. Only the
+/// create — where status is absent — is caught.
+///
+/// The paired half of the deprecation lives in the operator default: with
+/// `WorkspaceMode`'s default now `Pooled`, a workspace that omits `spec.mode`
+/// resolves to `Pooled`, so this rule only has to refuse an *explicit*
+/// `Dedicated` (CEL cannot see `KUBIMO__DEFAULT_WORKSPACE_MODE`).
+pub fn workspace_no_new_dedicated() -> Rule {
+    Rule::new(include_str!("./workspace_no_new_dedicated.cel"))
+        .message("Dedicated workspaces are deprecated; new workspaces must be Pooled")
+        .field_path(".spec.mode")
+}
+
 pub fn runner_immutable_fields() -> Rule {
     Rule::new(include_str!("./runner_immutable_fields.cel"))
         .message("workspace is immutable")
@@ -155,6 +182,7 @@ mod tests {
         test_compiles(budget_selector_not_empty());
         test_compiles(workspace_no_volume_with_name());
         test_compiles(workspace_clone_not_pooled());
+        test_compiles(workspace_no_new_dedicated());
         test_compiles(runner_immutable_fields());
         test_compiles(runner_max_memory_greater_than_min());
         test_compiles(runner_max_cpu_greater_than_min());
