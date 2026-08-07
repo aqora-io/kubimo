@@ -199,11 +199,14 @@ pub struct WorkspaceRestoreFrom {
     pub pod: Option<WorkspaceIndexerPod>,
 }
 
+/// Determines how a workspace environment is installed.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[cfg_attr(test, derive(Eq, PartialEq))]
 pub enum WorkspacePythonRuntime {
+    /// Environment is installed by `uv`.
     #[default]
     Uv,
+    /// Environment is installed by `micromamba`.
     Conda,
 }
 

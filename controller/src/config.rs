@@ -1,4 +1,4 @@
-use kubimo::WorkspaceMode;
+use kubimo::{WorkspaceMode, WorkspacePythonRuntime};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -166,6 +166,13 @@ impl Config {
             .add_source(Self::environment_source())
             .build()?
             .try_deserialize()
+    }
+
+    pub fn marimo_image(&self, python_runtime: WorkspacePythonRuntime) -> &str {
+        match python_runtime {
+            WorkspacePythonRuntime::Uv => &self.marimo_image,
+            WorkspacePythonRuntime::Conda => &self.marimo_conda_image,
+        }
     }
 }
 

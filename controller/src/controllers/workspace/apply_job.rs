@@ -4,13 +4,13 @@ use kubimo::k8s_openapi::api::core::v1::{
     SecurityContext, Volume, VolumeMount,
 };
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{Workspace, WorkspacePythonRuntime, prelude::*};
+use kubimo::{Workspace, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::indexer;
-use crate::controllers::workspace::apply_status::get_workspace_python_runtime;
 use crate::controllers::workspace_affinity;
+use crate::controllers::workspace_python_runtime::fetch_workspace_python_runtime;
 
 use super::WorkspaceReconciler;
 
@@ -101,10 +101,9 @@ impl WorkspaceReconciler {
             }),
             ..Default::default()
         });
-        let marimo_image = match get_workspace_python_runtime(ctx, workspace).await? {
-            WorkspacePythonRuntime::Uv => &ctx.config.marimo_image,
-            WorkspacePythonRuntime::Conda => &ctx.config.marimo_conda_image,
-        };
+        let marimo_image = ctx
+            .config
+            .marimo_image(fetch_workspace_python_runtime(ctx, workspace).await?);
         let init_containers = build_init_containers(marimo_image, workspace_name, workspace);
         let pod_labels = workspace_affinity::workspace_label_map(workspace_name);
         let affinity = Some(workspace_affinity::workspace_affinity(workspace_name));

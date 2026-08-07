@@ -85,10 +85,7 @@ impl RunnerReconciler {
         ));
         let mut containers = vec![Container {
             name: "runner".into(),
-            image: Some(match python_runtime {
-                WorkspacePythonRuntime::Uv => ctx.config.marimo_image.clone(),
-                WorkspacePythonRuntime::Conda => ctx.config.marimo_conda_image.clone(),
-            }),
+            image: Some(ctx.config.marimo_image(python_runtime).to_string()),
             resources: Resources::default()
                 .cpu(runner.spec.cpu.clone())
                 .memory(runner.spec.memory.clone())

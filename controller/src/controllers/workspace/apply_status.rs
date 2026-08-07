@@ -2,9 +2,10 @@ use kubimo::k8s_crd_snapshot_storage::VolumeSnapshot;
 use kubimo::k8s_openapi::api::batch::v1::Job;
 use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kubimo::k8s_openapi::jiff::Timestamp;
-use kubimo::{Workspace, WorkspaceMode, WorkspacePythonRuntime, WorkspaceStatus, prelude::*};
+use kubimo::{Workspace, WorkspaceMode, WorkspaceStatus, prelude::*};
 
 use crate::context::Context;
+use crate::controllers::workspace_python_runtime::fetch_workspace_python_runtime;
 
 use super::WorkspaceReconciler;
 
@@ -50,7 +51,7 @@ impl WorkspaceReconciler {
             // has no archive by definition, so gating on one would stop it ever
             // starting its first runner.
             let mut status = build_workspace_status(workspace, None, StatusKind::PooledReady, mode);
-            status.python_runtime = Some(get_workspace_python_runtime(ctx, workspace).await?);
+            status.python_runtime = Some(fetch_workspace_python_runtime(ctx, workspace).await?);
             let mut workspace = workspace.clone();
             workspace.status = Some(status);
             ctx.api_namespaced::<Workspace>(namespace)
@@ -88,7 +89,7 @@ impl WorkspaceReconciler {
                 build_workspace_status(workspace, None, status, mode)
             };
 
-        status.python_runtime = Some(get_workspace_python_runtime(ctx, workspace).await?);
+        status.python_runtime = Some(fetch_workspace_python_runtime(ctx, workspace).await?);
 
         let mut workspace = workspace.clone();
         workspace.status = Some(status);
@@ -117,7 +118,7 @@ impl WorkspaceReconciler {
             StatusKind::BudgetExceeded(reason.to_owned()),
             mode,
         );
-        status.python_runtime = Some(get_workspace_python_runtime(ctx, workspace).await?);
+        status.python_runtime = Some(fetch_workspace_python_runtime(ctx, workspace).await?);
         let mut workspace = workspace.clone();
         workspace.status = Some(status);
         ctx.api_namespaced::<Workspace>(namespace)
@@ -243,29 +244,5 @@ fn build_workspace_status(
         conditions: Some(conditions),
         mode: Some(mode),
         ..Default::default()
-    }
-}
-
-pub(crate) async fn get_workspace_python_runtime(
-    ctx: &Context,
-    workspace: &Workspace,
-) -> Result<WorkspacePythonRuntime, kubimo::Error> {
-    if let Some(clone_workspace_name) = workspace.spec.clone_workspace_name.as_ref() {
-        let namespace = workspace.require_namespace()?;
-        let clone_workspace = ctx
-            .api_namespaced::<Workspace>(namespace)
-            .get(clone_workspace_name)
-            .await?;
-        let clone_status = clone_workspace.status.as_ref().ok_or_else(|| {
-            kubimo::Error::Custom(format!("Workspace has no status: {clone_workspace_name:?}"))
-        })?;
-        let python_runtime = clone_status.python_runtime.ok_or_else(|| {
-            kubimo::Error::Custom(format!(
-                "Workspace has no python runtime: {clone_workspace_name:?}"
-            ))
-        })?;
-        Ok(python_runtime)
-    } else {
-        Ok(workspace.spec.python_runtime.unwrap_or_default())
     }
 }

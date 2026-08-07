@@ -1,19 +1,25 @@
 use kubimo::k8s_openapi::api::batch::v1::{Job, JobSpec};
 use kubimo::k8s_openapi::api::core::v1::{Container, PodSpec, PodTemplateSpec, VolumeMount};
 use kubimo::kube::api::ObjectMeta;
-use kubimo::{CacheJob, Workspace, WorkspaceMode, prelude::*};
+use kubimo::{CacheJob, Workspace, WorkspaceMode, WorkspacePythonRuntime, prelude::*};
 
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::indexer;
 use crate::controllers::slot_volume;
 use crate::controllers::workspace_affinity;
+use crate::controllers::workspace_python_runtime::get_workspace_python_runtime;
 use crate::resources::Resources;
 
 use super::CacheJobReconciler;
 
 impl CacheJobReconciler {
-    fn cache_container(&self, ctx: &Context, cache_job: &CacheJob) -> Container {
+    fn cache_container(
+        &self,
+        ctx: &Context,
+        cache_job: &CacheJob,
+        python_runtime: WorkspacePythonRuntime,
+    ) -> Container {
         let workspace_name = cache_job.spec.workspace.clone();
         let mut command = cmd!["bash", "/setup/start.sh"];
         if let Some(log_level) = cache_job.spec.log_level.as_ref() {
@@ -22,7 +28,7 @@ impl CacheJobReconciler {
         command.push("cache".into());
         Container {
             name: "cache".into(),
-            image: Some(ctx.config.marimo_image.clone()),
+            image: Some(ctx.config.marimo_image(python_runtime).to_string()),
             resources: Resources::default()
                 .cpu(cache_job.spec.cpu.clone())
                 .memory(cache_job.spec.memory.clone())
@@ -43,10 +49,11 @@ impl CacheJobReconciler {
         &self,
         ctx: &Context,
         workspace: &Workspace,
+        python_runtime: WorkspacePythonRuntime,
     ) -> Result<Container, kubimo::Error> {
         Ok(Container {
             name: "indexer".to_string(),
-            image: Some(ctx.config.marimo_image.clone()),
+            image: Some(ctx.config.marimo_image(python_runtime).to_string()),
             command: Some(cmd!["/app/indexer"]),
             args: Some(indexer::upload_args(workspace, false)?),
             env: indexer::env(workspace),
@@ -114,11 +121,13 @@ impl CacheJobReconciler {
             ..Default::default()
         };
 
-        let cache_container = self.cache_container(ctx, cache_job);
+        let python_runtime = get_workspace_python_runtime(&workspace)?;
+
+        let cache_container = self.cache_container(ctx, cache_job, python_runtime);
         if should_run_indexer {
             pod_spec
                 .containers
-                .push(self.indexer_container(ctx, &workspace)?);
+                .push(self.indexer_container(ctx, &workspace, python_runtime)?);
             pod_spec.init_containers = Some(vec![cache_container]);
             pod_spec.service_account_name = Some(indexer::service_account_name(workspace_name));
         } else {

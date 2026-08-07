@@ -20,6 +20,7 @@ use kubimo::{
 use crate::backoff::default_error_policy;
 use crate::context::Context;
 use crate::controllers::workspace_affinity;
+use crate::controllers::workspace_python_runtime::get_workspace_python_runtime;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 
@@ -68,16 +69,7 @@ impl Reconciler for RunnerReconciler {
             Some(workspace) => workspace,
         };
 
-        let python_runtime = workspace
-            .status
-            .as_ref()
-            .and_then(|status| status.python_runtime)
-            .ok_or_else(|| {
-                kubimo::Error::Custom(format!(
-                    "Workspace has no python runtime: {name:?}",
-                    name = workspace.name(),
-                ))
-            })?;
+        let python_runtime = get_workspace_python_runtime(&workspace)?;
 
         let applied = futures::future::try_join_all([
             self.apply_owner_reference(ctx, runner)
