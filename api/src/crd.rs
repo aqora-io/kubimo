@@ -16,7 +16,7 @@ use crate::validation::{
     budget_selector_not_empty, log_level, runner_immutable_fields, runner_max_cpu_greater_than_min,
     runner_max_memory_greater_than_min, workspace_auto_scale_bounds, workspace_clone_not_pooled,
     workspace_max_storage_greater_than_min, workspace_mode_no_downgrade,
-    workspace_no_volume_with_name, workspace_restore_from_exclusive,
+    workspace_no_new_dedicated, workspace_no_volume_with_name, workspace_restore_from_exclusive,
     workspace_restore_from_not_indexer_prefix,
 };
 
@@ -82,13 +82,14 @@ pub struct StorageRequirement {
     Clone, Copy, Debug, Default, Display, Deserialize, Serialize, JsonSchema, PartialEq, Eq,
 )]
 pub enum WorkspaceMode {
-    /// One ReadWriteOnce PVC per workspace. Costs one volume attachment per
-    /// workspace (Scaleway allows 15 per node) and gates the runner on volume
-    /// provisioning.
-    #[default]
+    /// DEPRECATED: refused for new workspaces (`workspace_no_new_dedicated`).
+    /// Existing `Dedicated` workspaces keep running. One ReadWriteOnce PVC per
+    /// workspace. Costs one volume attachment per workspace (Scaleway allows 15
+    /// per node) and gates the runner on volume provisioning.
     Dedicated,
     /// A slot on a shared per-node data volume, with S3 as the source of truth.
     /// One attachment per node regardless of workspace count.
+    #[default]
     Pooled,
 }
 
@@ -226,13 +227,14 @@ pub struct WorkspaceRestoreFrom {
     validation = workspace_restore_from_not_indexer_prefix(),
     validation = workspace_mode_no_downgrade(),
     validation = workspace_clone_not_pooled(),
+    validation = workspace_no_new_dedicated(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSpec {
-    /// Storage backend for this workspace. Absent means `Dedicated`, so
-    /// existing objects keep their current behaviour; the operator's
-    /// `KUBIMO__DEFAULT_WORKSPACE_MODE` only applies to workspaces that have
-    /// not yet materialized `status.mode`.
+    /// Storage backend for this workspace. Absent means `Pooled` (the operator
+    /// default); the operator's `KUBIMO__DEFAULT_WORKSPACE_MODE` only applies to
+    /// workspaces that have not yet materialized `status.mode`. `Dedicated` is
+    /// deprecated and refused for new workspaces (`workspace_no_new_dedicated`).
     ///
     /// This one had to skip before the rest, because it is an enum: the
     /// generated schema lists the permitted values, and an explicit `null` is
@@ -868,6 +870,32 @@ mod tests {
         // default, which CEL cannot see.
         assert!(expression.contains("has(self.spec.mode)"));
         assert!(expression.contains("has(self.status)"));
+    }
+
+    /// `Dedicated` is deprecated: a fresh `spec.mode: Dedicated` is refused,
+    /// while a workspace already materialized as Dedicated is grandfathered. The
+    /// expression is asserted, not just the message, because the grandfather
+    /// clause keying on `status.mode` — not `oldSelf` — is the contract that
+    /// keeps existing Dedicated workspaces writable.
+    #[test]
+    fn workspace_crd_refuses_new_dedicated() {
+        let crd = serde_json::to_string(&Workspace::crd()).unwrap();
+        assert!(
+            crd.contains("Dedicated workspaces are deprecated"),
+            "the rule is missing from the generated CRD"
+        );
+
+        let expression = include_str!("./validation/workspace_no_new_dedicated.cel");
+        // An explicit Dedicated spec is what is refused...
+        assert!(expression.contains("self.spec.mode == \"Dedicated\""));
+        // ...unless the workspace was already materialized Dedicated, which only
+        // the controller can do (status is ignored on create), so it
+        // grandfathers existing workspaces without admitting new ones.
+        assert!(
+            expression.contains("self.status.mode == \"Dedicated\""),
+            "existing Dedicated workspaces are grandfathered by materialized \
+             status, not by spec"
+        );
     }
 
     #[test]
