@@ -30,6 +30,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 futures = { version = "0.3", default-features = false }
 rand = "0.9"
 base32 = "0.5"
+base64 = "0.22"
 tree-sitter = "0.26"
 tree-sitter-python = "0.25"
 lazy_static = "1.5"

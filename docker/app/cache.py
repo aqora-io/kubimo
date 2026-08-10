@@ -83,15 +83,23 @@ def _unescape_gitignore_pattern(pattern: str) -> str:
 
 
 def _load_gitignore_rules(directory: Path) -> list[_GitignoreRule]:
-    gitignore_path = directory / ".gitignore"
-    if not gitignore_path.is_file():
+    rules: list[_GitignoreRule] = []
+    # `.ignore` after `.gitignore`: both use gitignore syntax, later rules win,
+    # and the indexer's walker (the `ignore` crate) gives `.ignore` the higher
+    # precedence. The workspace template ships `.ignore`, so exclusions work
+    # without tying the workspace to git.
+    for name in (".gitignore", ".ignore"):
+        rules.extend(_load_ignore_file_rules(directory, directory / name))
+    return rules
+
+
+def _load_ignore_file_rules(directory: Path, path: Path) -> list[_GitignoreRule]:
+    if not path.is_file():
         return []
     try:
-        lines = gitignore_path.read_text(
-            encoding="utf-8", errors="replace"
-        ).splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
-        logger.warning(f"Failed to read {gitignore_path}: {exc}")
+        logger.warning(f"Failed to read {path}: {exc}")
         return []
 
     rules: list[_GitignoreRule] = []
@@ -229,7 +237,7 @@ def _get_python_files(directory: str, include_gitignored: bool = False) -> list[
         except Exception:
             # If not in a git repo, fall back to .gitignore files in the tree
             logger.warning(
-                "Not in a git repository, falling back to .gitignore filtering"
+                "Not in a git repository, falling back to .gitignore/.ignore filtering"
             )
             git_root = None
 

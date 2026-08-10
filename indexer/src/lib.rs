@@ -11,6 +11,7 @@ pub mod keys;
 pub mod python;
 pub mod restore;
 pub mod s3;
+pub mod secrets;
 pub mod upload;
 pub mod watcher;
 

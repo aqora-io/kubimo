@@ -49,7 +49,7 @@ cp -a /home/me/. /mnt
             image: Some(marimo_image.to_string()),
             command: Some(cmd!["/app/indexer"]),
             args: Some(indexer::download_args(restore)),
-            env: indexer::pod_env(restore.pod.as_ref()),
+            env: indexer::download_env(restore),
             env_from: indexer::pod_env_from(restore.pod.as_ref()),
             volume_mounts: Some(vec![VolumeMount {
                 mount_path: indexer::INIT_MOUNT_DIR.into(),
@@ -191,6 +191,7 @@ mod tests {
                     }]),
                     env_from: None,
                 }),
+                ..Default::default()
             }),
             init_containers: Some(vec![Container {
                 name: "user".to_string(),
@@ -229,6 +230,11 @@ mod tests {
         let env = restore.env.as_deref().unwrap();
         assert!(env.iter().any(|e| e.name == "AWS_ACCESS_KEY_ID"));
         assert!(env.iter().any(|e| e.name == "RUST_LOG"));
+        // The secrets mode travels as env, never as an arg (see the args
+        // assertion above), and defaults to the safe names-only.
+        assert!(env.iter().any(
+            |e| e.name == "KUBIMO_RESTORE_SECRETS" && e.value.as_deref() == Some("names-only")
+        ));
         let mounts = restore.volume_mounts.as_deref().unwrap();
         assert_eq!(mounts[0].mount_path, indexer::INIT_MOUNT_DIR);
         assert_eq!(mounts[0].name, "ws");

@@ -2,8 +2,8 @@
 # manifest + content the indexer wrote under the given bucket/keyPrefix (see
 # examples/basic.yaml). The source workspace must have been indexed with
 # `uploadContent: true`; it does not need to still exist. Only tracked files
-# are restored (gitignored files, `.git` and files over the indexer's max
-# file size are not part of the archive).
+# are restored (`.ignore`d and gitignored files, `.git` and files over the
+# indexer's max file size are not part of the archive).
 #
 # The restored workspace's own indexer must point at a different keyPrefix
 # than restoreFrom, otherwise it would overwrite the source archive.
@@ -17,6 +17,12 @@ spec:
   restoreFrom:
     bucket: "bucket"
     keyPrefix: "workspace/"
+    # How to treat the source archive's secrets (the workspace `.env` and any
+    # files matched by its `.secrets` patterns). "Values" restores them;
+    # "NamesOnly" — the default when absent — writes `.env` with empty
+    # placeholders instead and skips secret files, which is what a clone for
+    # someone who may not see the source's secrets should use.
+    secrets: "Values"
     pod:
       env:
         - name: "AWS_ENDPOINT"

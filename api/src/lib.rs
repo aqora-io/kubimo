@@ -16,6 +16,7 @@ mod list_stream;
 mod manifest;
 mod meta;
 mod quantity;
+mod secrets;
 pub mod selector;
 mod validation;
 
@@ -41,8 +42,8 @@ pub use crd::{
     WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo,
     WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField,
     WorkspaceIndexer, WorkspaceIndexerPod, WorkspaceMode, WorkspacePythonRuntime,
-    WorkspaceRestoreFrom, WorkspaceSlotStatus, WorkspaceSpec, WorkspaceStatus,
-    WorkspaceStorageStatus, all_crds,
+    WorkspaceRestoreFrom, WorkspaceRestoreSecrets, WorkspaceSlotStatus, WorkspaceSpec,
+    WorkspaceStatus, WorkspaceStorageStatus, all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;
@@ -53,11 +54,12 @@ pub use label::KubimoLabel;
 #[cfg(feature = "client")]
 pub use list_stream::{ApiListStreamExt, ListStream};
 pub use manifest::{
-    MANIFEST_FILE_NAME, ManifestDirectory, ManifestVersion, WorkspaceManifest, build_manifest,
-    manifest_url,
+    MANIFEST_FILE_NAME, ManifestDirectory, ManifestSecrets, ManifestVersion, SECRETS_FILE_NAME,
+    WorkspaceManifest, build_manifest, manifest_url, secrets_url,
 };
 pub use meta::{ObjectMetaExt, ResourceNameExt, ResourceNamespaceExt, ResourceOwnerRefExt};
 pub use quantity::{CpuQuantity, CpuUnit, Quantity, StorageQuantity, StorageUnit};
+pub use secrets::{SecretEnvEntry, SecretFileEntry, WorkspaceSecrets, WorkspaceSecretsVersion};
 pub use selector::{Expr, Expression, Selector, WellKnownField};
 
 pub mod prelude {

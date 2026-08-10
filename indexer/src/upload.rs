@@ -12,16 +12,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use base64::Engine as _;
 use futures::{
     FutureExt,
     stream::{StreamExt, TryStreamExt, futures_unordered::FuturesUnordered},
 };
 use kubimo::FilterParams;
 use kubimo::{
-    ResourceNameExt, Workspace, WorkspaceArchiveStatus, WorkspaceDir, WorkspaceDirContentUrl,
-    WorkspaceDirDirectory, WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile,
-    WorkspaceDirMarimo, WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink,
-    WorkspaceStatus, WorkspaceStorageStatus, url::Url,
+    ManifestSecrets, ResourceNameExt, SecretEnvEntry, SecretFileEntry, Workspace,
+    WorkspaceArchiveStatus, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory,
+    WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo,
+    WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceSecrets,
+    WorkspaceSecretsVersion, WorkspaceStatus, WorkspaceStorageStatus, url::Url,
 };
 use thiserror::Error;
 use tokio::{
@@ -39,6 +41,7 @@ use crate::fingerprint::ContentCache;
 use crate::keys::{WorkspaceDirNameSet, WorkspaceFileUrlSet};
 use crate::python::{Notebook, get_marimo_notebook};
 use crate::s3::{CacheMarkers, DownloadError, S3Client, UploadError};
+use crate::secrets;
 use crate::watcher::{WaitError, Watcher};
 
 /// Everything the pipeline needs, without the binary's clap types so the node
@@ -521,6 +524,53 @@ pub fn edit_paths(
     out
 }
 
+/// Divert secret paths out of the pipeline: forwarded paths become normal
+/// entries, collected ones exist only in the archive's secrets object. Sits
+/// *after* [`edit_paths`] so the watch set keeps the secret paths — edits to
+/// `.env` or a matched file must still trigger sync cycles.
+fn split_secrets(
+    join_set: &mut JoinSet<()>,
+    mut rx: Receiver<PathBuf>,
+    directory: PathBuf,
+    matcher: ignore::gitignore::Gitignore,
+    failures: Arc<AtomicUsize>,
+    buffer: usize,
+) -> (Receiver<PathBuf>, Arc<Mutex<BTreeSet<PathBuf>>>) {
+    let collected = Arc::new(Mutex::new(BTreeSet::new()));
+    let (tx, new_rx) = channel(buffer);
+    let out = (new_rx, collected.clone());
+    join_set.spawn(async move {
+        while let Some(path) = rx.recv().await {
+            let metadata = tokio::fs::symlink_metadata(directory.join(&path)).await;
+            let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+            if secrets::is_secret(&matcher, &path, is_dir) {
+                match metadata {
+                    // Matched directories are dropped outright: their children
+                    // arrive as their own paths and match via the parent.
+                    // Matched symlinks are dropped too — exporting one would
+                    // read through it, which is not what marking it secret
+                    // asked for.
+                    Ok(metadata) if metadata.is_file() => {
+                        collected.lock().await.insert(path);
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        // Unstattable, so unexportable — the archive's secrets
+                        // are narrower than the tree.
+                        failures.fetch_add(1, Ordering::Relaxed);
+                        tracing::error!("Could not stat secret path {}: {err}", path.display());
+                    }
+                }
+                continue;
+            }
+            if let Err(err) = tx.send(path.clone()).await {
+                tracing::error!("Error sending path {}: {}", path.display(), err);
+            }
+        }
+    });
+    out
+}
+
 pub fn process(
     join_set: &mut JoinSet<()>,
     rx: Receiver<PathBuf>,
@@ -699,6 +749,12 @@ pub async fn clean(
         match kubimo::manifest_url(bucket, key_prefix) {
             Ok(url) => futs.push(clean_url(s3, url).boxed()),
             Err(err) => tracing::error!("Error building manifest url: {err}"),
+        }
+        // The secrets object is keyed like the manifest and recorded nowhere
+        // else, so it too must be deleted by construction rather than by sweep.
+        match kubimo::secrets_url(bucket, key_prefix) {
+            Ok(url) => futs.push(clean_url(s3, url).boxed()),
+            Err(err) => tracing::error!("Error building secrets url: {err}"),
         }
     }
     while let Some(workspace_dir) = workspace_dirs.next().await {
@@ -958,6 +1014,16 @@ pub async fn run(
         1000,
     );
     let (rx, paths) = edit_paths(&mut join_set, rx, args.directory.clone(), 1000);
+    // Fresh each cycle so pattern edits take effect on the cycle they land.
+    let matcher = secrets::build_matcher(&args.directory);
+    let (rx, secret_paths) = split_secrets(
+        &mut join_set,
+        rx,
+        args.directory.clone(),
+        matcher,
+        failures.clone(),
+        1000,
+    );
     let upload_permits = Arc::new(Semaphore::new(args.max_upload_concurrency));
     let mut rx = process(
         &mut join_set,
@@ -1058,13 +1124,44 @@ pub async fn run(
         .cloned()
         .collect::<BTreeSet<_>>();
 
+    let (workspace_secrets, manifest_secrets) =
+        collect_secrets(args, take_paths(secret_paths).await, &failures).await;
+
     // Upload the manifest before deleting stale objects so a concurrent
     // reader never holds a manifest referencing objects deleted by this
-    // batch. The manifest url is never part of the stale-url bookkeeping.
+    // batch. The manifest url is never part of the stale-url bookkeeping,
+    // and neither is the secrets url.
     let mut manifest_uploaded = false;
     if let Some(bucket) = args.bucket.as_deref() {
-        manifest_uploaded =
-            upload_manifest(args, s3, bucket, &workspace_dirs, &upload_permits).await;
+        // Values are only written when content is: without content the archive
+        // cannot be restored at all (`RestoreError::NoContent`), so plaintext
+        // values nothing can consume are pure downside. The names still land
+        // in the manifest either way.
+        if args.upload_content {
+            if !upload_secrets(args, s3, bucket, &workspace_secrets, &upload_permits).await {
+                // A `Values` restore cannot happen without it — the same claim
+                // the manifest failure makes below.
+                failures.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            // A cycle that ran with content enabled may have left values
+            // behind; flipping `uploadContent` off must not strand them. Not
+            // counted on failure, like the stale-object sweep: a leak that
+            // survives is retried next cycle.
+            match kubimo::secrets_url(bucket, args.key_prefix.as_deref()) {
+                Ok(url) => clean_url(s3, url).await,
+                Err(err) => tracing::error!("Error building secrets url: {err}"),
+            }
+        }
+        manifest_uploaded = upload_manifest(
+            args,
+            s3,
+            bucket,
+            &workspace_dirs,
+            manifest_secrets,
+            &upload_permits,
+        )
+        .await;
         if !manifest_uploaded {
             // Without a manifest the archive cannot be restored at all, however
             // many objects reached the bucket.
@@ -1147,6 +1244,124 @@ pub async fn run(
     }
 }
 
+/// Read the cycle's secrets off disk: the root `.env` as KEY/VALUE pairs and
+/// every collected secret file as an inline blob.
+///
+/// The root `.env` is read directly rather than via the walk so its keys keep
+/// being exported even when a user gitignores it — a gitignored file is never
+/// walked. It is represented by `env`/`envKeys` only, never as a file blob;
+/// nested `.env` files are ordinary secret files.
+async fn collect_secrets(
+    args: &UploadOptions,
+    secret_paths: BTreeSet<PathBuf>,
+    failures: &AtomicUsize,
+) -> (WorkspaceSecrets, ManifestSecrets) {
+    let env_path = args.directory.join(secrets::DOTENV_FILE_NAME);
+    let env = match tokio::fs::read_to_string(&env_path).await {
+        Ok(content) => secrets::parse_dotenv(&content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => {
+            // A Values restore would silently lose every key otherwise.
+            failures.fetch_add(1, Ordering::Relaxed);
+            tracing::error!("Could not read {}: {err}", env_path.display());
+            Vec::new()
+        }
+    };
+    let mut files = Vec::new();
+    for path in secret_paths {
+        if path.as_os_str() == secrets::DOTENV_FILE_NAME {
+            continue;
+        }
+        let abs = args.directory.join(&path);
+        let size = match tokio::fs::symlink_metadata(&abs).await {
+            Ok(metadata) => metadata.len(),
+            Err(err) => {
+                failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!("Could not stat secret file {}: {err}", abs.display());
+                continue;
+            }
+        };
+        let content_base64 = if size > secrets::MAX_INLINE_SECRET_FILE_SIZE {
+            tracing::warn!(
+                "Secret file {} is over the {} byte inline cap; it stays out of the \
+                 archive but cannot be restored with values",
+                path.display(),
+                secrets::MAX_INLINE_SECRET_FILE_SIZE,
+            );
+            None
+        } else {
+            match tokio::fs::read(&abs).await {
+                Ok(bytes) => Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                Err(err) => {
+                    failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!("Could not read secret file {}: {err}", abs.display());
+                    None
+                }
+            }
+        };
+        files.push(SecretFileEntry {
+            path: path.to_string_lossy().to_string(),
+            size,
+            content_base64,
+        });
+    }
+    let manifest_secrets = ManifestSecrets {
+        env_keys: env.iter().map(|(key, _)| key.clone()).collect(),
+        // Sorted because `secret_paths` is a `BTreeSet`.
+        file_paths: files.iter().map(|file| file.path.clone()).collect(),
+    };
+    let workspace_secrets = WorkspaceSecrets {
+        version: WorkspaceSecretsVersion::V1,
+        workspace: args.name.clone(),
+        env: env
+            .into_iter()
+            .map(|(key, value)| SecretEnvEntry { key, value })
+            .collect(),
+        files,
+    };
+    (workspace_secrets, manifest_secrets)
+}
+
+/// Upload the archive's secrets object. Runs *before* [`upload_manifest`] so a
+/// manifest never advertises key names the secrets object lacks; the reverse
+/// staleness — values newer than their manifest — is benign and lasts one
+/// cycle. Uploaded even when empty: skipping would leave a previous cycle's
+/// values behind after the user deleted them.
+async fn upload_secrets(
+    args: &UploadOptions,
+    s3: &S3Client,
+    bucket: &str,
+    workspace_secrets: &WorkspaceSecrets,
+    upload_permits: &Semaphore,
+) -> bool {
+    let url = match kubimo::secrets_url(bucket, args.key_prefix.as_deref()) {
+        Ok(url) => url,
+        Err(err) => {
+            tracing::error!("Error building secrets url: {err}");
+            return false;
+        }
+    };
+    let bytes = match serde_json::to_vec(workspace_secrets) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::error!("Error serializing secrets: {err}");
+            return false;
+        }
+    };
+    let size = bytes.len() as u64;
+    let input = std::io::Cursor::new(bytes);
+    match s3.upload(&url, input, size, upload_permits).await {
+        Ok(_) => {
+            tracing::info!("Uploaded secrets to {url}");
+            true
+        }
+        Err(err) => {
+            tracing::error!("Error uploading secrets to {url}: {err}");
+            false
+        }
+    }
+}
+
 /// Build and upload the archive manifest for the current batch. Best-effort:
 /// failures are logged and never abort indexing — the next batch rewrites it.
 /// Note the manifest reflects whatever the walk produced: a partially failed
@@ -1161,9 +1376,15 @@ async fn upload_manifest(
     s3: &S3Client,
     bucket: &str,
     workspace_dirs: &BTreeMap<String, WorkspaceDir>,
+    manifest_secrets: ManifestSecrets,
     upload_permits: &Semaphore,
 ) -> bool {
-    let manifest = kubimo::build_manifest(&args.name, args.upload_content, workspace_dirs);
+    let manifest = kubimo::build_manifest(
+        &args.name,
+        args.upload_content,
+        workspace_dirs,
+        manifest_secrets,
+    );
     let url = match kubimo::manifest_url(bucket, args.key_prefix.as_deref()) {
         Ok(url) => url,
         Err(err) => {
@@ -1540,6 +1761,187 @@ mod tests {
             result.failures, 1,
             "the unwritable directory CR must be reported"
         );
+    }
+
+    /// The workspace template ships `.ignore` rather than `.gitignore`, so its
+    /// exclusions are the indexer's own instead of being tied to git. That
+    /// leans entirely on the `ignore` crate honouring `.ignore` files by
+    /// default in the walk — no code of ours reads the file — so pin it.
+    #[tokio::test]
+    async fn an_ignore_file_excludes_paths_from_the_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".ignore"), b"excluded/\n").unwrap();
+        std::fs::write(dir.path().join("notebook.py"), b"import marimo").unwrap();
+        std::fs::create_dir(dir.path().join("excluded")).unwrap();
+        std::fs::write(dir.path().join("excluded/dropped.py"), b"x = 3").unwrap();
+        let mut join_set = JoinSet::new();
+        let rx = walk(
+            &mut join_set,
+            WalkOptions {
+                directory: dir.path().to_path_buf(),
+                include_gitignored: false,
+                exclude_hidden: false,
+                git_dir: None,
+                failures: Arc::new(AtomicUsize::new(0)),
+            },
+            16,
+        );
+        let (mut rx, _scanned) = edit_paths(&mut join_set, rx, dir.path().to_path_buf(), 16);
+        let mut paths = BTreeSet::new();
+        while let Some(path) = rx.recv().await {
+            paths.insert(path);
+        }
+        assert!(
+            paths.contains(Path::new(".ignore")),
+            "the pattern file itself stays tracked, so clones inherit it"
+        );
+        assert!(paths.contains(Path::new("notebook.py")));
+        assert!(
+            !paths.iter().any(|path| path.starts_with("excluded")),
+            "{paths:?}"
+        );
+    }
+
+    /// The diversion itself: secret paths never reach the workers, everything
+    /// else passes through untouched.
+    #[tokio::test]
+    async fn split_secrets_diverts_matches_and_forwards_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), b"A=\"1\"\n").unwrap();
+        std::fs::write(dir.path().join(".secrets"), b"creds/\n").unwrap();
+        std::fs::write(dir.path().join("notebook.py"), b"import marimo").unwrap();
+        std::fs::create_dir(dir.path().join("creds")).unwrap();
+        std::fs::write(dir.path().join("creds/key.pem"), b"SECRET").unwrap();
+
+        let matcher = secrets::build_matcher(dir.path());
+        let (tx, rx) = channel(16);
+        let mut join_set = JoinSet::new();
+        let (mut rx, collected) = split_secrets(
+            &mut join_set,
+            rx,
+            dir.path().to_path_buf(),
+            matcher,
+            Arc::new(AtomicUsize::new(0)),
+            16,
+        );
+        for path in [".env", ".secrets", "notebook.py", "creds", "creds/key.pem"] {
+            tx.send(PathBuf::from(path)).await.unwrap();
+        }
+        drop(tx);
+        let mut forwarded = Vec::new();
+        while let Some(path) = rx.recv().await {
+            forwarded.push(path);
+        }
+        assert_eq!(
+            forwarded,
+            vec![PathBuf::from(".secrets"), PathBuf::from("notebook.py")],
+            "the pattern file is public and must stay a normal entry"
+        );
+        let collected = take_paths(collected).await;
+        assert_eq!(
+            collected,
+            [".env", "creds/key.pem"]
+                .iter()
+                .map(PathBuf::from)
+                .collect(),
+            "the matched directory itself is dropped, its file children collected"
+        );
+    }
+
+    #[tokio::test]
+    async fn collected_secrets_cap_inline_content_and_count_unreadables() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), b"A=\"1\"\nB=\"two\"\n").unwrap();
+        std::fs::create_dir(dir.path().join("creds")).unwrap();
+        std::fs::write(dir.path().join("creds/key.pem"), b"SECRET").unwrap();
+        std::fs::write(
+            dir.path().join("big.bin"),
+            vec![0u8; (secrets::MAX_INLINE_SECRET_FILE_SIZE + 1) as usize],
+        )
+        .unwrap();
+
+        let failures = AtomicUsize::new(0);
+        let paths = [".env", "creds/key.pem", "big.bin", "vanished.pem"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let (workspace_secrets, manifest_secrets) =
+            collect_secrets(&offline_options(dir.path()), paths, &failures).await;
+
+        assert_eq!(
+            workspace_secrets
+                .env
+                .iter()
+                .map(|entry| (entry.key.as_str(), entry.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("A", "1"), ("B", "two")]
+        );
+        // The root `.env` is env pairs only, never a file blob.
+        assert_eq!(
+            workspace_secrets
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["big.bin", "creds/key.pem"]
+        );
+        assert!(
+            workspace_secrets.files[0].content_base64.is_none(),
+            "over the cap"
+        );
+        assert!(workspace_secrets.files[1].content_base64.is_some());
+        assert_eq!(manifest_secrets.env_keys, vec!["A", "B"]);
+        assert_eq!(
+            manifest_secrets.file_paths,
+            vec!["big.bin", "creds/key.pem"]
+        );
+        assert_eq!(
+            failures.load(Ordering::Relaxed),
+            1,
+            "the unstattable file is a gap in the archive's secrets"
+        );
+    }
+
+    /// End to end through `run`: secret paths stay out of the CR pipeline —
+    /// no `WorkspaceDirectory` is even attempted for a fully-secret directory
+    /// — while the watch set keeps them, so edits still trigger cycles.
+    #[tokio::test]
+    async fn a_run_keeps_secrets_out_of_directory_crs_but_in_the_watch_set() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notebook.py"), b"import marimo").unwrap();
+        std::fs::write(dir.path().join(".env"), b"A=\"1\"\n").unwrap();
+        std::fs::write(dir.path().join(".secrets"), b"creds/\n").unwrap();
+        std::fs::create_dir(dir.path().join("creds")).unwrap();
+        std::fs::write(dir.path().join("creds/key.pem"), b"SECRET").unwrap();
+        let keys = WorkspaceKeys::new(
+            WorkspaceDirNameSet::new("bmow-abc".to_string()),
+            WorkspaceFileUrlSet::new("bucket".to_string(), None).unwrap(),
+        );
+        let result = run(
+            &offline_options(dir.path()),
+            &ContentCache::new(),
+            &offline_client(),
+            &S3Client::from_env(),
+            &keys,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+        .await;
+        assert_eq!(
+            result.names.len(),
+            1,
+            "only the root produces a directory CR; the secret directory none"
+        );
+        assert_eq!(
+            result.failures, 1,
+            "exactly the root CR patch on the offline client — diverting is not a failure"
+        );
+        for path in [".env", ".secrets", "creds/key.pem"] {
+            assert!(
+                result.paths.contains(&dir.path().join(path)),
+                "{path} must stay watched"
+            );
+        }
     }
 
     /// An entry the workers could not process is not a gap in the archive that

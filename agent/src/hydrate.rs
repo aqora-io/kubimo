@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use indexer::object_store;
 use indexer::restore::{RestoreError, RestoreOptions, restore};
 use indexer::s3::{DownloadError, S3Client};
+use kubimo::WorkspaceRestoreSecrets;
 
 /// Notebook directory inside a slot.
 ///
@@ -51,6 +52,15 @@ pub enum HydrateError {
 pub struct ArchiveLocation {
     pub bucket: String,
     pub key_prefix: Option<String>,
+}
+
+/// `spec.restoreFrom` as it reaches the agent: where the seed archive lives
+/// and how to treat its secrets. A workspace's *own* archive never carries a
+/// mode — rehydrating it always restores its own secret values.
+#[derive(Debug, Clone)]
+pub struct SeedArchive {
+    pub location: ArchiveLocation,
+    pub secrets: WorkspaceRestoreSecrets,
 }
 
 /// What the previous upload of this workspace left behind.
@@ -273,6 +283,7 @@ pub async fn hydrate_slot(
     slot_dir: &Path,
     archive: &ArchiveLocation,
     s3: &S3Client,
+    secrets: WorkspaceRestoreSecrets,
 ) -> Result<bool, HydrateError> {
     let directory: PathBuf = slot_dir.join(WORKSPACE_SUBDIR);
     tokio::fs::create_dir_all(&directory)
@@ -290,6 +301,7 @@ pub async fn hydrate_slot(
         // user lost data. Fail the mount instead, so the runner never starts on
         // a partial workspace.
         best_effort: false,
+        secrets,
     };
     match restore(&options, s3).await {
         Ok(()) => Ok(true),
