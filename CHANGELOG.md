@@ -2,6 +2,35 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.2.6-alpha.2 - 2026-08-10
+#### Features
+- (**agent**) allow agent to seed from tmeplate based on specified python runtime - (2b1314a) - Antoine Chauvin
+- (**controller**) launch bmocj with the right python runtime - (5976694) - Antoine Chauvin
+#### Bug Fixes
+- (**api**) impl Display for WorkspacePythonRuntime - (6799aea) - Antoine Chauvin
+- (**controller**) forward python runtime to slot volumes spec - (fb43fe1) - Antoine Chauvin
+- (**docker**) workspace startup - (25cc03c) - Antoine Chauvin
+#### Build system
+- (**conda-marimo**) add `conda-helper.py` - (7821bbc) - Antoine Chauvin
+- register agent as a default bake target - (47d1a81) - Antoine Chauvin
+
+- - -
+
+## v0.2.6-conda.1 - 2026-08-05
+#### Features
+- (**controller**) add "pythonRuntime" field to workspace spec - (a7cca5c) - Antoine Chauvin
+- (**docker**) add conda image - (e5b99bc) - Antoine Chauvin
+- (**marimo**) upgrade 0.23.11 => 0.23.15 - (be6ff15) - Antoine Chauvin
+#### Bug Fixes
+- (**docker**) use absolute paths when calling binaries - (5d0cc2b) - Antoine Chauvin
+#### Build system
+- rename `marimo-conda` as `conda-marimo` to prevent it from being matched by prefix - (d05fdd0) - Antoine Chauvin
+- install the node agent in the minikube dev setup - (670b6a1) - Julian Popescu
+#### Miscellaneous Chores
+- (**version**) v0.2.6-conda.1 - (95341f5) - Antoine Chauvin
+
+- - -
+
 ## v0.2.6-conda.1 - 2026-08-05
 #### Features
 - (**controller**) add "pythonRuntime" field to workspace spec - (a7cca5c) - Antoine Chauvin
