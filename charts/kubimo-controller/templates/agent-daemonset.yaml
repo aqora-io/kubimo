@@ -56,7 +56,7 @@ spec:
         # slot can take a reflink copy of it instead of the runner rebuilding
         # ~920MB from scratch. Uses the marimo image because that is where the
         # venv lives; the agent image has no Python.
-        - name: venv-template
+        - name: uv-venv-template
           # Defaults to the runners' image, because it must equal it: this
           # stages one venv per node that every slot reflinks, so a different
           # image here hands runners a venv built for another interpreter.
@@ -77,7 +77,43 @@ spec:
             - -c
             - |
               set -eu
-              dest=/data/home-template
+              dest=/data/uv-template
+              # Only stage once per node volume, and stage atomically so a
+              # crashed init container never leaves a half-copied template that
+              # slots would then reflink.
+              if [ -d "$dest" ]; then
+                echo "venv template already staged"
+                exit 0
+              fi
+              rm -rf "$dest.partial"
+              cp -a /home/me "$dest.partial"
+              mv "$dest.partial" "$dest"
+              echo "staged venv template"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: conda-venv-template
+          # Defaults to the runners' image, because it must equal it: this
+          # stages one venv per node that every slot reflinks, so a different
+          # image here hands runners a venv built for another interpreter.
+          # Resolved through the shared helper so the two cannot drift, and so
+          # this initContainer stops tracking the chart appVersion — it was the
+          # reason a controller-only release still rolled the agent despite
+          # `agent.image.sourceTag`. `agent.marimoImage` overrides it, but only
+          # deliberately.
+          image: "{{ .Values.agent.marimoCondaImage | default (include "kubimo-controller.marimoCondaImage" .) }}"
+          securityContext:
+            # The marimo image runs as uid 1000, but the freshly provisioned
+            # data volume is root-owned, so the copy needs root — the same
+            # reason the dedicated path's init-dirs container runs as root.
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              dest=/data/conda-template
               # Only stage once per node volume, and stage atomically so a
               # crashed init container never leaves a half-copied template that
               # slots would then reflink.
