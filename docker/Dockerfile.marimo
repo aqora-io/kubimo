@@ -198,10 +198,11 @@ EOF
 ENV PATH="/home/${USER}/.local/bin:${PATH}"
 
 COPY --chown=${USER} docker/setup/conda-environment.yaml environment.yaml
-COPY --chown=${USER} docker/setup/conda-pyproject.toml pyproject.toml
-RUN micromamba create --yes -p "/home/${USER}/venv" --file environment.yaml
-ENV PATH="/home/${USER}/venv/bin:${PATH}"
+COPY --chown=root --chmod=u+rwx,go=rx docker/setup/conda-helper.py /usr/local/bin/conda-helper.py
 ENV CONDA_PREFIX="/home/${USER}/venv"
 ENV CONDA_DEFAULT_ENV="/home/${USER}/venv"
+RUN conda-helper.py sync --verbose
+ENV PATH="/home/${USER}/venv/bin:${PATH}"
+COPY --chown=${USER} docker/setup/conda-pyproject.toml pyproject.toml
 
 CMD /home/${USER}/venv/bin/python3

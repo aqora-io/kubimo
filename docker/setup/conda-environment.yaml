@@ -2,4 +2,6 @@ name: marimo
 channels:
   - conda-forge
 dependencies:
-  - marimo
+  - python=3.14
+  - uv:
+      - marimo

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -xe
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -102,32 +102,7 @@ uv_sync_workspace() {
 }
 
 mamba_update_workspace() {
-  if [[ -f conda-lock.txt ]]; then
-    # `conda-lock.txt` here will contain output of:
-    #   micromamba env export --explicit
-    # this file isn't usually user-generated
-    environment="conda-lock.txt"
-  elif [[ -f environment.yaml ]]; then
-    # `environment.yaml` here may contain output of:
-    #   micromamba env export
-    # but it may also be user-generated
-    environment="environment.yaml"
-  else
-    return 1
-  fi
-
-  if [[ -d "$CONDA_PREFIX" ]]; then
-    /usr/local/bin/micromamba env update --yes \
-      --prefix "$CONDA_PREFIX" \
-      --prune \
-      --file "$environment"
-  else
-    /usr/local/bin/micromamba create --yes \
-      --prefix "$CONDA_PREFIX" \
-      --file "$environment"
-  fi
-
-  /usr/local/bin/uv pip install "marimo==$(/usr/local/bin/marimo --version)"
+  /usr/local/bin/conda-helper.py sync -x --verbose
 }
 
 is_marimo_venv_configured() {
