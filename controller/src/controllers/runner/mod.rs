@@ -146,10 +146,12 @@ pub(crate) fn is_invalid_request(err: &kubimo::Error) -> bool {
 
 pub(crate) fn is_workspace_ready(workspace: &Workspace) -> bool {
     workspace.status.as_ref().is_some_and(|status| {
-        status
+        let ready_condition = status
             .conditions
             .as_ref()
-            .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
+            .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"));
+        let has_python_runtime = status.python_runtime.is_some();
+        ready_condition && has_python_runtime
     })
 }
 

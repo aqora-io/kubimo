@@ -9,7 +9,7 @@ use crate::Config;
 use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::ingress::ingress_path;
-use crate::controllers::slot_volume;
+use crate::controllers::slot_volume::{self, SLOT_CSI_DRIVER};
 use crate::controllers::workspace_affinity;
 use crate::resources::Resources;
 
@@ -147,6 +147,7 @@ impl RunnerReconciler {
                     // bind and let one published version's slot be shared.
                     matches!(runner.spec.command, RunnerCommand::Render),
                     sources,
+                    python_runtime,
                 )]),
                 ..Default::default()
             }),
@@ -170,7 +171,8 @@ impl RunnerReconciler {
                     .api_namespaced::<Pod>(namespace)
                     .get_opt(runner.name()?)
                     .await;
-                if matches!(&live, Ok(Some(live)) if runtime_class_drifted(live, &pod)) {
+                if matches!(&live, Ok(Some(live)) if runtime_class_drifted(live, &pod) || volumes_drifted(live, &pod))
+                {
                     ctx.api_namespaced::<Pod>(namespace)
                         .delete_opt(runner.name()?)
                         .await?;
@@ -194,6 +196,25 @@ fn runtime_class_drifted(live: &Pod, desired: &Pod) -> bool {
             .and_then(|spec| spec.runtime_class_name.as_deref())
     }
     class(live) != class(desired)
+}
+
+/// Check if both pods have the same python runtime volume attribute. This is needed because there
+/// may still exist pods created before python runtimes were introduced. Pods are simplify recreated
+/// if a drift is detected.
+fn volumes_drifted(live: &Pod, desired: &Pod) -> bool {
+    fn volume_python_runtime(pod: &Pod) -> Option<&str> {
+        let spec = pod.spec.as_ref()?;
+        let volume = spec.volumes.as_ref()?.iter().find_map(|vol| {
+            let csi = vol.csi.as_ref()?;
+            (csi.driver == SLOT_CSI_DRIVER).then_some(csi)
+        })?;
+        volume
+            .volume_attributes
+            .as_ref()?
+            .get("python_runtime")
+            .map(String::as_str)
+    }
+    volume_python_runtime(live) != volume_python_runtime(desired)
 }
 
 /// Sandbox every runner, whatever its command.
@@ -246,6 +267,7 @@ mod tests {
                 "bmow-test",
                 WorkspaceMode::Pooled,
                 matches!(command, RunnerCommand::Render),
+                Default::default(),
                 Default::default(),
             );
             assert_eq!(volume.csi.unwrap().read_only, Some(expected), "{command:?}");
