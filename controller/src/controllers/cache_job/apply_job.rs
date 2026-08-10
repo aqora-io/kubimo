@@ -116,6 +116,7 @@ impl CacheJobReconciler {
                 // Writes `__marimo__` caches into the workspace.
                 false,
                 slot_volume::SlotSources::from_workspace(Some(&workspace)),
+                get_workspace_python_runtime(&workspace)?,
             )]),
             restart_policy: Some("Never".into()),
             ..Default::default()

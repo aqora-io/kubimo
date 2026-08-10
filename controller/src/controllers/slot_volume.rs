@@ -11,10 +11,10 @@ use kubimo::k8s_openapi::api::core::v1::{
     CSIVolumeSource, LocalObjectReference, PersistentVolumeClaimVolumeSource, PodSecurityContext,
     Volume,
 };
-use kubimo::{Workspace, WorkspaceMode};
+use kubimo::{Workspace, WorkspaceMode, WorkspacePythonRuntime};
 
 /// Must match the `CSIDriver` object the agent registers under.
-const SLOT_CSI_DRIVER: &str = "kubimo.aqora.io";
+pub(crate) const SLOT_CSI_DRIVER: &str = "kubimo.aqora.io";
 
 /// Where the agent sources a slot's contents.
 #[derive(Debug, Default, Clone)]
@@ -94,6 +94,7 @@ pub(crate) fn workspace_volume(
     mode: WorkspaceMode,
     read_only: bool,
     sources: SlotSources,
+    python_runtime: WorkspacePythonRuntime,
 ) -> Volume {
     match mode {
         WorkspaceMode::Dedicated => Volume {
@@ -117,7 +118,7 @@ pub(crate) fn workspace_volume(
                     .credentials_secret
                     .clone()
                     .map(|name| LocalObjectReference { name }),
-                volume_attributes: Some(slot_attributes(workspace_name, sources)),
+                volume_attributes: Some(slot_attributes(workspace_name, sources, python_runtime)),
                 ..Default::default()
             }),
             ..Default::default()
@@ -125,8 +126,15 @@ pub(crate) fn workspace_volume(
     }
 }
 
-fn slot_attributes(workspace_name: &str, sources: SlotSources) -> BTreeMap<String, String> {
-    let mut attributes = BTreeMap::from([("workspace".to_string(), workspace_name.to_string())]);
+fn slot_attributes(
+    workspace_name: &str,
+    sources: SlotSources,
+    python_runtime: WorkspacePythonRuntime,
+) -> BTreeMap<String, String> {
+    let mut attributes = BTreeMap::from([
+        ("workspace".to_string(), workspace_name.to_string()),
+        ("python_runtime".to_string(), python_runtime.to_string()),
+    ]);
     if let Some(limit) = sources.limit_bytes {
         attributes.insert("limitBytes".to_string(), limit.to_string());
     }
@@ -180,7 +188,13 @@ mod tests {
 
     #[test]
     fn dedicated_mode_uses_the_workspace_pvc() {
-        let volume = workspace_volume("bmow-test", WorkspaceMode::Dedicated, false, sources());
+        let volume = workspace_volume(
+            "bmow-test",
+            WorkspaceMode::Dedicated,
+            false,
+            sources(),
+            Default::default(),
+        );
         assert_eq!(
             volume.persistent_volume_claim.unwrap().claim_name,
             "bmow-test"
@@ -190,7 +204,13 @@ mod tests {
 
     #[test]
     fn pooled_mode_passes_the_slot_sources_through() {
-        let volume = workspace_volume("bmow-test", WorkspaceMode::Pooled, false, sources());
+        let volume = workspace_volume(
+            "bmow-test",
+            WorkspaceMode::Pooled,
+            false,
+            sources(),
+            Default::default(),
+        );
         assert!(volume.persistent_volume_claim.is_none());
         let csi = volume.csi.unwrap();
         assert_eq!(csi.driver, SLOT_CSI_DRIVER);
@@ -214,7 +234,13 @@ mod tests {
     /// workspace's own, resolved from this ref in the *pod's* namespace.
     #[test]
     fn pooled_mode_names_the_workspace_credentials_secret() {
-        let volume = workspace_volume("bmow-test", WorkspaceMode::Pooled, false, sources());
+        let volume = workspace_volume(
+            "bmow-test",
+            WorkspaceMode::Pooled,
+            false,
+            sources(),
+            Default::default(),
+        );
         assert_eq!(
             volume.csi.unwrap().node_publish_secret_ref.unwrap().name,
             "s3-credentials"
@@ -225,7 +251,13 @@ mod tests {
     /// read Pods. Credentials must only ever travel via the secret ref.
     #[test]
     fn credentials_never_appear_in_volume_attributes() {
-        let volume = workspace_volume("bmow-test", WorkspaceMode::Pooled, false, sources());
+        let volume = workspace_volume(
+            "bmow-test",
+            WorkspaceMode::Pooled,
+            false,
+            sources(),
+            Default::default(),
+        );
         let attrs = volume.csi.unwrap().volume_attributes.unwrap();
         for (key, value) in &attrs {
             assert!(!key.to_lowercase().contains("secret"), "{key}");
@@ -269,6 +301,7 @@ mod tests {
             WorkspaceMode::Pooled,
             false,
             SlotSources::default(),
+            Default::default(),
         );
         let attrs = volume.csi.unwrap().volume_attributes.unwrap();
         assert!(!attrs.contains_key("bucket"));
