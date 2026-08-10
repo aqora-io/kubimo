@@ -210,6 +210,15 @@ pub enum WorkspacePythonRuntime {
     Conda,
 }
 
+impl std::fmt::Display for WorkspacePythonRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Uv => f.write_str("Uv"),
+            Self::Conda => f.write_str("Conda"),
+        }
+    }
+}
+
 // Every optional field in this spec — and in the structs it nests — skips
 // serializing when unset.
 //
