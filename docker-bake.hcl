@@ -16,7 +16,7 @@ variable "MARIMO_GIT" {
 }
 
 group "default" {
-  targets = ["marimo", "conda-marimo", "controller"]
+  targets = ["marimo", "conda-marimo", "controller", "agent"]
 }
 
 target "docker-metadata-controller" {}
