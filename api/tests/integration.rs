@@ -564,7 +564,7 @@ async fn test_restore_from_and_clone_are_mutually_exclusive() {
                 restore_from: Some(kubimo::WorkspaceRestoreFrom {
                     bucket: "some-bucket".to_string(),
                     key_prefix: Some("workspace/other/".to_string()),
-                    pod: None,
+                    ..Default::default()
                 }),
                 ..Default::default()
             },

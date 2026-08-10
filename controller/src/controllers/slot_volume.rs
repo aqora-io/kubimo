@@ -11,7 +11,7 @@ use kubimo::k8s_openapi::api::core::v1::{
     CSIVolumeSource, LocalObjectReference, PersistentVolumeClaimVolumeSource, PodSecurityContext,
     Volume,
 };
-use kubimo::{Workspace, WorkspaceMode, WorkspacePythonRuntime};
+use kubimo::{Workspace, WorkspaceMode, WorkspacePythonRuntime, WorkspaceRestoreSecrets};
 
 /// Must match the `CSIDriver` object the agent registers under.
 pub(crate) const SLOT_CSI_DRIVER: &str = "kubimo.aqora.io";
@@ -29,7 +29,9 @@ pub(crate) struct SlotSources {
     /// `spec.restoreFrom`. Consumed by a restore init container under
     /// `Dedicated`; under `Pooled` there is no init Job, so it travels to the
     /// agent and is applied only when `archive` turns out to have no manifest.
-    pub seed: Option<(String, Option<String>)>,
+    /// Carries the secrets mode from `spec.restoreFrom.secrets` alongside the
+    /// location.
+    pub seed: Option<(String, Option<String>, WorkspaceRestoreSecrets)>,
     /// Secret holding the workspace's S3 credentials, from
     /// `spec.indexer.pod.envFrom` — the same one the dedicated indexer pod
     /// mounts.
@@ -57,7 +59,13 @@ impl SlotSources {
                 .map(|indexer| (indexer.bucket.clone(), indexer.key_prefix.clone())),
             seed: workspace
                 .and_then(|workspace| workspace.spec.restore_from.as_ref())
-                .map(|restore| (restore.bucket.clone(), restore.key_prefix.clone())),
+                .map(|restore| {
+                    (
+                        restore.bucket.clone(),
+                        restore.key_prefix.clone(),
+                        restore.secrets.unwrap_or_default(),
+                    )
+                }),
             credentials_secret: workspace
                 .and_then(|workspace| workspace.spec.indexer.as_ref())
                 .and_then(credentials_secret_name),
@@ -148,11 +156,16 @@ fn slot_attributes(
             attributes.insert("keyPrefix".to_string(), key_prefix);
         }
     }
-    if let Some((bucket, key_prefix)) = sources.seed {
+    if let Some((bucket, key_prefix, secrets)) = sources.seed {
         attributes.insert("seedBucket".to_string(), bucket);
         if let Some(key_prefix) = key_prefix {
             attributes.insert("seedKeyPrefix".to_string(), key_prefix);
         }
+        // Set explicitly even for the default, so the behavior is pinned by
+        // this controller rather than by the agent's default. An older agent
+        // ignores the attribute, which lands on the same safe default. A mode
+        // name, never a credential, so it is safe on the Pod object.
+        attributes.insert("seedSecrets".to_string(), secrets.to_string());
     }
     attributes
 }
@@ -181,7 +194,11 @@ mod tests {
         SlotSources {
             limit_bytes: Some(2_147_483_648),
             archive: Some((Some("bucket".into()), Some("workspace/abc/".into()))),
-            seed: Some(("bucket".into(), Some("workspace-template/v1/".into()))),
+            seed: Some((
+                "bucket".into(),
+                Some("workspace-template/v1/".into()),
+                WorkspaceRestoreSecrets::Values,
+            )),
             credentials_secret: Some("s3-credentials".into()),
         }
     }
@@ -227,6 +244,25 @@ mod tests {
             attrs.get("seedKeyPrefix").unwrap(),
             "workspace-template/v1/"
         );
+        assert_eq!(attrs.get("seedSecrets").unwrap(), "values");
+    }
+
+    /// The safe default travels explicitly, and only alongside a seed — a
+    /// workspace without `restoreFrom` has nothing to gate.
+    #[test]
+    fn pooled_mode_pins_the_seed_secrets_default() {
+        let volume = workspace_volume(
+            "bmow-test",
+            WorkspaceMode::Pooled,
+            false,
+            SlotSources {
+                seed: Some(("bucket".into(), None, WorkspaceRestoreSecrets::default())),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        let attrs = volume.csi.unwrap().volume_attributes.unwrap();
+        assert_eq!(attrs.get("seedSecrets").unwrap(), "names-only");
     }
 
     /// The agent has no S3 credentials of its own — a node serves workspaces
@@ -260,6 +296,13 @@ mod tests {
         );
         let attrs = volume.csi.unwrap().volume_attributes.unwrap();
         for (key, value) in &attrs {
+            if key == "seedSecrets" {
+                // The one deliberate exception: a restore *mode* about
+                // secrets, never a secret. Pin its value to the enum's two
+                // spellings so it can never grow into a carrier.
+                assert!(value == "values" || value == "names-only", "{value}");
+                continue;
+            }
             assert!(!key.to_lowercase().contains("secret"), "{key}");
             assert_ne!(value, "s3-credentials", "{key} leaked the secret name");
         }
@@ -308,6 +351,7 @@ mod tests {
         assert!(!attrs.contains_key("keyPrefix"));
         assert!(!attrs.contains_key("limitBytes"));
         assert!(!attrs.contains_key("seedBucket"));
+        assert!(!attrs.contains_key("seedSecrets"));
     }
 
     /// Kubelet applies `fsGroup` to the whole volume, which on a shared node

@@ -1458,6 +1458,7 @@ name = "indexer"
 version = "0.2.6"
 dependencies = [
  "base32",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "crc32fast",

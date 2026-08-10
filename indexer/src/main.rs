@@ -102,6 +102,13 @@ pub(crate) struct DownloadArgs {
     /// Continue on per-file download errors instead of failing.
     #[arg(long)]
     pub(crate) best_effort: bool,
+    /// How to treat the archive's secrets: `values` or `names-only`.
+    ///
+    /// Env-backed because the controller may be newer than this binary: an
+    /// older indexer rejects an unknown *flag* outright but ignores an unknown
+    /// environment variable, so the controller only ever sets the env var.
+    #[arg(long, env = "KUBIMO_RESTORE_SECRETS", default_value_t)]
+    pub(crate) secrets: kubimo::WorkspaceRestoreSecrets,
     #[arg(default_value = ".")]
     pub(crate) directory: PathBuf,
 }
@@ -114,6 +121,7 @@ impl DownloadArgs {
             directory: self.directory.clone(),
             max_download_concurrency: self.max_download_concurrency,
             best_effort: self.best_effort,
+            secrets: self.secrets,
         }
     }
 }
@@ -225,4 +233,61 @@ async fn kube_client() -> kubimo::Client {
         .build()
         .await
         .expect("Could not create client")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn download(cli: Cli) -> DownloadArgs {
+        match cli.command {
+            Command::Download(args) => args,
+            other => panic!("expected download, got {other:?}"),
+        }
+    }
+
+    /// The controller only ever sets KUBIMO_RESTORE_SECRETS — an older binary
+    /// would reject an unknown `--secrets` flag — so the env var, the
+    /// fail-safe default without it, and the flag all have to parse to the
+    /// same field. One test, because the env var is process state.
+    #[test]
+    fn download_secrets_parses_from_default_env_and_flag() {
+        let args = download(Cli::parse_from([
+            "indexer", "download", "--bucket", "b", "dir",
+        ]));
+        assert_eq!(args.secrets, kubimo::WorkspaceRestoreSecrets::NamesOnly);
+        assert_eq!(args.directory, PathBuf::from("dir"));
+
+        unsafe { std::env::set_var("KUBIMO_RESTORE_SECRETS", "values") };
+        let args = download(Cli::parse_from([
+            "indexer", "download", "--bucket", "b", "dir",
+        ]));
+        unsafe { std::env::remove_var("KUBIMO_RESTORE_SECRETS") };
+        assert_eq!(args.secrets, kubimo::WorkspaceRestoreSecrets::Values);
+
+        let args = download(Cli::parse_from([
+            "indexer",
+            "download",
+            "--bucket",
+            "b",
+            "--secrets",
+            "names-only",
+            "dir",
+        ]));
+        assert_eq!(args.secrets, kubimo::WorkspaceRestoreSecrets::NamesOnly);
+
+        // Garbage is refused rather than silently defaulted.
+        assert!(
+            Cli::try_parse_from([
+                "indexer",
+                "download",
+                "--bucket",
+                "b",
+                "--secrets",
+                "nope",
+                "dir"
+            ])
+            .is_err()
+        );
+    }
 }

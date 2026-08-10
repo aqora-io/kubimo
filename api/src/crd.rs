@@ -8,7 +8,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{CustomResource, CustomResourceExt, Resource};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
-use strum::Display;
+use strum::{Display, EnumString};
 use url::Url;
 
 use crate::selector::Selector;
@@ -188,6 +188,40 @@ pub struct WorkspaceStorageStatus {
     pub available: Option<StorageQuantity>,
 }
 
+/// How a restore treats the source archive's secrets (the workspace `.env`
+/// and any files matched by its `.secrets` patterns).
+///
+/// The strum spellings are the transport encoding: the controller hands the
+/// mode to the restore init container as the `KUBIMO_RESTORE_SECRETS`
+/// environment variable and to the node agent as the `seedSecrets` volume
+/// attribute, both of which older binaries ignore.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Display,
+    EnumString,
+    Deserialize,
+    Serialize,
+    JsonSchema,
+    PartialEq,
+    Eq,
+)]
+pub enum WorkspaceRestoreSecrets {
+    /// Fetch the archive's secrets object: write `.env` with real values and
+    /// recreate secret files. For clones whose creator may see the source's
+    /// secrets.
+    #[strum(serialize = "values")]
+    Values,
+    /// Write `.env` with empty placeholders for the archive's key names and
+    /// skip secret files entirely. The default — safe for public clones; the
+    /// marimo secrets panel still shows which keys the notebook needs.
+    #[default]
+    #[strum(serialize = "names-only")]
+    NamesOnly,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRestoreFrom {
@@ -199,6 +233,14 @@ pub struct WorkspaceRestoreFrom {
     /// `indexer.pod`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pod: Option<WorkspaceIndexerPod>,
+    /// How to treat the archive's secrets. Absent means `NamesOnly`.
+    ///
+    /// Skips serializing like `WorkspaceSpec.mode` and for the same reason:
+    /// the generated schema lists the permitted enum values and an explicit
+    /// `null` is not among them, so a spec built from `Default` would be
+    /// rejected with "Unsupported value: null".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<WorkspaceRestoreSecrets>,
 }
 
 /// Determines how a workspace environment is installed.
@@ -696,14 +738,50 @@ mod tests {
                 bucket: "bucket".to_string(),
                 key_prefix: Some("workspace/".to_string()),
                 pod: None,
+                secrets: Some(WorkspaceRestoreSecrets::Values),
             }),
             ..Default::default()
         };
         let json = serde_json::to_value(&spec).unwrap();
         assert_eq!(json["restoreFrom"]["bucket"], "bucket");
         assert_eq!(json["restoreFrom"]["keyPrefix"], "workspace/");
+        assert_eq!(json["restoreFrom"]["secrets"], "Values");
         let parsed: WorkspaceSpec = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed.restore_from.unwrap().bucket, "bucket");
+        let restore_from = parsed.restore_from.unwrap();
+        assert_eq!(restore_from.bucket, "bucket");
+        assert_eq!(restore_from.secrets, Some(WorkspaceRestoreSecrets::Values));
+    }
+
+    /// A `restoreFrom` written before the `secrets` field existed parses to
+    /// `None`, and the default resolves to `NamesOnly` — the safe mode.
+    #[test]
+    fn workspace_restore_secrets_defaults_to_names_only() {
+        let parsed: WorkspaceRestoreFrom =
+            serde_json::from_value(serde_json::json!({"bucket": "bucket"})).unwrap();
+        assert_eq!(parsed.secrets, None);
+        assert_eq!(
+            parsed.secrets.unwrap_or_default(),
+            WorkspaceRestoreSecrets::NamesOnly
+        );
+    }
+
+    /// The strum spellings are the env-var/volume-attribute transport between
+    /// the controller and separately pinned binaries; changing them is a
+    /// protocol break, not a rename.
+    #[test]
+    fn workspace_restore_secrets_transport_spelling_round_trips() {
+        use std::str::FromStr;
+        for mode in [
+            WorkspaceRestoreSecrets::Values,
+            WorkspaceRestoreSecrets::NamesOnly,
+        ] {
+            assert_eq!(
+                WorkspaceRestoreSecrets::from_str(&mode.to_string()).unwrap(),
+                mode
+            );
+        }
+        assert_eq!(WorkspaceRestoreSecrets::Values.to_string(), "values");
+        assert_eq!(WorkspaceRestoreSecrets::NamesOnly.to_string(), "names-only");
     }
 
     /// A status patch must never carry an explicit `null`.
@@ -780,6 +858,8 @@ mod tests {
         assert!(crd.contains("restoreFrom"));
         assert!(crd.contains("restoreFrom and cloneWorkspaceName are mutually exclusive"));
         assert!(crd.contains("must not write to the restoreFrom archive location"));
+        // The secrets enum's permitted values are part of the schema.
+        assert!(crd.contains("NamesOnly"));
     }
 
     fn workspace_with(

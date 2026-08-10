@@ -104,6 +104,29 @@ pub(crate) fn download_args(restore: &WorkspaceRestoreFrom) -> Vec<String> {
     args
 }
 
+/// Pod env for the restore init container, carrying the secrets mode.
+///
+/// The mode travels as environment rather than as a `--secrets` flag for the
+/// same reason `clean_env` exists: the image running it is pinned separately
+/// from this controller, an older indexer rejects an unknown flag outright,
+/// and a restore init container that cannot start wedges the workspace's init
+/// Job. An older indexer ignores the variable — and simply restores no
+/// secrets, since its archives never separated them.
+///
+/// Set explicitly even for the default, so the behavior is pinned by this
+/// controller rather than by whatever binary default ships in the image.
+pub(crate) fn download_env(restore: &WorkspaceRestoreFrom) -> Option<Vec<EnvVar>> {
+    let mut env = pod_env(restore.pod.as_ref()).unwrap_or_default();
+    let mode = restore.secrets.unwrap_or_default().to_string();
+    env.retain(|existing| existing.name != "KUBIMO_RESTORE_SECRETS");
+    env.push(EnvVar {
+        name: "KUBIMO_RESTORE_SECRETS".to_string(),
+        value: Some(mode),
+        ..Default::default()
+    });
+    Some(env)
+}
+
 pub(crate) fn pod_env(pod: Option<&WorkspaceIndexerPod>) -> Option<Vec<EnvVar>> {
     let mut env = pod
         .and_then(|pod| pod.env.as_ref())
@@ -174,7 +197,7 @@ mod tests {
         let args = download_args(&WorkspaceRestoreFrom {
             bucket: "bucket".to_string(),
             key_prefix: Some("workspace/".to_string()),
-            pod: None,
+            ..Default::default()
         });
         assert_eq!(
             args,
@@ -194,12 +217,91 @@ mod tests {
         let args = download_args(&WorkspaceRestoreFrom {
             bucket: "bucket".to_string(),
             key_prefix: None,
-            pod: None,
+            ..Default::default()
         });
         assert_eq!(
             args,
             vec!["download", "--bucket", "bucket", INIT_WORKSPACE_DIR]
         );
+    }
+
+    /// The restore image is pinned separately from this controller, and an
+    /// indexer that predates the secrets mode rejects an unknown flag outright
+    /// — which, in an init container, wedges the workspace's init Job. The
+    /// mode must therefore never appear in the args; `download_env` carries it.
+    #[test]
+    fn test_download_args_stay_parseable_by_an_older_indexer() {
+        let args = download_args(&WorkspaceRestoreFrom {
+            bucket: "bucket".to_string(),
+            secrets: Some(kubimo::WorkspaceRestoreSecrets::Values),
+            ..Default::default()
+        });
+        assert_eq!(
+            args,
+            vec!["download", "--bucket", "bucket", INIT_WORKSPACE_DIR]
+        );
+    }
+
+    #[test]
+    fn test_download_env_pins_the_secrets_mode_explicitly() {
+        // Absent from the spec: the controller still writes the safe default.
+        let env = download_env(&WorkspaceRestoreFrom {
+            bucket: "bucket".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        let value = |name: &str| {
+            env.iter()
+                .find(|var| var.name == name)
+                .and_then(|var| var.value.clone())
+        };
+        assert_eq!(
+            value("KUBIMO_RESTORE_SECRETS").as_deref(),
+            Some("names-only")
+        );
+        // `pod_env`'s RUST_LOG injection still applies.
+        assert_eq!(value("RUST_LOG").as_deref(), Some("info"));
+
+        let env = download_env(&WorkspaceRestoreFrom {
+            bucket: "bucket".to_string(),
+            secrets: Some(kubimo::WorkspaceRestoreSecrets::Values),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            env.iter()
+                .find(|var| var.name == "KUBIMO_RESTORE_SECRETS")
+                .and_then(|var| var.value.as_deref()),
+            Some("values")
+        );
+    }
+
+    /// The string this controller writes and the string the indexer binary
+    /// parses are two halves of one protocol; this pins them together through
+    /// the shared enum.
+    #[test]
+    fn test_download_env_round_trips_through_the_indexer_parser() {
+        use std::str::FromStr;
+        for mode in [
+            kubimo::WorkspaceRestoreSecrets::Values,
+            kubimo::WorkspaceRestoreSecrets::NamesOnly,
+        ] {
+            let env = download_env(&WorkspaceRestoreFrom {
+                bucket: "bucket".to_string(),
+                secrets: Some(mode),
+                ..Default::default()
+            })
+            .unwrap();
+            let written = env
+                .iter()
+                .find(|var| var.name == "KUBIMO_RESTORE_SECRETS")
+                .and_then(|var| var.value.clone())
+                .unwrap();
+            assert_eq!(
+                kubimo::WorkspaceRestoreSecrets::from_str(&written).unwrap(),
+                mode
+            );
+        }
     }
 
     /// The purge job is the only thing that ever deletes the manifest, and it

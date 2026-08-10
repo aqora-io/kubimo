@@ -52,6 +52,11 @@ const ATTR_KEY_PREFIX: &str = "keyPrefix";
 /// that has ever been flushed can never be overwritten by its seed.
 const ATTR_SEED_BUCKET: &str = "seedBucket";
 const ATTR_SEED_KEY_PREFIX: &str = "seedKeyPrefix";
+/// How the seed's secrets are treated, from `spec.restoreFrom.secrets` —
+/// `values` or `names-only`. Absent means names-only, the fail-safe default,
+/// which is also what an agent older than this attribute does. A mode name,
+/// never a credential, so it is safe on the Pod object.
+const ATTR_SEED_SECRETS: &str = "seedSecrets";
 /// Namespace of the pod being mounted, supplied by kubelet because the
 /// `CSIDriver` sets `podInfoOnMount`.
 ///
@@ -606,7 +611,7 @@ impl KubimoNode {
         slot: &crate::slot::SlotId,
         dir: &Path,
         archive: Option<&crate::hydrate::ArchiveLocation>,
-        seed: Option<&crate::hydrate::ArchiveLocation>,
+        seed: Option<&crate::hydrate::SeedArchive>,
         s3: Option<&indexer::s3::S3Client>,
     ) -> Result<bool, Status> {
         let Some(s3) = s3 else {
@@ -614,9 +619,16 @@ impl KubimoNode {
         };
         let mut restored = false;
         if let Some(archive) = archive {
-            restored = crate::hydrate::hydrate_slot(dir, archive, s3)
-                .await
-                .map_err(|err| Status::internal(format!("hydrating slot: {err}")))?;
+            // Always `Values`: this is the workspace's *own* archive, so a warm
+            // reopen must get its own `.env` back, not placeholders.
+            restored = crate::hydrate::hydrate_slot(
+                dir,
+                archive,
+                s3,
+                kubimo::WorkspaceRestoreSecrets::Values,
+            )
+            .await
+            .map_err(|err| Status::internal(format!("hydrating slot: {err}")))?;
             tracing::info!(workspace, slot = %slot, hydrated = restored, "slot hydrated");
         }
         // Fall back to the seed only when the workspace's own archive had no
@@ -630,7 +642,7 @@ impl KubimoNode {
         // so reading the seed through `self.s3` sent it to the instance
         // metadata service looking for some, and every clone failed to mount.
         if !restored && let Some(seed) = seed {
-            let seeded = crate::hydrate::hydrate_slot(dir, seed, s3)
+            let seeded = crate::hydrate::hydrate_slot(dir, &seed.location, s3, seed.secrets)
                 .await
                 .map_err(|err| Status::internal(format!("seeding slot: {err}")))?;
             tracing::info!(workspace, slot = %slot, seeded, "slot seeded");
@@ -653,7 +665,7 @@ impl KubimoNode {
         workspace: &str,
         limit_bytes: u64,
         archive: Option<&crate::hydrate::ArchiveLocation>,
-        seed: Option<&crate::hydrate::ArchiveLocation>,
+        seed: Option<&crate::hydrate::SeedArchive>,
         python_runtime: Option<&str>,
     ) -> Result<(crate::store::ResolvedSlot, PathBuf), Status> {
         let resolved = self
@@ -726,7 +738,7 @@ impl KubimoNode {
         limit_bytes: u64,
         quotas_enforced: bool,
         archive: Option<&crate::hydrate::ArchiveLocation>,
-        seed: Option<&crate::hydrate::ArchiveLocation>,
+        seed: Option<&crate::hydrate::SeedArchive>,
         python_runtime: Option<&str>,
     ) -> Result<(), Status> {
         match (quotas_enforced, self.allow_unquotaed_slots) {
@@ -864,10 +876,24 @@ impl Node for KubimoNode {
         // Only consulted when the workspace's own archive turns out to be
         // empty; this is `spec.restoreFrom` reaching the agent, since a pooled
         // workspace has no init Job to run a restore container in.
+        let seed_secrets = match request.volume_context.get(ATTR_SEED_SECRETS) {
+            None => Default::default(),
+            // Only the controller writes this attribute, so an unparseable
+            // value is a version skew bug to surface, not input to tolerate.
+            Some(raw) => raw.parse().map_err(|_| {
+                Status::invalid_argument(format!(
+                    "volume attribute {ATTR_SEED_SECRETS:?} must be \"values\" or \
+                     \"names-only\", got {raw:?}"
+                ))
+            })?,
+        };
         let seed = request.volume_context.get(ATTR_SEED_BUCKET).map(|bucket| {
-            crate::hydrate::ArchiveLocation {
-                bucket: bucket.clone(),
-                key_prefix: request.volume_context.get(ATTR_SEED_KEY_PREFIX).cloned(),
+            crate::hydrate::SeedArchive {
+                location: crate::hydrate::ArchiveLocation {
+                    bucket: bucket.clone(),
+                    key_prefix: request.volume_context.get(ATTR_SEED_KEY_PREFIX).cloned(),
+                },
+                secrets: seed_secrets,
             }
         });
         // Supplied by kubelet because the CSIDriver sets podInfoOnMount. Every

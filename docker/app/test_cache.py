@@ -33,6 +33,25 @@ if __name__ == "__main__":
 '''
 
 
+def test_ignore_file_excludes_like_gitignore(tmp_path):
+    # The workspace template ships `.ignore` (not `.gitignore`, which would tie
+    # the exclusions to git); outside a git repo the fallback walker must honour
+    # it, and it must win over `.gitignore` like in the indexer's walker.
+    import cache
+
+    (tmp_path / "keep.py").write_text("x = 1\n")
+    (tmp_path / ".ignore").write_text("excluded/\n!vendored.py\n")
+    (tmp_path / ".gitignore").write_text("vendored.py\n")
+    (tmp_path / "vendored.py").write_text("x = 2\n")
+    excluded = tmp_path / "excluded"
+    excluded.mkdir()
+    (excluded / "dropped.py").write_text("x = 3\n")
+
+    files = cache._get_python_files(str(tmp_path))
+    names = sorted(path.relative_to(tmp_path).as_posix() for path in files)
+    assert names == ["keep.py", "vendored.py"]
+
+
 def test_cache_exports_html_and_markdown(tmp_path):
     notebook = tmp_path / "nb.py"
     notebook.write_text(NOTEBOOK)
