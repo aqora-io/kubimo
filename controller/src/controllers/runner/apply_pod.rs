@@ -147,6 +147,7 @@ impl RunnerReconciler {
                     // bind and let one published version's slot be shared.
                     matches!(runner.spec.command, RunnerCommand::Render),
                     sources,
+                    python_runtime,
                 )]),
                 ..Default::default()
             }),
@@ -246,6 +247,7 @@ mod tests {
                 "bmow-test",
                 WorkspaceMode::Pooled,
                 matches!(command, RunnerCommand::Render),
+                Default::default(),
                 Default::default(),
             );
             assert_eq!(volume.csi.unwrap().read_only, Some(expected), "{command:?}");
