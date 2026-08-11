@@ -104,7 +104,10 @@ impl RunnerReconciler {
             env_from: runner.spec.env_from.clone(),
             startup_probe: Some(Probe {
                 http_get: Some(probe_action.clone()),
-                failure_threshold: Some(90),
+                failure_threshold: Some(match python_runtime {
+                    WorkspacePythonRuntime::Uv => 90,
+                    WorkspacePythonRuntime::Conda => 300,
+                }),
                 period_seconds: Some(1),
                 ..Default::default()
             }),
