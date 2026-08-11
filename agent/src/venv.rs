@@ -15,7 +15,7 @@
 //! (verified on the Scaleway data volume), but a dev cluster on ext4 does not,
 //! and falling back to a real copy is better than refusing to start.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 #[derive(Debug, thiserror::Error)]
@@ -24,10 +24,9 @@ pub enum VenvError {
     Spawn(#[from] std::io::Error),
     #[error("copying the venv template failed: {0}")]
     Copy(String),
+    #[error("unsupported python runtime {0:?}")]
+    UnsupportedPythonRuntime(String),
 }
-
-/// Where the DaemonSet's init container leaves the template.
-pub const TEMPLATE_SUBDIR: &str = "home-template";
 
 /// Virtualenv directory inside a slot.
 ///
@@ -35,6 +34,17 @@ pub const TEMPLATE_SUBDIR: &str = "home-template";
 /// tracked `pyproject.toml` as `[tool.marimo.venv] path`, so it is user data,
 /// not an implementation detail we can relocate.
 pub const VENV_SUBDIR: &str = "venv";
+
+/// Where the DaemonSet's init container leaves the template.
+fn template_subdir(data_root: &Path, python_runtime: Option<&str>) -> Result<PathBuf, VenvError> {
+    match python_runtime {
+        Some("Uv") | None => Ok(data_root.join("uv-template")),
+        Some("Conda") => Ok(data_root.join("conda-template")),
+        Some(python_runtime) => Err(VenvError::UnsupportedPythonRuntime(
+            python_runtime.to_string(),
+        )),
+    }
+}
 
 /// Seed a slot from the node's `/home/me` template.
 ///
@@ -50,8 +60,12 @@ pub const VENV_SUBDIR: &str = "venv";
 ///
 /// Returns `false` when no template has been staged on this node, which is not
 /// an error: the runner falls back to building its own, exactly as today.
-pub async fn seed_from_template(data_root: &Path, slot_dir: &Path) -> Result<bool, VenvError> {
-    let template = data_root.join(TEMPLATE_SUBDIR);
+pub async fn seed_from_template(
+    data_root: &Path,
+    slot_dir: &Path,
+    python_runtime: Option<&str>,
+) -> Result<bool, VenvError> {
+    let template = template_subdir(data_root, python_runtime)?;
     if !template.is_dir() {
         return Ok(false);
     }
@@ -126,7 +140,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let slot = dir.path().join("slot");
         std::fs::create_dir(&slot).unwrap();
-        assert!(!seed_from_template(dir.path(), &slot).await.unwrap());
+        assert!(!seed_from_template(dir.path(), &slot, None).await.unwrap());
     }
 
     /// The skeleton must include `workspace/pyproject.toml`, not just the
@@ -135,7 +149,7 @@ mod tests {
     #[tokio::test]
     async fn seeds_both_the_workspace_skeleton_and_the_venv() {
         let dir = tempfile::tempdir().unwrap();
-        let template = dir.path().join(TEMPLATE_SUBDIR);
+        let template = template_subdir(dir.path(), None).unwrap();
         std::fs::create_dir_all(template.join(VENV_SUBDIR).join("lib")).unwrap();
         std::fs::write(template.join(VENV_SUBDIR).join("lib/marimo.py"), b"x").unwrap();
         std::fs::create_dir_all(template.join("workspace")).unwrap();
@@ -143,7 +157,7 @@ mod tests {
         let slot = dir.path().join("slot");
         std::fs::create_dir(&slot).unwrap();
 
-        assert!(seed_from_template(dir.path(), &slot).await.unwrap());
+        assert!(seed_from_template(dir.path(), &slot, None).await.unwrap());
         assert_eq!(
             std::fs::read(slot.join(VENV_SUBDIR).join("lib/marimo.py")).unwrap(),
             b"x"
@@ -153,7 +167,8 @@ mod tests {
             b"[project]"
         );
         // Contents, not a nested `home-template` directory.
-        assert!(!slot.join(TEMPLATE_SUBDIR).exists());
+        // assert!(!slot.join(TEMPLATE_SUBDIR).exists());
+        assert!(!template_subdir(&slot, None).unwrap().exists());
     }
 
     /// A copy that dies partway — the slot's quota is applied before it runs,
@@ -171,7 +186,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
-        let template = dir.path().join(TEMPLATE_SUBDIR);
+        let template = template_subdir(dir.path(), None).unwrap();
         std::fs::create_dir_all(template.join(VENV_SUBDIR).join("lib")).unwrap();
         std::fs::write(template.join(VENV_SUBDIR).join("lib/marimo.py"), b"x").unwrap();
         std::fs::create_dir_all(template.join("workspace")).unwrap();
@@ -184,7 +199,9 @@ mod tests {
         let slot = dir.path().join("slot");
         std::fs::create_dir(&slot).unwrap();
 
-        let err = seed_from_template(dir.path(), &slot).await.unwrap_err();
+        let err = seed_from_template(dir.path(), &slot, None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, VenvError::Copy(_)), "{err:?}");
         let leftovers: Vec<_> = std::fs::read_dir(&slot)
             .unwrap()
@@ -200,7 +217,7 @@ mod tests {
         // With the obstacle gone the next publish re-seeds, rather than
         // skipping because a venv is already there.
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(seed_from_template(dir.path(), &slot).await.unwrap());
+        assert!(seed_from_template(dir.path(), &slot, None).await.unwrap());
         assert_eq!(
             std::fs::read(slot.join(VENV_SUBDIR).join("lib/marimo.py")).unwrap(),
             b"x"
@@ -212,14 +229,14 @@ mod tests {
     #[tokio::test]
     async fn an_existing_venv_is_left_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let template = dir.path().join(TEMPLATE_SUBDIR);
+        let template = template_subdir(dir.path(), None).unwrap();
         std::fs::create_dir_all(template.join(VENV_SUBDIR)).unwrap();
         std::fs::write(template.join("from-template"), b"t").unwrap();
         let slot = dir.path().join("slot");
         std::fs::create_dir_all(slot.join(VENV_SUBDIR)).unwrap();
         std::fs::write(slot.join(VENV_SUBDIR).join("tenant-installed"), b"m").unwrap();
 
-        assert!(!seed_from_template(dir.path(), &slot).await.unwrap());
+        assert!(!seed_from_template(dir.path(), &slot, None).await.unwrap());
         assert!(slot.join(VENV_SUBDIR).join("tenant-installed").exists());
         assert!(!slot.join(VENV_SUBDIR).join("from-template").exists());
     }
