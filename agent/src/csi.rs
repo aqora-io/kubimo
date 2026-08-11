@@ -38,6 +38,9 @@ const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Volume attribute naming the workspace whose slot to mount. Set by the
 /// controller in the runner pod's inline volume definition.
 const ATTR_WORKSPACE: &str = "workspace";
+/// Volume attribute to declare how a workspace is installed. Set by the
+/// controller in the runner pod's inline volume definition.
+const ATTR_PYTHON_RUNTIME: &str = "python_runtime";
 /// Optional per-slot hard capacity limit in bytes, from `spec.storage.max`.
 const ATTR_LIMIT_BYTES: &str = "limitBytes";
 /// Bucket and key prefix of the workspace's S3 archive, from `spec.indexer`.
@@ -651,6 +654,7 @@ impl KubimoNode {
         limit_bytes: u64,
         archive: Option<&crate::hydrate::ArchiveLocation>,
         seed: Option<&crate::hydrate::ArchiveLocation>,
+        python_runtime: Option<&str>,
     ) -> Result<(crate::store::ResolvedSlot, PathBuf), Status> {
         let resolved = self
             .store
@@ -671,6 +675,7 @@ impl KubimoNode {
                     quotas_enforced,
                     archive,
                     seed,
+                    python_runtime,
                 )
                 .await
             {
@@ -722,6 +727,7 @@ impl KubimoNode {
         quotas_enforced: bool,
         archive: Option<&crate::hydrate::ArchiveLocation>,
         seed: Option<&crate::hydrate::ArchiveLocation>,
+        python_runtime: Option<&str>,
     ) -> Result<(), Status> {
         match (quotas_enforced, self.allow_unquotaed_slots) {
             (true, _) => {
@@ -765,7 +771,8 @@ impl KubimoNode {
         // Seed the venv from the node template before hydrating, so the
         // runner does not have to build ~920MB of it from scratch. Failure
         // is not fatal: `uv sync` will build one, just slowly.
-        match crate::venv::seed_from_template(self.store.layout().root(), dir).await {
+        match crate::venv::seed_from_template(self.store.layout().root(), dir, python_runtime).await
+        {
             Ok(seeded) => tracing::info!(workspace, seeded, "venv template"),
             Err(err) => tracing::warn!(%err, workspace, "could not seed venv template"),
         }
@@ -877,6 +884,8 @@ impl Node for KubimoNode {
                 ))
             })?;
 
+        let python_runtime = request.volume_context.get(ATTR_PYTHON_RUNTIME);
+
         // Serialise everything that follows against any other publish of the
         // same workspace on this node — a cache job is deliberately co-located
         // with a live runner, so two first publishes race here. Held from slot
@@ -899,6 +908,7 @@ impl Node for KubimoNode {
                 limit_bytes,
                 archive.as_ref(),
                 seed.as_ref(),
+                python_runtime.map(String::as_str),
             )
             .await?;
         self.publish_slot_status(&workspace, &namespace, &slot, limit_bytes, archive.as_ref())
@@ -1465,7 +1475,7 @@ mod tests {
         let store = SlotStore::new(crate::slot::SlotLayout::new(dir.path()));
         let node = KubimoNode::new("test-node".into(), store, 1024, false, None);
         let err = node
-            .prepare_slot("tenant-a", "workspace", 1024, None, None)
+            .prepare_slot("tenant-a", "workspace", 1024, None, None, None)
             .await
             .expect_err("must refuse unquotaed slots");
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
@@ -1495,7 +1505,7 @@ mod tests {
 
         let refusing = KubimoNode::new("test-node".into(), store, 1024, false, None);
         let err = refusing
-            .prepare_slot("tenant-a", "workspace", 1024, None, None)
+            .prepare_slot("tenant-a", "workspace", 1024, None, None, None)
             .await
             .expect_err("must refuse an unquotaed publish even for an existing slot");
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
