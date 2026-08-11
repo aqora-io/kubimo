@@ -197,6 +197,7 @@ elif [[ "$CMD" == "cache" ]]; then
     uv_sync_workspace
   elif [[ -n "$CONDA_PREFIX" ]]; then
     mamba_update_workspace
+    export VIRTUAL_ENV="$CONDA_PREFIX"
   fi
   exec "$VIRTUAL_ENV/bin/python3" /app/cache.py \
     --include-code "${common_flags[@]}"
