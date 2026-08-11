@@ -2,6 +2,23 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.2.6-alpha.4 - 2026-08-11
+#### Features
+- (**agent**) allow agent to seed from tmeplate based on specified python runtime - (3dd3389) - Antoine Chauvin
+- (**controller**) add "pythonRuntime" field to workspace spec - (6cc5315) - Antoine Chauvin
+- (**docker**) add conda image - (7e157df) - Antoine Chauvin
+- (**marimo**) upgrade 0.23.11 => 0.23.15 - (3772d45) - Antoine Chauvin
+- deprecate dedicated workspace - (59f62b1) - Julian Popescu
+#### Bug Fixes
+- (**controller**) conda runner pod needs bigger startup probe failure threshold - (0f428ef) - Antoine Chauvin
+- (**controller**) forward python runtime to slot volumes spec - (00b5801) - Antoine Chauvin
+- (**docker**) use absolute paths when calling binaries - (6dfa0f4) - Antoine Chauvin
+#### Build system
+- register agent as a default bake target - (72a6217) - Antoine Chauvin
+- install the node agent in the minikube dev setup - (670b6a1) - Julian Popescu
+
+- - -
+
 ## v0.1.33 - 2026-07-01
 #### Features
 - storage budget - (cb27f3f) - Julian Popescu

@@ -19,7 +19,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent"
-version = "0.2.5"
+version = "0.2.6-alpha.4"
 dependencies = [
  "clap",
  "http",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "indexer"
-version = "0.2.5"
+version = "0.2.6-alpha.4"
 dependencies = [
  "base32",
  "bytes",
@@ -1641,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "json-patch-macros"
-version = "0.2.5"
+version = "0.2.6-alpha.4"
 dependencies = [
  "json-patch",
  "serde",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "k8s-crd-snapshot-storage"
-version = "0.2.5"
+version = "0.2.6-alpha.4"
 dependencies = [
  "k8s-openapi",
  "kube",
@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "kubimo"
-version = "0.2.5"
+version = "0.2.6-alpha.4"
 dependencies = [
  "cel-interpreter",
  "chrono",
@@ -1865,7 +1865,7 @@ dependencies = [
 
 [[package]]
 name = "kubimo-controller"
-version = "0.2.5"
+version = "0.2.6-alpha.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "notebook_meta"
-version = "0.2.5"
+version = "0.2.6-alpha.4"
 dependencies = [
  "serde",
 ]
