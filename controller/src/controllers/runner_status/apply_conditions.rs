@@ -3,8 +3,8 @@ use kubimo::{Runner, RunnerStatus, Workspace, WorkspaceMode, prelude::*};
 
 use super::RunnerStatusReconciler;
 use super::conditions::{
-    pod_ready_condition, pod_scheduled_condition, pvc_bound_condition, slot_bound_condition,
-    startup_complete, upsert_condition, workspace_ready_condition,
+    claim_bound_condition, pod_ready_condition, pod_scheduled_condition, pvc_bound_condition,
+    slot_bound_condition, startup_complete, upsert_condition, workspace_ready_condition,
 };
 use crate::context::Context;
 
@@ -20,11 +20,15 @@ impl RunnerStatusReconciler {
         let namespace = runner.require_namespace()?;
         let name = runner.name()?;
         let workspace_name = runner.spec.workspace.as_str();
+        // A claimed runner's pod is the warm pod it adopted, which keeps its
+        // pool name; only unclaimed runners have a pod named after themselves.
+        let claim = runner.status.as_ref().and_then(|s| s.claim.as_ref());
+        let pod_name = claim.map(|claim| claim.pod_name.as_str()).unwrap_or(name);
         let pods = ctx.api_namespaced::<Pod>(namespace);
         let pvcs = ctx.api_namespaced::<PersistentVolumeClaim>(namespace);
         let workspaces = ctx.api_namespaced::<Workspace>(namespace);
         let (pod, pvc, workspace) = futures::try_join!(
-            pods.get_opt(name),
+            pods.get_opt(pod_name),
             pvcs.get_opt(workspace_name),
             workspaces.get_opt(workspace_name),
         )?;
@@ -40,11 +44,15 @@ impl RunnerStatusReconciler {
             .unwrap_or(ctx.config.default_workspace_mode);
         upsert_condition(
             conditions,
-            match mode {
-                WorkspaceMode::Dedicated => {
+            match (mode, claim) {
+                (WorkspaceMode::Dedicated, _) => {
                     pvc_bound_condition(workspace_name, pvc.as_ref(), generation)
                 }
-                WorkspaceMode::Pooled => slot_bound_condition(pod.as_ref(), generation),
+                // A claimed pod's containers started long before the claim, so
+                // the container-started proxy below would lie; the agent's ack
+                // is the honest signal.
+                (WorkspaceMode::Pooled, Some(_)) => claim_bound_condition(pod.as_ref(), generation),
+                (WorkspaceMode::Pooled, None) => slot_bound_condition(pod.as_ref(), generation),
             },
         );
         upsert_condition(

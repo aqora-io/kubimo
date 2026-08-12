@@ -736,3 +736,161 @@ async fn test_new_dedicated_is_refused_but_existing_is_grandfathered() {
     })
     .await;
 }
+
+/// The Pool CRD's admission rules: Render and Conda are refused outright, and
+/// command/pythonRuntime are pinned once created. These are the guards that
+/// keep a pool from minting pods its claims could never safely serve.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_pool_admission_rules() {
+    with_namespace("test-pool-admission", |client, ns| async move {
+        let pools = client.api_namespaced::<kubimo::Pool>(&ns);
+
+        let mut editors = kubimo::Pool::new(
+            "test-pool",
+            kubimo::PoolSpec {
+                replicas: 1,
+                command: kubimo::RunnerCommand::Edit,
+                ..Default::default()
+            },
+        );
+        editors.metadata.namespace = Some(ns.clone());
+        pools.patch(&editors).await.expect("an Edit pool applies");
+
+        // Render cannot be pooled: a renderer's slot is bound read-only at
+        // publish time, which an already-published anonymous slot cannot be.
+        let mut renderers = kubimo::Pool::new(
+            "test-pool-render",
+            kubimo::PoolSpec {
+                replicas: 1,
+                command: kubimo::RunnerCommand::Render,
+                ..Default::default()
+            },
+        );
+        renderers.metadata.namespace = Some(ns.clone());
+        assert!(
+            pools.patch(&renderers).await.is_err(),
+            "a Render pool must be refused"
+        );
+
+        // Conda cannot be pooled yet: its dependency sync cannot run before
+        // marimo boots on a pre-booted pod.
+        let mut conda = kubimo::Pool::new(
+            "test-pool-conda",
+            kubimo::PoolSpec {
+                replicas: 1,
+                command: kubimo::RunnerCommand::Edit,
+                python_runtime: Some(kubimo::WorkspacePythonRuntime::Conda),
+                ..Default::default()
+            },
+        );
+        conda.metadata.namespace = Some(ns.clone());
+        assert!(
+            pools.patch(&conda).await.is_err(),
+            "a Conda pool must be refused"
+        );
+
+        // Command is immutable: warm pods were booted with it baked in.
+        let mut flipped = kubimo::Pool::new(
+            "test-pool",
+            kubimo::PoolSpec {
+                replicas: 1,
+                command: kubimo::RunnerCommand::Run,
+                ..Default::default()
+            },
+        );
+        flipped.metadata.namespace = Some(ns.clone());
+        assert!(
+            pools.patch(&flipped).await.is_err(),
+            "changing a pool's command must be refused"
+        );
+
+        // Replicas is a sizing knob and stays mutable.
+        let mut resized = kubimo::Pool::new(
+            "test-pool",
+            kubimo::PoolSpec {
+                replicas: 3,
+                command: kubimo::RunnerCommand::Edit,
+                ..Default::default()
+            },
+        );
+        resized.metadata.namespace = Some(ns.clone());
+        pools
+            .patch(&resized)
+            .await
+            .expect("resizing a pool must be accepted");
+    })
+    .await;
+}
+
+/// `spec.pool` is claim-once: a runner that cold-started must not grow a pool
+/// later (the claim path would strand its pod), and a pooled runner must not
+/// lose or change it (its status.claim would dangle).
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_runner_pool_is_immutable() {
+    with_namespace("test-runner-pool-immutable", |client, ns| async move {
+        let runners = client.api_namespaced::<Runner>(&ns);
+
+        let mut pooled = Runner::new(
+            "test-pooled",
+            RunnerSpec {
+                workspace: TEST_WORKSPACE.to_string(),
+                pool: Some("editors".to_string()),
+                ..Default::default()
+            },
+        );
+        pooled.metadata.namespace = Some(ns.clone());
+        runners
+            .patch(&pooled)
+            .await
+            .expect("a runner naming a pool applies");
+
+        for (name, pool) in [
+            ("test-pooled", None),                        // dropping it
+            ("test-pooled", Some("viewers".to_string())), // changing it
+        ] {
+            let mut mutated = Runner::new(
+                name,
+                RunnerSpec {
+                    workspace: TEST_WORKSPACE.to_string(),
+                    pool,
+                    ..Default::default()
+                },
+            );
+            mutated.metadata.namespace = Some(ns.clone());
+            assert!(
+                runners.patch(&mutated).await.is_err(),
+                "mutating spec.pool must be refused"
+            );
+        }
+
+        // A pool-less runner gaining one later is refused too.
+        let mut cold = Runner::new(
+            "test-cold",
+            RunnerSpec {
+                workspace: TEST_WORKSPACE.to_string(),
+                ..Default::default()
+            },
+        );
+        cold.metadata.namespace = Some(ns.clone());
+        runners
+            .patch(&cold)
+            .await
+            .expect("a pool-less runner applies");
+        let mut grown = Runner::new(
+            "test-cold",
+            RunnerSpec {
+                workspace: TEST_WORKSPACE.to_string(),
+                pool: Some("editors".to_string()),
+                ..Default::default()
+            },
+        );
+        grown.metadata.namespace = Some(ns.clone());
+        assert!(
+            runners.patch(&grown).await.is_err(),
+            "a cold runner must not gain a pool"
+        );
+    })
+    .await;
+}

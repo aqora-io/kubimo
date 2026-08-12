@@ -116,17 +116,16 @@ sys.exit(0 if "venv" in data.get("tool", {}).get("marimo", {}) else 1)
 '
 }
 
-# --sandbox on a directory makes marimo spawn each kernel as an IPC subprocess
-# on the workspace venv (see [tool.marimo.venv] in the template pyproject), so
-# user-installed packages aren't shadowed by the image's system site-packages
-# that launch.py prioritizes for the server.
-if [[ "$CMD" == "edit" ]]; then
-  # Backgrounded: marimo's --sandbox resolves each kernel's environment lazily
-  # at websocket connect, and /health is a constant response, so nothing about
-  # serving depends on this finishing. The venv itself already exists and is
-  # populated (from the image, via init-dirs or the agent's reflink template),
-  # which is what makes this safe — marimo hard-errors on a *missing* venv but
-  # never on a stale one.
+# Sync the workspace environment and pin the marimo venv table. The one shape
+# shared by a normal start, a post-claim container restart, and the claim
+# waiter below.
+sync_workspace_env() {
+  # Backgrounded (uv): marimo's --sandbox resolves each kernel's environment
+  # lazily at websocket connect, and /health is a constant response, so
+  # nothing about serving depends on this finishing. The venv itself already
+  # exists and is populated (from the image, via init-dirs or the agent's
+  # reflink template), which is what makes this safe — marimo hard-errors on
+  # a *missing* venv but never on a stale one.
   #
   # The trade: a workspace that has added dependencies has a window where they
   # are not yet installed, and opening a notebook in it shows marimo's
@@ -138,6 +137,39 @@ if [[ "$CMD" == "edit" ]]; then
     mamba_update_workspace
   fi
   ensure_marimo_venv_config
+}
+
+# Warm-pool pre-boot. Set (as an env var, never a flag — an older image must
+# start normally rather than crash on an unknown argument) when this pod was
+# minted for a pool: the workspace is only the node template until a claim
+# hydrates the tenant's files and the agent drops the marker file. Until then
+# there is nothing to sync; afterwards the tenant's pyproject is in place and
+# the sync must run against it.
+#
+# Polls rather than inotify: the agent writes the marker from the host, and
+# gVisor only delivers inotify events for writes made inside the sandbox.
+#
+# The subshell is backgrounded *before* the exec and survives it (it is its
+# own process); marimo stays PID 1 so signal handling is unchanged. A probe
+# restart re-runs this script with the marker already present, takes the
+# else-branch, and starts like any cold runner — idempotent by construction.
+if [[ "$CMD" == "edit" || "$CMD" == "run" ]]; then
+  if [[ -n "$KUBIMO_CLAIM_MARKER" && ! -e "$KUBIMO_CLAIM_MARKER" ]]; then
+    (
+      while [[ ! -e "$KUBIMO_CLAIM_MARKER" ]]; do sleep 2; done
+      cd "$directory" || exit 1
+      sync_workspace_env
+    ) &
+  else
+    sync_workspace_env
+  fi
+fi
+
+# --sandbox on a directory makes marimo spawn each kernel as an IPC subprocess
+# on the workspace venv (see [tool.marimo.venv] in the template pyproject), so
+# user-installed packages aren't shadowed by the image's system site-packages
+# that launch.py prioritizes for the server.
+if [[ "$CMD" == "edit" ]]; then
   export MARIMO_IN_SECURE_ENVIRONMENT=true
   export MARIMO_SESSION_COOKIE_SECURE=true
   exec /usr/local/bin/marimo \
@@ -153,13 +185,6 @@ if [[ "$CMD" == "edit" ]]; then
     "$directory"
 
 elif [[ "$CMD" == "run" ]]; then
-  # Same reasoning as `edit` above.
-  if [[ -n "$UV_PROJECT" ]]; then
-    uv_sync_workspace &
-  elif [[ -n "$CONDA_PREFIX" ]]; then
-    mamba_update_workspace
-  fi
-  ensure_marimo_venv_config
   export MARIMO_IN_SECURE_ENVIRONMENT=true
   export MARIMO_SESSION_COOKIE_SECURE=true
   exec /usr/local/bin/marimo \

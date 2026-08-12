@@ -135,6 +135,54 @@ pub(super) fn slot_bound_condition(
     condition(PVC_BOUND, status, &reason, message, observed_generation)
 }
 
+/// The claimed-warm-pod counterpart of [`slot_bound_condition`], keyed on the
+/// agent's ack instead of container state.
+///
+/// A warm pod's containers started long before the claim, so the
+/// container-started proxy would report `True` over a slot that is still
+/// anonymous and unhydrated — and the platform would iframe an empty template
+/// workspace. The agent's `claim-state: bound` annotation is the signal that
+/// the slot now belongs to this workspace and its files are in place. Keeps
+/// the `PvcBound` condition *type*, for the same contract reason as
+/// [`slot_bound_condition`].
+pub(super) fn claim_bound_condition(
+    pod: Option<&Pod>,
+    observed_generation: Option<i64>,
+) -> Condition {
+    let state = pod
+        .and_then(|pod| pod.metadata.annotations.as_ref())
+        .and_then(|annotations| annotations.get(kubimo::pool::CLAIM_STATE_ANNOTATION))
+        .map(String::as_str);
+    let (status, reason, message) = match (pod, state) {
+        (None, _) => (
+            "False",
+            "Pending",
+            "Waiting for the claimed pod".to_string(),
+        ),
+        (Some(_), Some(kubimo::pool::CLAIM_STATE_BOUND)) => (
+            "True",
+            "Bound",
+            "Workspace slot is hydrated and bound".to_string(),
+        ),
+        (Some(pod), Some(kubimo::pool::CLAIM_STATE_FAILED)) => (
+            "False",
+            "ClaimFailed",
+            pod.metadata
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(kubimo::pool::CLAIM_ERROR_ANNOTATION))
+                .cloned()
+                .unwrap_or_else(|| "The agent could not bind the claimed slot".to_string()),
+        ),
+        (Some(_), _) => (
+            "False",
+            "ClaimPending",
+            "Waiting for the agent to hydrate the claimed slot".to_string(),
+        ),
+    };
+    condition(PVC_BOUND, status, reason, message, observed_generation)
+}
+
 pub(super) fn workspace_ready_condition(
     workspace_name: &str,
     workspace: Option<&Workspace>,
@@ -298,6 +346,14 @@ pub(super) fn startup_complete(conditions: &[Condition]) -> bool {
             .iter()
             .any(|cond| cond.type_ == *type_ && cond.status == "True")
     })
+}
+
+/// Whether the runner's volume (PVC, slot or claimed slot) is bound, as of
+/// the conditions computed earlier in this same reconcile.
+pub(super) fn volume_is_bound(conditions: &[Condition]) -> bool {
+    conditions
+        .iter()
+        .any(|cond| cond.type_ == PVC_BOUND && cond.status == "True")
 }
 
 /// Whether the runner's pod is passing its readiness probe, as of the

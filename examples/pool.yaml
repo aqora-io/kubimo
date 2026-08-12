@@ -1,0 +1,42 @@
+# A warm pod pool and a runner that claims from it.
+#
+# The pool keeps `replicas` pods fully pre-booted: marimo serving /health on an
+# anonymous, venv-template-seeded slot, under a base-url and token minted at
+# each pod's birth. A Runner naming the pool in `spec.pool` adopts one instead
+# of cold-starting — the agent links the slot to the workspace, hydrates it
+# from S3 and acks, and only then does the controller create the Service and
+# Ingress. Anything that makes the runner ineligible (different command,
+# runtime, resources, env, sidecars, or S3 secret; or the pool being empty)
+# silently falls back to a cold start.
+#
+# IMPORTANT — consumers must read the effective URL from the Runner *status*:
+# a claimed pod serves `status.claim.ingressPath` with `status.claim.token`,
+# not `spec.ingress.path`/`spec.token`.
+#
+# Version skew: create Pools only once both the agent DaemonSet and the marimo
+# image carry warm-pool support. An older agent rejects the `pooled` volume and
+# warm pods wedge in ContainerCreating; an older marimo image pre-boots but
+# never re-syncs dependencies after the claim.
+apiVersion: kubimo.aqora.io/v1
+kind: Pool
+metadata:
+  name: "editors"
+spec:
+  replicas: 2
+  command: "Edit" # Edit or Run; Render cannot be pooled (read-only slots)
+  # pythonRuntime: "Uv"        # the default; Conda cannot be pooled yet
+  # cpu: { min: "250m", max: "2" }     # a claiming runner's resources must match
+  # memory: { min: "512Mi", max: "2Gi" }
+  # env: []                    # baseline env; a claiming runner's env must be a subset
+  # sidecars: []               # template containers; may mount the per-pod "claim" Secret
+  # s3SecretName: "s3-credentials"  # must match claiming workspaces' indexer secret
+  storage: "4Gi" # interim slot quota; re-quota'd to the workspace's storage.max at claim
+---
+apiVersion: kubimo.aqora.io/v1
+kind: Runner
+metadata:
+  name: "pooled-editor"
+spec:
+  command: "Edit"
+  workspace: "workspace" # e.g. the Workspace from basic.yaml
+  pool: "editors"

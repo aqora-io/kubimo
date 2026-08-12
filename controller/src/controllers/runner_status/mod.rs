@@ -17,7 +17,7 @@ use url::Url;
 use crate::backoff::default_error_policy;
 use crate::config::StatusCheckResolution;
 use crate::context::Context;
-use crate::controllers::ingress::ingress_path;
+use crate::controllers::ingress::effective_ingress_path;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 
@@ -47,7 +47,7 @@ fn runner_api_endpoint(
         ))?,
         StatusCheckResolution::Ingress { host } => host.clone(),
     }
-    .join(&format!("{}/", ingress_path(runner)?))?
+    .join(&format!("{}/", effective_ingress_path(runner)?))?
     .join("api/")?)
 }
 
@@ -55,6 +55,11 @@ async fn resolve_token(
     ctx: &Context,
     runner: &Runner,
 ) -> Result<Option<String>, RunnerStatusError> {
+    // A claimed warm pod authenticates with the token minted at its birth;
+    // whatever the spec asked for was never given to marimo.
+    if let Some(claim) = runner.status.as_ref().and_then(|s| s.claim.as_ref()) {
+        return Ok(claim.token.clone());
+    }
     let Some(token_spec) = runner.spec.token.as_ref() else {
         return Ok(None);
     };
@@ -318,7 +323,16 @@ impl Reconciler for RunnerStatusReconciler {
         let startup_complete = self
             .apply_startup_conditions(ctx, runner, &mut status)
             .await?;
-        let action = if matches!(runner.spec.command, RunnerCommand::Render) {
+        // A claimed runner has no Service until the agent acks the claim, so
+        // polling would only fail against a pod that is otherwise Ready and
+        // warn-log every few seconds about an outage that isn't one.
+        let claim_pending = runner
+            .status
+            .as_ref()
+            .and_then(|s| s.claim.as_ref())
+            .is_some()
+            && !conditions::volume_is_bound(status.conditions.as_deref().unwrap_or_default());
+        let action = if matches!(runner.spec.command, RunnerCommand::Render) || claim_pending {
             Action::await_change()
         } else {
             let action = self.poll_api_status(ctx, runner, &mut status).await?;
