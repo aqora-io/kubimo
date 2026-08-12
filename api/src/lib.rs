@@ -7,6 +7,8 @@ mod client;
 // `default-features = false`.
 pub mod conditions;
 mod crd;
+// Same reasoning as `conditions`: the warm-pod-pool protocol strings are
+// matched byte-exactly by the controller and the node agent.
 mod error;
 mod factory;
 mod filter_params;
@@ -15,6 +17,7 @@ mod label;
 mod list_stream;
 mod manifest;
 mod meta;
+pub mod pool;
 mod quantity;
 mod secrets;
 pub mod selector;
@@ -36,14 +39,14 @@ pub use api::{Api, ApiListStream};
 pub use client::{Client, ClientBuilder};
 pub use crd::{
     AutoScale, Budget, BudgetResourceStatus, BudgetSpec, BudgetStatus, CacheJob, CacheJobField,
-    CacheJobSpec, LogLevel, Requirement, Runner, RunnerCommand, RunnerField, RunnerIngress,
-    RunnerLifecycle, RunnerSpec, RunnerStatus, RunnerTls, RunnerToken, StorageRequirement,
-    Workspace, WorkspaceArchiveStatus, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory,
-    WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo,
-    WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceField,
-    WorkspaceIndexer, WorkspaceIndexerPod, WorkspaceMode, WorkspacePythonRuntime,
-    WorkspaceRestoreFrom, WorkspaceRestoreSecrets, WorkspaceSlotStatus, WorkspaceSpec,
-    WorkspaceStatus, WorkspaceStorageStatus, all_crds,
+    CacheJobSpec, LogLevel, Pool, PoolSpec, PoolStatus, Requirement, Runner, RunnerClaim,
+    RunnerCommand, RunnerField, RunnerIngress, RunnerLifecycle, RunnerSpec, RunnerStatus,
+    RunnerTls, RunnerToken, StorageRequirement, Workspace, WorkspaceArchiveStatus, WorkspaceDir,
+    WorkspaceDirContentUrl, WorkspaceDirDirectory, WorkspaceDirEntry, WorkspaceDirField,
+    WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache, WorkspaceDirSpec,
+    WorkspaceDirSymlink, WorkspaceField, WorkspaceIndexer, WorkspaceIndexerPod, WorkspaceMode,
+    WorkspacePythonRuntime, WorkspaceRestoreFrom, WorkspaceRestoreSecrets, WorkspaceSlotStatus,
+    WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus, all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;

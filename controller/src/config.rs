@@ -177,6 +177,19 @@ impl Config {
 }
 
 #[cfg(test)]
+impl Config {
+    /// The all-defaults configuration, hermetically — `Config::load()` would
+    /// read the developer's real `KUBIMO__*` environment into a unit test.
+    pub(crate) fn test_default() -> Self {
+        config::Config::builder()
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

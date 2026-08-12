@@ -13,12 +13,13 @@ use url::Url;
 
 use crate::selector::Selector;
 use crate::validation::{
-    budget_selector_not_empty, log_level, runner_immutable_fields, runner_max_cpu_greater_than_min,
-    runner_max_memory_greater_than_min, workspace_auto_scale_bounds, workspace_clone_not_pooled,
-    workspace_immutable_fields, workspace_max_storage_greater_than_min,
-    workspace_mode_no_downgrade, workspace_no_new_dedicated, workspace_no_volume_with_name,
-    workspace_python_runtime_exclusive, workspace_restore_from_exclusive,
-    workspace_restore_from_not_indexer_prefix,
+    budget_selector_not_empty, log_level, pool_command_not_render, pool_immutable_fields,
+    pool_max_cpu_greater_than_min, pool_max_memory_greater_than_min, pool_python_runtime_uv,
+    runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
+    workspace_auto_scale_bounds, workspace_clone_not_pooled, workspace_immutable_fields,
+    workspace_max_storage_greater_than_min, workspace_mode_no_downgrade,
+    workspace_no_new_dedicated, workspace_no_volume_with_name, workspace_python_runtime_exclusive,
+    workspace_restore_from_exclusive, workspace_restore_from_not_indexer_prefix,
 };
 
 use crate::{
@@ -244,8 +245,7 @@ pub struct WorkspaceRestoreFrom {
 }
 
 /// Determines how a workspace environment is installed.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, Default)]
-#[cfg_attr(test, derive(Eq, PartialEq))]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, Default, Eq, PartialEq)]
 pub enum WorkspacePythonRuntime {
     /// Environment is installed by `uv`.
     #[default]
@@ -371,12 +371,32 @@ pub struct RunnerLifecycle {
     pub delete_after_secs_inactive: Option<u32>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default, Display)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, Default, Display, Eq, PartialEq,
+)]
 pub enum RunnerCommand {
     #[default]
     Edit,
     Run,
     Render,
+}
+
+/// Recorded once a warm pod is claimed for this runner. Consumers must build
+/// the runner's URL from `ingress_path`/`token` here rather than from
+/// `spec.ingress.path`/`spec.token`: a claimed pod serves the base-url and
+/// token minted at its birth, which marimo cannot change once booted.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerClaim {
+    /// The pool the pod was claimed from.
+    pub pool: String,
+    /// The claimed pod, which is *not* named after the runner.
+    pub pod_name: String,
+    /// The pod's pre-minted ingress path.
+    pub ingress_path: String,
+    /// The pod's pre-minted access token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default, PartialEq)]
@@ -385,6 +405,8 @@ pub struct RunnerStatus {
     pub conditions: Option<Vec<Condition>>,
     pub last_active: Option<DateTime<Utc>>,
     pub marimo_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim: Option<RunnerClaim>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -422,6 +444,13 @@ pub struct RunnerSpec {
     pub lifecycle: Option<RunnerLifecycle>,
     pub token: Option<RunnerToken>,
     pub sidecars: Option<Vec<Container>>,
+    /// Name of a [`Pool`] to claim a pre-booted warm pod from. Best effort: if
+    /// the pool is absent, empty, or the runner is not eligible (command,
+    /// runtime, resources, sidecars or secrets differ from the pool template),
+    /// the runner cold-starts exactly as if the field were unset. Immutable —
+    /// once a runner has a cold pod, a claim would strand it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]
@@ -598,6 +627,93 @@ impl BudgetSpec {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct PoolStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Vec<Condition>>,
+    /// Unclaimed, fully-booted pods currently claimable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm: Option<u32>,
+    /// Pods this pool minted that runners have since claimed and that are
+    /// still alive. Informational — claimed pods belong to their Runners.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claimed: Option<u32>,
+}
+
+/// A pool of pre-booted warm runner pods.
+///
+/// The pool controller keeps `replicas` anonymous pods running: marimo fully
+/// booted on a template-seeded slot, serving `/health` under a base-url and
+/// token minted at the pod's birth. A Runner naming this pool in `spec.pool`
+/// claims one instead of cold-starting, and the pool mints a replacement.
+///
+/// Every field here is a *template*: a runner is only eligible to claim when
+/// its own spec is compatible (same command, runtime, resources; env a subset;
+/// sidecars matching), because nothing about a running pod can be changed
+/// after the fact except its metadata.
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[kube(
+    group = "kubimo.aqora.io",
+    version = "v1",
+    kind = "Pool",
+    shortname = "bmop",
+    namespaced,
+    status = "PoolStatus",
+    validation = pool_command_not_render(),
+    validation = pool_python_runtime_uv(),
+    validation = pool_immutable_fields(),
+    validation = pool_max_memory_greater_than_min(),
+    validation = pool_max_cpu_greater_than_min(),
+    validation = log_level(),
+)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolSpec {
+    /// Desired number of unclaimed warm pods.
+    pub replicas: u32,
+    /// The marimo command warm pods are booted with. Immutable, and Render is
+    /// refused: a renderer's slot is bound read-only at publish time, which an
+    /// already-published anonymous slot cannot honour.
+    pub command: RunnerCommand,
+    /// Runtime whose venv template seeds the anonymous slots. Absent means
+    /// `Uv`; `Conda` is refused for now (its dependency sync cannot run before
+    /// marimo boots on a pool pod). Immutable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub python_runtime: Option<WorkspacePythonRuntime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<LogLevel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<Requirement<StorageQuantity>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<Requirement<CpuQuantity>>,
+    /// Baseline environment baked into every warm pod. A claiming runner's
+    /// `spec.env` must be a subset — a running pod's environment is immutable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<EnvVar>>,
+    /// Sidecar containers appended to every warm pod. Sidecars may mount the
+    /// per-pod claim Secret (`<pod>-claim`) by declaring a volume mount named
+    /// `claim`; the controller copies the claiming runner's sidecar secrets
+    /// into it at claim time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidecars: Option<Vec<Container>>,
+    /// S3 credentials secret published with every warm slot volume. A
+    /// workspace is only eligible to claim from this pool when its indexer
+    /// uses the same secret: kubelet hands the agent credentials at
+    /// NodePublishVolume, which happens before any claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s3_secret_name: Option<String>,
+    /// XFS quota for the anonymous slot. The agent re-quotas to the claiming
+    /// workspace's `storage.max`, so this only needs to fit the venv template.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageQuantity>,
+}
+
+impl ResourceFactory for Pool {
+    fn new(name: &str, spec: Self::Spec) -> Self {
+        Self::new(name, spec)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceDirDirectory {
     pub name: Option<String>,
 }
@@ -717,6 +833,7 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         CacheJob::crd(),
         WorkspaceDir::crd(),
         Budget::crd(),
+        Pool::crd(),
     ]
 }
 
@@ -1003,6 +1120,72 @@ mod tests {
             "existing Dedicated workspaces are grandfathered by materialized \
              status, not by spec"
         );
+    }
+
+    /// A status apply with only a claim recorded must not blank the fields the
+    /// runner_status loop owns, and the claim's optional token must not turn
+    /// into an explicit null.
+    #[test]
+    fn a_partial_runner_status_serializes_no_null_claim_fields() {
+        let status = RunnerStatus {
+            claim: Some(RunnerClaim {
+                pool: "editors".to_string(),
+                pod_name: "editors-a1b2c3d4".to_string(),
+                ingress_path: "/editors-a1b2c3d4".to_string(),
+                token: None,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert!(
+            json["claim"].get("token").is_none(),
+            "claim had a null token: {json}"
+        );
+        let parsed: RunnerStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.claim.unwrap().pool, "editors");
+    }
+
+    /// A runner written before `spec.pool` existed parses to `None`, and a
+    /// partial spec never claims the field with a null.
+    #[test]
+    fn runner_spec_pool_is_optional_and_never_null() {
+        let parsed: RunnerSpec =
+            serde_json::from_value(serde_json::json!({"workspace": "bmow-x", "command": "Edit"}))
+                .unwrap();
+        assert_eq!(parsed.pool, None);
+        let json = serde_json::to_value(&RunnerSpec {
+            workspace: "bmow-x".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(json.get("pool").is_none(), "spec had a null pool: {json}");
+    }
+
+    /// The shapes of the pool rules are the contract: Render refused, Conda
+    /// refused (for now), command and runtime pinned once created.
+    #[test]
+    fn pool_crd_refuses_render_conda_and_mutation() {
+        let crd = serde_json::to_string(&Pool::crd()).unwrap();
+        assert!(crd.contains("pool command must be Edit or Run"));
+        assert!(crd.contains("pools only support the Uv python runtime"));
+        assert!(crd.contains("pool command and pythonRuntime are immutable"));
+
+        let command = include_str!("./validation/pool_command_not_render.cel");
+        assert!(command.contains("in [\"Edit\", \"Run\"]"));
+        let runtime = include_str!("./validation/pool_python_runtime_uv.cel");
+        // Absent must pass — it resolves to the Uv default.
+        assert!(runtime.contains("!has(self.spec.pythonRuntime)"));
+        assert!(runtime.contains("== \"Uv\""));
+    }
+
+    /// `spec.pool` is claim-once: a runner that already cold-started must not
+    /// grow a pool later (the claim path would strand its pod), and vice
+    /// versa. Guarded reads keep pre-existing pool-less runners patchable.
+    #[test]
+    fn runner_crd_pins_pool_field() {
+        let expression = include_str!("./validation/runner_immutable_fields.cel");
+        assert!(expression.contains("has(self.spec.pool) == has(oldSelf.spec.pool)"));
+        assert!(expression.contains("self.spec.pool == oldSelf.spec.pool"));
     }
 
     #[test]

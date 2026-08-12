@@ -1,17 +1,12 @@
-use kubimo::k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, Pod, PodSpec, Probe, VolumeMount,
-};
-use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kubimo::kube::api::ObjectMeta;
-use kubimo::{Runner, RunnerCommand, Workspace, WorkspacePythonRuntime, prelude::*};
+use kubimo::k8s_openapi::api::core::v1::Pod;
+use kubimo::{Runner, RunnerCommand, RunnerToken, Workspace, WorkspacePythonRuntime, prelude::*};
 
 use crate::Config;
-use crate::command::cmd;
 use crate::context::Context;
 use crate::controllers::ingress::ingress_path;
+use crate::controllers::runner_pod::{RunnerPodParams, TokenSource, build_runner_pod};
 use crate::controllers::slot_volume::{self, SLOT_CSI_DRIVER};
 use crate::controllers::workspace_affinity;
-use crate::resources::Resources;
 
 use super::RunnerReconciler;
 
@@ -39,123 +34,50 @@ impl RunnerReconciler {
         let namespace = runner.require_namespace()?;
         let mode = workspace.effective_mode(ctx.config.default_workspace_mode);
         let sources = slot_volume::SlotSources::from_workspace(Some(workspace));
-        let ingress_path = ingress_path(runner)?;
-        let path_prefix = ingress_path.strip_suffix('/').unwrap_or(&ingress_path);
-        let mut command = cmd!["bash", "/setup/start.sh", "--base-url", ingress_path,];
-        let mut env = runner.spec.env.clone().unwrap_or_default();
-        if let Some(token_spec) = runner.spec.token.as_ref() {
-            if let Some(token) = token_spec.value.as_ref() {
-                command.extend(cmd!["--token", token]);
-            } else if let Some(secret_ref) = token_spec.secret_ref.as_ref() {
-                env.push(EnvVar {
-                    name: "MARIMO_TOKEN".into(),
-                    value_from: Some(EnvVarSource {
-                        secret_key_ref: Some(secret_ref.clone()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                });
-            }
-        }
-        if let Some(log_level) = runner.spec.log_level.as_ref() {
-            command.extend(cmd!["--log-level", log_level]);
-        }
-        let port = runner_port(runner);
-        if port != 80 {
-            command.extend(cmd!["--port", port]);
-        }
-        if let Some(host) = runner_origin(&ctx.config, runner) {
-            command.extend(cmd!["--origin", host]);
-        }
-        let probe_action = HTTPGetAction {
-            path: Some(format!("{path_prefix}/health")),
-            port: IntOrString::Int(port),
-            ..Default::default()
+        let token = match runner.spec.token.as_ref() {
+            Some(RunnerToken {
+                value: Some(token), ..
+            }) => TokenSource::Value(token),
+            Some(RunnerToken {
+                secret_ref: Some(secret_ref),
+                ..
+            }) => TokenSource::SecretEnv(secret_ref),
+            _ => TokenSource::None,
         };
-        command.push(
-            match runner.spec.command {
-                RunnerCommand::Edit => "edit",
-                RunnerCommand::Run => "run",
-                RunnerCommand::Render => "render",
-            }
-            .into(),
-        );
-        let affinity = Some(workspace_affinity::workspace_affinity(
-            &runner.spec.workspace,
-        ));
-        let mut containers = vec![Container {
-            name: "runner".into(),
-            image: Some(ctx.config.marimo_image(python_runtime).to_string()),
-            resources: Resources::default()
-                .cpu(runner.spec.cpu.clone())
-                .memory(runner.spec.memory.clone())
-                .into(),
-            volume_mounts: Some(vec![VolumeMount {
-                mount_path: "/home/me".to_string(),
-                name: runner.spec.workspace.clone(),
-                ..Default::default()
-            }]),
-            ports: Some(vec![ContainerPort {
-                container_port: port,
-                name: Some("marimo".to_string()),
-                ..Default::default()
-            }]),
-            env: if env.is_empty() { None } else { Some(env) },
+        let pod = build_runner_pod(RunnerPodParams {
+            name: runner.name()?.to_string(),
+            namespace: namespace.to_string(),
+            labels: self.pod_labels(runner)?,
+            annotations: None,
+            owner_reference: runner.static_controller_owner_ref()?,
+            image: ctx.config.marimo_image(python_runtime).to_string(),
+            base_url: ingress_path(runner)?,
+            token,
+            log_level: runner.spec.log_level,
+            port: runner_port(runner),
+            origin: runner_origin(&ctx.config, runner),
+            command: runner.spec.command,
+            python_runtime,
+            cpu: runner.spec.cpu.clone(),
+            memory: runner.spec.memory.clone(),
+            env: runner.spec.env.clone().unwrap_or_default(),
             env_from: runner.spec.env_from.clone(),
-            startup_probe: Some(Probe {
-                http_get: Some(probe_action.clone()),
-                failure_threshold: Some(match python_runtime {
-                    WorkspacePythonRuntime::Uv => 90,
-                    WorkspacePythonRuntime::Conda => 300,
-                }),
-                period_seconds: Some(1),
-                ..Default::default()
-            }),
-            liveness_probe: Some(Probe {
-                http_get: Some(probe_action.clone()),
-                period_seconds: Some(10),
-                ..Default::default()
-            }),
-            command: Some(command),
-            ..Default::default()
-        }];
-        if let Some(sidecars) = runner.spec.sidecars.clone() {
-            containers.extend(sidecars);
-        }
-        let pod = Pod {
-            metadata: ObjectMeta {
-                name: runner.metadata.name.clone(),
-                namespace: runner.metadata.namespace.clone(),
-                owner_references: Some(vec![runner.static_controller_owner_ref()?]),
-                labels: Some(self.pod_labels(runner)?),
-                ..Default::default()
-            },
-            spec: Some(PodSpec {
-                // Every command, including Render. Render executes user
-                // notebooks just as Edit and Run do, so leaving it unsandboxed
-                // was a pre-existing gap; a shared node volume makes it much
-                // worse, since an escape reaches every other tenant's slot
-                // rather than one workspace's own PVC.
-                runtime_class_name: sandbox_runtime_class(),
-                automount_service_account_token: Some(false),
-                enable_service_links: Some(false),
-                affinity,
-                security_context: slot_volume::pod_security_context(mode),
-                hostname: Some("kubimo".into()),
-                containers,
-                volumes: Some(vec![slot_volume::workspace_volume(
-                    &runner.spec.workspace,
-                    mode,
-                    // Render never mutates user data, so give it a read-only
-                    // bind and let one published version's slot be shared.
-                    matches!(runner.spec.command, RunnerCommand::Render),
-                    sources,
-                    python_runtime,
-                )]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+            mode,
+            affinity: Some(workspace_affinity::workspace_affinity(
+                &runner.spec.workspace,
+            )),
+            slot_volume: slot_volume::workspace_volume(
+                &runner.spec.workspace,
+                mode,
+                // Render never mutates user data, so give it a read-only
+                // bind and let one published version's slot be shared.
+                matches!(runner.spec.command, RunnerCommand::Render),
+                sources,
+                python_runtime,
+            ),
+            extra_volumes: Vec::new(),
+            sidecars: runner.spec.sidecars.clone(),
+        });
         match ctx.api_namespaced::<Pod>(namespace).patch(&pod).await {
             Err(err) if super::is_invalid_request(&err) => {
                 // A live pod's spec is almost entirely immutable, so an apply that needs to
@@ -220,11 +142,6 @@ fn volumes_drifted(live: &Pod, desired: &Pod) -> bool {
     volume_python_runtime(live) != volume_python_runtime(desired)
 }
 
-/// Sandbox every runner, whatever its command.
-fn sandbox_runtime_class() -> Option<String> {
-    Some("gvisor".to_string())
-}
-
 pub(crate) fn runner_port(runner: &Runner) -> i32 {
     match runner.spec.command {
         RunnerCommand::Render => 8080,
@@ -254,8 +171,10 @@ pub(crate) fn runner_origin<'a>(config: &'a Config, runner: &'a Runner) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controllers::runner_pod::sandbox_runtime_class;
     use crate::controllers::slot_volume;
     use kubimo::WorkspaceMode;
+    use kubimo::k8s_openapi::api::core::v1::PodSpec;
 
     /// Render never mutates user data, so its bind is read-only — which also
     /// lets one published version's slot be shared between renderers.

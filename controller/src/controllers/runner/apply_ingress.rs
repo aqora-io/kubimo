@@ -8,7 +8,7 @@ use kubimo::kube::api::ObjectMeta;
 use kubimo::{Runner, prelude::*};
 
 use crate::context::Context;
-use crate::controllers::ingress::ingress_path;
+use crate::controllers::ingress::effective_ingress_path;
 use crate::controllers::runner::apply_pod::runner_port;
 
 use super::RunnerReconciler;
@@ -103,7 +103,7 @@ impl RunnerReconciler {
                     host,
                     http: Some(HTTPIngressRuleValue {
                         paths: vec![HTTPIngressPath {
-                            path: Some(ingress_path(runner)?),
+                            path: Some(effective_ingress_path(runner)?),
                             path_type: "Prefix".to_string(),
                             backend: IngressBackend {
                                 service: Some(IngressServiceBackend {
