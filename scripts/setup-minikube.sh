@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 
 minikube start --container-runtime=containerd \
+  --kubernetes-version=v1.36.2
   --network=minikube \
   --docker-opt containerd=/var/run/containerd/containerd.sock \
   --addons=ingress,gvisor,metrics-server,dashboard,volumesnapshots,csi-hostpath-driver \
