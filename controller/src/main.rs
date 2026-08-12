@@ -91,6 +91,10 @@ async fn main() -> ExitCode {
                 .await
                 .unwrap()
                 .wait(),
+            controllers::pool::run(ctx.clone(), shutdown_signal("pool"))
+                .await
+                .unwrap()
+                .wait(),
         ])
         .map(|_| Ok(ExitCode::SUCCESS)),
         shutdown_timeout(Duration::from_secs(60)).boxed(),

@@ -37,24 +37,26 @@ rules:
   - apiGroups: ["kubimo.aqora.io"]
     resources: ["workspaces/status"]
     verbs: ["get", "patch", "update"]
-  # Both recovery paths delete pods that are holding this node's slots:
+  # Several paths touch pods that are holding this node's slots:
   #
-  #   - the shutdown drain, so kubelet calls NodeUnpublishVolume while this agent can
-  #     still flush and unmount them;
-  #   - the stale-mount sweep, which recreates runners stranded on a mount whose device
-  #     has gone. That one runs unconditionally, so this rule must not be gated on
+  #   - the shutdown drain deletes them, so kubelet calls NodeUnpublishVolume while this
+  #     agent can still flush and unmount them;
+  #   - the stale-mount sweep deletes runners stranded on a mount whose device has gone.
+  #     That one runs unconditionally, so this rule must not be gated on
   #     `agent.drain.enabled` — doing so would leave the sweep 403ing behind a single
-  #     warn line, with the failure looking exactly like "nothing to sweep".
+  #     warn line, with the failure looking exactly like "nothing to sweep";
+  #   - the claim watcher gets/watches this node's warm-pool pods for claim annotations
+  #     and patches exactly one thing back: the `kubimo.aqora.io/claim-state` ack.
   #
   # Cluster-scoped because runner pods live in tenant namespaces, and a spec.nodeName
   # field selector still requires a cluster-wide list. RBAC cannot express "only pods on
-  # my node", so this is genuinely broader than either path needs. It is a small
+  # my node", so this is genuinely broader than any path needs. It is a small
   # increment on an already tier-0 component — the agent is privileged on the node and
   # can read every tenant's files — but `delete` on any pod cluster-wide is the sharpest
   # verb here, so it is worth restating why it cannot be narrowed.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["list", "delete"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -66,7 +66,8 @@ CRD schema changes require re-running `apply_crds` against the cluster.
 All defined with `#[derive(CustomResource, JsonSchema, ...)]` + `#[kube(...)]`, with CEL validation rules attached in the kube attribute:
 
 - **Workspace** (`bmow`) — persistent notebook workspace. Reconciles into a PVC (optionally cloned from another workspace via VolumeSnapshot), an init-containers Job, and an indexer Pod + its ServiceAccount/Role/RoleBinding. Gets `Ready` condition once the PVC is bound. `spec.restoreFrom` (`{bucket, keyPrefix, pod.env, secrets}`, mutually exclusive with `cloneWorkspaceName`) seeds a new workspace's tracked files from an indexer S3 archive via a `restore` init container — works even after the source workspace was deleted, but requires the archive was written with `uploadContent: true` (see `examples/restore.yaml`). `restoreFrom.secrets` (`Values` | `NamesOnly`, default `NamesOnly`) controls whether the archive's secrets come back with values or as empty `.env` placeholders; the mode reaches the restore container as the `KUBIMO_RESTORE_SECRETS` env var and the pooled agent as the `seedSecrets` volume attribute — never as a CLI flag, since older pinned images reject unknown flags.
-- **Runner** (`bmor`) — one marimo process (`spec.command`: Edit / Run / Render) in a workspace (`spec.workspace`). Reconciles into Pod + Service + Ingress. Not reconciled until its Workspace is Ready; owned by the Workspace.
+- **Runner** (`bmor`) — one marimo process (`spec.command`: Edit / Run / Render) in a workspace (`spec.workspace`). Reconciles into Pod + Service + Ingress. Not reconciled until its Workspace is Ready; owned by the Workspace. Optional `spec.pool` names a Pool to claim a pre-booted warm pod from (best-effort: any ineligibility falls back to a cold start). A claimed runner serves the pod's pre-minted base-url/token — consumers must read `status.claim.{ingressPath,token}` instead of `spec.ingress.path`/`spec.token`.
+- **Pool** (`bmop`) — a fleet of pre-booted warm runner pods (marimo already serving on an anonymous, template-seeded slot). Claim protocol constants + `PoolClaim` payload live in `api/src/pool.rs`; the claim itself is a `test`-guarded JSON patch flipping the `kubimo.aqora.io/pool-state` label, the agent hydrates + acks via `kubimo.aqora.io/claim-state`, and Service/Ingress are withheld until the ack. Edit/Run + Uv only (CEL-enforced). See `examples/pool.yaml`; only create Pools after the agent DaemonSet and marimo image with pool support are rolled (skew wedges warm pods or skips post-claim dependency sync).
 - **CacheJob** (`bmocj`) — a Job that pre-populates uv/marimo caches for a workspace.
 - **WorkspaceDirectory** (`bmowd`) — directory listing + file metadata. Written by the **indexer**, not the controller (the controller only attaches owner references).
 
@@ -74,7 +75,7 @@ All defined with `#[derive(CustomResource, JsonSchema, ...)]` + `#[kube(...)]`, 
 
 ### Controller (`controller/src/`)
 
-`main.rs` spawns five controller loops with graceful shutdown: `workspace`, `workspace_directory`, `runner`, `runner_status`, `cache_job` (under `controllers/`).
+`main.rs` spawns seven controller loops with graceful shutdown: `workspace`, `workspace_directory`, `runner`, `runner_status`, `cache_job`, `budget`, `pool` (under `controllers/`).
 
 - Reconcilers implement the `Reconciler` trait (`apply`/`cleanup`, `reconciler.rs`) and are wrapped via `ReconcilerExt` in a Tower stack: tracing → backoff → finalizer (`service.rs`). All cleanup goes through finalizers.
 - Each resource's reconcile logic is split into `apply_*.rs` files (e.g. `controllers/runner/apply_pod.rs`); steps for a resource run concurrently with `join_all`.

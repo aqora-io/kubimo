@@ -1,2 +1,4 @@
 self.spec.workspace == oldSelf.spec.workspace &&
-self.spec.command == oldSelf.spec.command
+self.spec.command == oldSelf.spec.command &&
+(has(self.spec.pool) == has(oldSelf.spec.pool)) &&
+(!has(self.spec.pool) || self.spec.pool == oldSelf.spec.pool)

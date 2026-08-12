@@ -47,6 +47,7 @@ pub struct StaleMountSweep {
 pub async fn run(
     store: SlotStore,
     clients: NamespacedClients,
+    node_name: String,
     idle_ttl: Duration,
     stale_mounts: Option<StaleMountSweep>,
 ) {
@@ -58,18 +59,62 @@ pub async fn run(
             tracing::warn!(%err, "dead-mount sweep failed");
         }
         tokio::time::sleep(SWEEP_INTERVAL).await;
-        match sweep(&store, &clients, idle_ttl).await {
+        match sweep(&store, &clients, &node_name, idle_ttl).await {
             Ok(0) => {}
             Ok(reclaimed) => tracing::info!(reclaimed, "reclaimed slots"),
             Err(err) => tracing::warn!(%err, "slot sweep failed"),
         }
+        if let Err(err) = sweep_orphaned_pool_slots(&store, &clients).await {
+            tracing::warn!(%err, "pool slot sweep failed");
+        }
     }
+}
+
+/// Discard anonymous slots whose pod no longer exists.
+///
+/// The ordinary teardown discards them at `NodeUnpublishVolume`; this covers
+/// the pod that never got one — force-deleted, or lost to a kubelet crash.
+/// Deliberately biased towards keeping, like the main sweep: an API error, or
+/// a pod that still exists in any state, keeps the slot.
+async fn sweep_orphaned_pool_slots(
+    store: &SlotStore,
+    clients: &NamespacedClients,
+) -> Result<(), crate::store::StoreError> {
+    use kubimo::k8s_openapi::api::core::v1::Pod;
+    for (namespace, pod) in store.pool_pods()? {
+        let Some(client) = clients.get(&namespace).await else {
+            continue;
+        };
+        match client.api_namespaced::<Pod>(&namespace).get_opt(&pod).await {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(%err, pod, "could not check the pool pod; keeping its slot");
+                continue;
+            }
+        }
+        let lock = store.lock_for_pool(&namespace, &pod);
+        let _guard = lock.lock().await;
+        // Re-check under the lock: a claim could have adopted the slot (the
+        // link is then gone), and kubelet could have discarded it.
+        match store.lookup_pool(&namespace, &pod) {
+            Ok(Some(_)) => match store.remove_pool_slot(&namespace, &pod) {
+                Ok(true) => tracing::info!(pod, "discarded an orphaned pool slot"),
+                Ok(false) => {}
+                Err(err) => tracing::warn!(%err, pod, "could not discard the orphaned pool slot"),
+            },
+            Ok(None) => {}
+            Err(err) => tracing::warn!(%err, pod, "could not re-check the pool slot"),
+        }
+    }
+    Ok(())
 }
 
 /// One pass. Returns how many slots were reclaimed.
 async fn sweep(
     store: &SlotStore,
     clients: &NamespacedClients,
+    node_name: &str,
     idle_ttl: Duration,
 ) -> Result<usize, crate::store::StoreError> {
     let workspaces = store.workspaces()?;
@@ -79,8 +124,10 @@ async fn sweep(
     let published = store.published_workspaces()?;
     let mut reclaimed = 0;
     for (namespace, workspace) in workspaces {
-        let Some(why) =
-            should_reclaim(store, clients, &namespace, &workspace, &published, idle_ttl).await
+        let Some(why) = should_reclaim(
+            store, clients, node_name, &namespace, &workspace, &published, idle_ttl,
+        )
+        .await
         else {
             continue;
         };
@@ -103,11 +150,16 @@ async fn sweep(
         // lock. In that window a final flush may have completed — `mark_flushed`
         // refreshes the marker at flush end — or failed — `clear_flushed` drops
         // it at flush start — so re-read it now the lock is ours and only reclaim
-        // a slot still idle past the TTL. `Reclaim::Deleted` needs no such
-        // re-check: the workspace is gone and no flush is coming.
-        if why == Reclaim::Idle {
+        // a slot still idle past the TTL (or, for a superseded slot, still
+        // flushed at all). `Reclaim::Deleted` needs no such re-check: the
+        // workspace is gone and no flush is coming.
+        if why != Reclaim::Deleted {
             match store.flushed_ago(&namespace, &workspace) {
-                Ok(flushed_ago) if idle_expired(flushed_ago, idle_ttl) => {}
+                Ok(flushed_ago)
+                    if match why {
+                        Reclaim::Idle => idle_expired(flushed_ago, idle_ttl),
+                        _ => flushed_ago.is_some(),
+                    } => {}
                 Ok(_) => continue,
                 Err(err) => {
                     tracing::warn!(%err, workspace, "could not re-read the flush marker; keeping the slot");
@@ -127,6 +179,10 @@ async fn sweep(
                         "reclaimed idle slot; its contents are in S3 and it will re-hydrate on \
                          next use"
                     ),
+                    Reclaim::Superseded => tracing::info!(
+                        workspace,
+                        "reclaimed a slot superseded on another node; its contents are in S3"
+                    ),
                 }
             }
             Ok(false) => {}
@@ -144,6 +200,11 @@ enum Reclaim {
     /// The workspace is alive but has not used this slot in a long time, and
     /// everything in it is already in S3.
     Idle,
+    /// The workspace's current slot lives on another node — a pool claim
+    /// landed elsewhere, or free scheduling moved it — and this flushed copy
+    /// would serve stale data if a pod ever came back here. No TTL wait: the
+    /// copy is already superseded.
+    Superseded,
 }
 
 /// Whether `workspace`'s slot can be dropped, and why.
@@ -155,6 +216,7 @@ enum Reclaim {
 async fn should_reclaim(
     store: &SlotStore,
     clients: &NamespacedClients,
+    node_name: &str,
     namespace: &str,
     workspace: &str,
     published: &HashSet<(String, String)>,
@@ -164,24 +226,35 @@ async fn should_reclaim(
         return None;
     }
     let client = clients.get(namespace).await?;
-    let alive = match client.api::<kubimo::Workspace>().get_opt(workspace).await {
-        Ok(None) => false,
-        Ok(Some(_)) => true,
+    let found = match client.api::<kubimo::Workspace>().get_opt(workspace).await {
+        Ok(found) => found,
         Err(err) => {
             tracing::warn!(%err, workspace, "could not check workspace; keeping its slot");
             return None;
         }
     };
-    if !alive {
+    let Some(found) = found else {
         return Some(Reclaim::Deleted);
-    }
+    };
     // The workspace still exists, but this node's slot may be a leftover: a
     // workspace that goes idle and is then reopened can be scheduled onto a
-    // different node, and nothing else ever collects the copy it left behind.
-    // Treating an idle slot as a cache is what pooled mode already assumes —
-    // S3 is the source of truth, and a dropped slot costs one re-hydrate.
+    // different node — routinely so, now that pool claims land wherever their
+    // warm pod happens to be — and nothing else ever collects the copy it
+    // left behind. Treating an idle slot as a cache is what pooled mode
+    // already assumes: S3 is the source of truth, and a dropped slot costs
+    // one re-hydrate.
     //
+    // `status.slot` is last-writer-wins, stamped by whichever node most
+    // recently served the workspace; another node's name there means this
+    // copy is superseded and goes without waiting out the TTL.
+    let superseded = found
+        .status
+        .as_ref()
+        .and_then(|status| status.slot.as_ref())
+        .and_then(|slot| slot.node.as_deref())
+        .is_some_and(|node| node != node_name);
     match store.flushed_ago(namespace, workspace) {
+        Ok(flushed_ago) if superseded && flushed_ago.is_some() => Some(Reclaim::Superseded),
         Ok(flushed_ago) => idle_expired(flushed_ago, idle_ttl).then_some(Reclaim::Idle),
         Err(err) => {
             tracing::warn!(%err, workspace, "could not read flush marker; keeping the slot");

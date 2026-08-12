@@ -170,6 +170,50 @@ fn slot_attributes(
     attributes
 }
 
+/// The volume name warm pods mount at `/home/me`.
+///
+/// A workspace pod names its volume after the workspace; a warm pod has none
+/// yet, and the name is immutable, so it gets a fixed one. Pool sidecar
+/// templates may reference it.
+pub(crate) const WARM_SLOT_VOLUME_NAME: &str = "slot";
+
+/// An anonymous, template-seeded slot for a warm pool pod: no workspace, no
+/// archive, nothing to hydrate or flush. The agent links it to a workspace at
+/// claim time, which is also when it learns the archive location — so the only
+/// attributes here are the ones needed to *provision*: the runtime picking the
+/// venv template and the interim quota.
+pub(crate) fn warm_slot_volume(
+    limit_bytes: Option<u64>,
+    python_runtime: WorkspacePythonRuntime,
+    credentials_secret: Option<String>,
+) -> Volume {
+    let mut attributes = BTreeMap::from([
+        (
+            kubimo::pool::POOLED_VOLUME_ATTRIBUTE.to_string(),
+            "true".to_string(),
+        ),
+        ("python_runtime".to_string(), python_runtime.to_string()),
+    ]);
+    if let Some(limit) = limit_bytes {
+        attributes.insert("limitBytes".to_string(), limit.to_string());
+    }
+    Volume {
+        name: WARM_SLOT_VOLUME_NAME.to_string(),
+        csi: Some(CSIVolumeSource {
+            driver: SLOT_CSI_DRIVER.to_string(),
+            read_only: Some(false),
+            // The pool's S3 secret, delivered to the agent now because kubelet
+            // only hands secrets over at NodePublishVolume — the claim, which
+            // is when they are first needed, carries none. Same rule as the
+            // workspace volume: never in the attributes.
+            node_publish_secret_ref: credentials_secret.map(|name| LocalObjectReference { name }),
+            volume_attributes: Some(attributes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// `fsGroup` is only safe on a volume the workspace owns outright.
 ///
 /// On the shared node volume kubelet would recursively chown the **entire**
@@ -352,6 +396,45 @@ mod tests {
         assert!(!attrs.contains_key("limitBytes"));
         assert!(!attrs.contains_key("seedBucket"));
         assert!(!attrs.contains_key("seedSecrets"));
+    }
+
+    /// A warm slot names no workspace and no archive — the mirror image of
+    /// `pooled_mode_passes_the_slot_sources_through`. An agent seeing both
+    /// `pooled` and a workspace would be looking at a controller bug and must
+    /// refuse, so the builder can never produce that combination.
+    #[test]
+    fn warm_slot_is_anonymous() {
+        let volume = warm_slot_volume(
+            Some(2_147_483_648),
+            WorkspacePythonRuntime::Uv,
+            Some("s3-credentials".into()),
+        );
+        assert_eq!(volume.name, WARM_SLOT_VOLUME_NAME);
+        let csi = volume.csi.unwrap();
+        assert_eq!(csi.driver, SLOT_CSI_DRIVER);
+        assert_eq!(csi.read_only, Some(false));
+        let attrs = csi.volume_attributes.unwrap();
+        assert_eq!(attrs.get("pooled").unwrap(), "true");
+        assert_eq!(attrs.get("python_runtime").unwrap(), "Uv");
+        assert_eq!(attrs.get("limitBytes").unwrap(), "2147483648");
+        assert!(!attrs.contains_key("workspace"));
+        assert!(!attrs.contains_key("bucket"));
+        assert!(!attrs.contains_key("keyPrefix"));
+        assert!(!attrs.contains_key("seedBucket"));
+        assert!(!attrs.contains_key("seedSecrets"));
+    }
+
+    /// Same rule as the workspace volume: credentials only ever travel via the
+    /// secret ref, never in attributes readable off the Pod object.
+    #[test]
+    fn warm_slot_credentials_only_in_the_secret_ref() {
+        let volume = warm_slot_volume(None, Default::default(), Some("s3-credentials".into()));
+        let csi = volume.csi.unwrap();
+        assert_eq!(csi.node_publish_secret_ref.unwrap().name, "s3-credentials");
+        for (key, value) in csi.volume_attributes.unwrap().iter() {
+            assert!(!key.to_lowercase().contains("secret"), "{key}");
+            assert_ne!(value, "s3-credentials", "{key} leaked the secret name");
+        }
     }
 
     /// Kubelet applies `fsGroup` to the whole volume, which on a shared node
