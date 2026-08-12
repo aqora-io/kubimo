@@ -12,7 +12,7 @@ variable "SCCACHE_REGION" {
 
 variable "MARIMO_GIT" {
   # feat-ssr branch of our fork
-  default = "https://github.com/aqora-io/marimo.git#8226c885c04dac166e667cefb2b1dd878c8a1a5e"
+  default = "https://github.com/aqora-io/marimo.git#f7241ca132630fea1b61a1260d4320d507c0648c"
 }
 
 group "default" {
@@ -77,5 +77,5 @@ target "marimo" {
 
 target "conda-marimo" {
   inherits = ["marimo", "docker-metadata-conda-marimo"]
-  target = "micromamba"
+  target = "pixi"
 }
