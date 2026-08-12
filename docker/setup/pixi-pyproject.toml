@@ -1,0 +1,6 @@
+[tool.marimo.venv]
+path = "/home/me/.cache/rattler/cache/envs/workspace-5509610833061971390/envs/default"
+writable = false
+
+[tool.marimo.package_management]
+manager = "pixi"

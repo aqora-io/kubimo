@@ -35,3 +35,6 @@ path = "/home/me/venv"
 # package installs: `uv add` and the Install-packages banner write here either
 # way.
 writable = false
+
+[tool.marimo.package_management]
+manager = "uv"

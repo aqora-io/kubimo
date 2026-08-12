@@ -101,8 +101,8 @@ uv_sync_workspace() {
   /usr/local/bin/uv sync --no-install-package marimo
 }
 
-mamba_update_workspace() {
-  /usr/local/bin/conda-helper.py sync -x --verbose
+pixi_install_workspace() {
+  /usr/local/bin/pixi install
 }
 
 is_marimo_venv_configured() {
@@ -134,8 +134,9 @@ if [[ "$CMD" == "edit" ]]; then
   # get for genuinely missing packages.
   if [[ -n "$UV_PROJECT" ]]; then
     uv_sync_workspace &
-  elif [[ -n "$CONDA_PREFIX" ]]; then
-    mamba_update_workspace
+  elif [[ -x /usr/local/bin/pixi ]]; then
+    pixi_install_workspace
+    export SHELL=/usr/local/bin/pixi-shell
   fi
   ensure_marimo_venv_config
   export MARIMO_IN_SECURE_ENVIRONMENT=true
@@ -156,8 +157,8 @@ elif [[ "$CMD" == "run" ]]; then
   # Same reasoning as `edit` above.
   if [[ -n "$UV_PROJECT" ]]; then
     uv_sync_workspace &
-  elif [[ -n "$CONDA_PREFIX" ]]; then
-    mamba_update_workspace
+  elif [[ -x /usr/local/bin/pixi ]]; then
+    pixi_install_workspace
   fi
   ensure_marimo_venv_config
   export MARIMO_IN_SECURE_ENVIRONMENT=true
@@ -195,8 +196,8 @@ elif [[ "$CMD" == "render" ]]; then
 elif [[ "$CMD" == "cache" ]]; then
   if [[ -n "$UV_PROJECT" ]]; then
     uv_sync_workspace
-  elif [[ -n "$CONDA_PREFIX" ]]; then
-    mamba_update_workspace
+  elif [[ -x /usr/local/bin/pixi ]]; then
+    pixi_install_workspace
     export VIRTUAL_ENV="$CONDA_PREFIX"
   fi
   exec "$VIRTUAL_ENV/bin/python3" /app/cache.py \

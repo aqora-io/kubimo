@@ -172,37 +172,32 @@ EOF
 
 CMD ["uv", "run", "python"]
 
-# download micromamba
-FROM scratch AS micromamba-arm64
-ARG MICROMAMBA_VERSION=2.8.1-1
-ARG MICROMAMBA_CHKSUM=sha256:49aa29008cafa6cd6027ebd643fc43ca32c20740e60b0a05378c4e5bb837c217
-ADD --checksum=${MICROMAMBA_CHKSUM} --chmod=u=rwx,go=rx https://github.com/mamba-org/micromamba-releases/releases/download/${MICROMAMBA_VERSION}/micromamba-linux-aarch64 /mnt/micromamba
+# download pixi
+FROM scratch AS pixi-arm64
+ARG PIXI_VERSION=v0.76.2
+ARG PIXI_CHKSUM=sha256:985d85dd73a9a3b83d262eb3b6e6990c26c60c56b87dda1ee2fe5538e087c8b6
+ADD --checksum=${PIXI_CHKSUM} --chmod=u=rwx,go=rx https://github.com/prefix-dev/pixi/releases/download/${PIXI_VERSION}/pixi-aarch64-unknown-linux-musl /mnt/pixi
 
-FROM scratch AS micromamba-amd64
-ARG MICROMAMBA_VERSION=2.8.1-1
-ARG MICROMAMBA_CHKSUM=sha256:77b7790ec97f64581118f103585b175df4306f95829b0fa6bfe4a19cc88a1182
-ADD --checksum=${MICROMAMBA_CHKSUM} --chmod=u=rwx,go=rx https://github.com/mamba-org/micromamba-releases/releases/download/${MICROMAMBA_VERSION}/micromamba-linux-64 /mnt/micromamba
+FROM scratch AS pixi-amd64
+ARG PIXI_VERSION=v0.76.2
+ARG PIXI_CHKSUM=sha256:831459a67316712f0e8b81477fb92456eb05830c54e7de80c0c4a918c49f435a
+ADD --checksum=${PIXI_CHKSUM} --chmod=u=rwx,go=rx https://github.com/prefix-dev/pixi/releases/download/${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl /mnt/pixi
 
-FROM micromamba-${TARGETARCH} AS micromamba-installer
+FROM pixi-${TARGETARCH} AS pixi-release
 
-FROM base AS micromamba
+FROM base AS pixi
 
-COPY --from=micromamba-installer /mnt/micromamba /usr/local/bin/micromamba
-ENV MAMBA_ROOT_PREFIX="/home/${USER}/.local/share/micromamba"
-ENV MAMBA_EXE="/usr/local/bin/micromamba"
+COPY --from=pixi-release /mnt/pixi /usr/local/bin/pixi
+ENV PIXI_HOME="/home/${USER}/.local/share/pixi"
+RUN pixi config set detached-environments true
+
 RUN <<EOF
-mkdir -p /home/${USER}/.local/share/micromamba /home/${USER}/.local/bin
-ln -s /usr/local/bin/micromamba /home/${USER}/.local/bin/mamba
-ln -s /usr/local/bin/micromamba /home/${USER}/.local/bin/conda
+pixi init --format pixi
+pixi add "$(/usr/local/bin/python3 -V)"
+pixi add --pypi "marimo == $(/usr/local/bin/marimo --version)"
 EOF
-ENV PATH="/home/${USER}/.local/bin:${PATH}"
+ENV VIRTUAL_ENV="/home/me/.cache/rattler/cache/envs/workspace-5509610833061971390/envs/default"
+COPY --chown=${USER} docker/setup/pixi-pyproject.toml pyproject.toml
+COPY --chown=root --chmod=u=rwx,go=rx docker/setup/pixi-shell /usr/local/bin/pixi-shell
 
-COPY --chown=${USER} docker/setup/conda-environment.yaml environment.yaml
-COPY --chown=root --chmod=u+rwx,go=rx docker/setup/conda-helper.py /usr/local/bin/conda-helper.py
-ENV CONDA_PREFIX="/home/${USER}/venv"
-ENV CONDA_DEFAULT_ENV="/home/${USER}/venv"
-RUN conda-helper.py sync --verbose
-ENV PATH="/home/${USER}/venv/bin:${PATH}"
-COPY --chown=${USER} docker/setup/conda-pyproject.toml pyproject.toml
-
-CMD python3
+CMD ["pixi", "shell"]
