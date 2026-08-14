@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.2.8 - 2026-08-14
+#### Features
+- (**conda-marimo**) use pixi instead of conda-helper - (f0d043b) - Antoine Chauvin
+
+- - -
+
 ## v0.2.6 - 2026-08-12
 #### Features
 - (**agent**) allow agent to seed from tmeplate based on specified python runtime - (1a43215) - Antoine Chauvin
