@@ -65,6 +65,14 @@ if [ -n "$BASE_URL" ]; then
   marimo_flags+=("--base-url=$BASE_URL")
 fi
 
+# Shared static-asset origin: rewrites the served HTML's ./assets/ references
+# to a runner-independent URL so browsers cache marimo's frontend across
+# runners and warm-pod claims. An env var, never a flag, for the same reason
+# as the claim marker below.
+if [ -n "$KUBIMO_ASSET_URL" ]; then
+  marimo_flags+=("--asset-url=$KUBIMO_ASSET_URL")
+fi
+
 TOKEN="${TOKEN:-$MARIMO_TOKEN}"
 if [ -z "$TOKEN" ]; then
   marimo_flags+=("--no-token")
