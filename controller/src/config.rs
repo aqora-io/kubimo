@@ -140,6 +140,14 @@ pub struct Config {
     pub cluster_issuer: Option<String>,
     #[serde(default = "default_runner_proxy_timeout_secs")]
     pub runner_proxy_timeout_secs: u32,
+    /// Base path of the shared static-asset origin (the chart's
+    /// `staticAssets`), e.g. `/marimo-assets`. When set, every runner pod gets
+    /// `KUBIMO_ASSET_URL={base}/{image tag}` and marimo serves its frontend
+    /// from there instead of the runner's own (per-claim, cache-busting) path
+    /// prefix. Unset, nothing changes. Only enable once the path is routed to
+    /// the static-assets Service in every environment fronting the runners.
+    #[serde(default)]
+    pub runner_asset_base_path: Option<String>,
     #[serde(default)]
     pub runner_status: StatusCheck,
     #[cfg(feature = "metrics")]
@@ -173,6 +181,31 @@ impl Config {
             WorkspacePythonRuntime::Uv => &self.marimo_image,
             WorkspacePythonRuntime::Conda => &self.marimo_conda_image,
         }
+    }
+
+    /// The shared asset URL for pods of `image`, when
+    /// `runner_asset_base_path` is set: `{base}/{tag}`. The image tag is the
+    /// cache key — all pods of one image serve byte-identical assets, and the
+    /// static-assets server publishes them under the same tag (the chart
+    /// derives it with the same text-after-last-colon rule; keep the two in
+    /// agreement).
+    pub fn runner_asset_url(&self, image: &str) -> Option<String> {
+        let base = self
+            .runner_asset_base_path
+            .as_deref()?
+            .trim_end_matches('/');
+        Some(format!("{base}/{tag}", tag = image_tag(image)))
+    }
+}
+
+/// The tag of an image reference: text after the last `:`, ignoring any
+/// `@sha256:...` digest. An untagged reference gets `latest`, matching what
+/// the container runtime pulls.
+fn image_tag(image: &str) -> &str {
+    let image = image.split('@').next().unwrap_or(image);
+    match image.rsplit_once(':') {
+        Some((_, tag)) if !tag.contains('/') => tag,
+        _ => "latest",
     }
 }
 
@@ -222,5 +255,43 @@ mod tests {
     #[test]
     fn default_workspace_mode_rejects_unknown_value() {
         assert!(load_from(&[("KUBIMO__DEFAULT_WORKSPACE_MODE", "Nonsense")]).is_err());
+    }
+
+    /// Unset means off: no asset URL is minted and pods stay unchanged.
+    #[test]
+    fn runner_asset_url_is_off_by_default() {
+        let config = load_from(&[]).unwrap();
+        assert_eq!(config.runner_asset_base_path, None);
+        assert_eq!(
+            config.runner_asset_url("ghcr.io/aqora-io/kubimo-marimo:src-abc"),
+            None
+        );
+    }
+
+    /// The URL is `{base}/{image tag}` — the tag is the cache key the chart's
+    /// static-assets server publishes under, so the derivation here must match
+    /// the chart's text-after-last-colon rule.
+    #[test]
+    fn runner_asset_url_joins_base_and_image_tag() {
+        let config = load_from(&[("KUBIMO__RUNNER_ASSET_BASE_PATH", "/marimo-assets/")]).unwrap();
+        assert_eq!(
+            config
+                .runner_asset_url("ghcr.io/aqora-io/kubimo-marimo:src-abc123")
+                .as_deref(),
+            Some("/marimo-assets/src-abc123")
+        );
+        assert_eq!(
+            config
+                .runner_asset_url("ghcr.io/aqora-io/kubimo-marimo:0.2.9@sha256:deadbeef")
+                .as_deref(),
+            Some("/marimo-assets/0.2.9")
+        );
+        assert_eq!(
+            config
+                .runner_asset_url("localhost:5000/kubimo-marimo")
+                .as_deref(),
+            Some("/marimo-assets/latest"),
+            "a registry port is not a tag"
+        );
     }
 }

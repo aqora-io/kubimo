@@ -70,8 +70,9 @@ pub(crate) fn claim_secret(pod: &Pod) -> kubimo::Result<Secret> {
 /// name/token/base-url (random per pod) and `replicas` (a sizing knob, not a
 /// shape).
 pub(crate) fn template_hash(config: &Config, pool: &Pool) -> String {
-    let fingerprint = serde_json::json!({
-        "image": config.marimo_image(pool.spec.python_runtime.unwrap_or_default()),
+    let image = config.marimo_image(pool.spec.python_runtime.unwrap_or_default());
+    let mut fingerprint = serde_json::json!({
+        "image": image,
         "command": pool.spec.command,
         "pythonRuntime": pool.spec.python_runtime.unwrap_or_default(),
         "logLevel": pool.spec.log_level,
@@ -83,6 +84,12 @@ pub(crate) fn template_hash(config: &Config, pool: &Pool) -> String {
         "storage": pool.spec.storage,
         "origin": config.runner_hosts.first(),
     });
+    // Inserted only when configured: flipping the asset origin on (or off)
+    // must retire warm pods so they re-mint with the right KUBIMO_ASSET_URL,
+    // but a controller upgrade with the feature off must not churn the fleet.
+    if let Some(asset_url) = config.runner_asset_url(image) {
+        fingerprint["assetUrl"] = asset_url.into();
+    }
     // serde_json maps are sorted, so the serialization is canonical.
     hex(Sha256::digest(fingerprint.to_string()))
 }
@@ -94,6 +101,7 @@ pub(crate) fn build_warm_pod(
 ) -> kubimo::Result<Pod> {
     let pool_name = pool.name()?;
     let python_runtime = pool.spec.python_runtime.unwrap_or_default();
+    let image = config.marimo_image(python_runtime).to_string();
     let mut env = pool.spec.env.clone().unwrap_or_default();
     env.push(EnvVar {
         name: CLAIM_MARKER_ENV.to_string(),
@@ -121,7 +129,8 @@ pub(crate) fn build_warm_pod(
             ),
         ])),
         owner_reference: pool.static_controller_owner_ref()?,
-        image: config.marimo_image(python_runtime).to_string(),
+        asset_url: config.runner_asset_url(&image),
+        image,
         base_url: identity.base_url.clone(),
         token: TokenSource::Value(&identity.token),
         log_level: pool.spec.log_level,
@@ -272,6 +281,39 @@ mod tests {
             template_hash(&config, &base),
             template_hash(&config, &command)
         );
+    }
+
+    /// The shared asset origin is baked into a warm pod at boot as an env var
+    /// (never a flag — an older image must ignore it, not crash), so flipping
+    /// it must change the template hash and retire the fleet, while an
+    /// upgrade with the feature off must leave both pod and hash untouched.
+    #[test]
+    fn asset_url_is_baked_into_env_and_template_hash_only_when_configured() {
+        let asset_env = |pod: &Pod| {
+            pod.spec.as_ref().unwrap().containers[0]
+                .env
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|var| var.name == "KUBIMO_ASSET_URL")
+                .and_then(|var| var.value.clone())
+        };
+
+        let off = config();
+        let (pod, _) = warm_pod(PoolSpec::default());
+        assert_eq!(asset_env(&pod), None);
+
+        let mut on = config();
+        on.runner_asset_base_path = Some("/marimo-assets".into());
+        let pod =
+            build_warm_pod(&on, &pool(PoolSpec::default()), &mint_identity("editors")).unwrap();
+        assert_eq!(
+            asset_env(&pod),
+            on.runner_asset_url(on.marimo_image(Default::default())),
+        );
+
+        let base = pool(PoolSpec::default());
+        assert_ne!(template_hash(&off, &base), template_hash(&on, &base));
     }
 
     /// Sidecars read claim-time config from the per-pod Secret volume; the

@@ -48,6 +48,27 @@ marimo:
 #   # nothing. Requires the node agent to be running before it is set to Pooled.
 #   defaultWorkspaceMode: Dedicated
 
+# Shared static-asset origin for marimo's frontend. Runners serve their UI
+# under a per-runner (per-claim, for pooled runners) path prefix, so browsers
+# re-download every JS/CSS file for each new session. Enabling this deploys a
+# small nginx serving the marimo images' `_static` under `{basePath}/{image
+# tag}` with long-lived immutable cache headers, and makes the controller
+# point every runner's marimo at it (`--asset-url` via KUBIMO_ASSET_URL), so
+# assets are fetched — and cached — from one stable, runner-independent URL.
+#
+# Off by default. Before enabling, route `basePath` to this chart's
+# static-assets Service in everything that fronts the runners (the platform
+# reverse proxy in production, traefik in local dev), or notebook UIs will
+# 404 on their assets.
+staticAssets:
+  enabled: false
+  # Plain path prefix (no regex metacharacters); also what the controller
+  # receives as KUBIMO__RUNNER_ASSET_BASE_PATH.
+  basePath: /marimo-assets
+  image: nginx:1.27-alpine
+  replicas: 1
+  resources: {}
+
 crds:
   enabled: true
 

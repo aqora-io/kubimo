@@ -1,0 +1,225 @@
+{{/*
+Shared static-asset origin for marimo's frontend.
+
+Runners serve their UI under a per-runner path prefix — per-claim for pooled
+runners — so the browser cache key for every JS/CSS file changes with each
+session even though the files are byte-identical across all pods of one image.
+This nginx serves each marimo image's `_static` under `{basePath}/{image tag}`
+with long-lived immutable cache headers; the controller points every runner's
+marimo at it via KUBIMO__RUNNER_ASSET_BASE_PATH → KUBIMO_ASSET_URL →
+`--asset-url` (see templates/deployment.yaml and controller/src/config.rs).
+
+The tag is derived as text-after-last-colon, the same rule
+Config::runner_asset_url uses — both sides read the images rendered by
+kubimo-controller.marimoImage/.marimoCondaImage, so they cannot drift apart.
+*/}}
+{{- if .Values.staticAssets.enabled }}
+{{- $fullname := printf "%s-static-assets" (include "kubimo-controller.fullname" .) }}
+{{- $basePath := .Values.staticAssets.basePath | default "/marimo-assets" }}
+{{- $marimoImage := include "kubimo-controller.marimoImage" . }}
+{{- $condaImage := include "kubimo-controller.marimoCondaImage" . }}
+{{- $marimoTag := $marimoImage | splitList ":" | last }}
+{{- $condaTag := $condaImage | splitList ":" | last }}
+{{- $controller := .Values.controller | default dict }}
+{{- $ingressClassName := $controller.ingressClassName | default "nginx" }}
+{{- $hosts := list }}
+{{- if $controller.runnerHosts }}
+{{- if kindIs "string" $controller.runnerHosts }}
+{{- $hosts = splitList "," $controller.runnerHosts }}
+{{- else }}
+{{- $hosts = $controller.runnerHosts }}
+{{- end }}
+{{/* Sorted and deduped like apply_ingress.rs's BTreeSet, so the derived TLS
+     secret name matches the runner Ingresses'. */}}
+{{- $hosts = $hosts | sortAlpha | uniq }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "kubimo-controller.labels" . | nindent 4 }}
+    app.kubernetes.io/component: static-assets
+data:
+  default.conf: |
+    server {
+        listen 8080;
+
+        # marimo's uvicorn serves these uncompressed; here they can be gzipped.
+        gzip on;
+        gzip_types application/javascript text/javascript text/css image/svg+xml application/json application/wasm;
+        gzip_min_length 1024;
+        gzip_vary on;
+
+        location = /healthz {
+            return 200 'ok';
+        }
+
+        # Vite build outputs under assets/ are content-hashed, so within a tag
+        # they are immutable. `always` so 304 revalidations carry the header too.
+        location ~ ^{{ $basePath }}/(?<tagged>[^/]+/assets/.+)$ {
+            alias /data/$tagged;
+            add_header Cache-Control "public, max-age=31536000, immutable" always;
+        }
+
+        # The rest of _static (favicon, manifest, icons) is not content-hashed.
+        location {{ $basePath }}/ {
+            alias /data/;
+            add_header Cache-Control "public, max-age=3600" always;
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "kubimo-controller.labels" . | nindent 4 }}
+    app.kubernetes.io/component: static-assets
+spec:
+  replicas: {{ .Values.staticAssets.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "kubimo-controller.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: static-assets
+  template:
+    metadata:
+      labels:
+        {{- include "kubimo-controller.labels" . | nindent 8 }}
+        app.kubernetes.io/component: static-assets
+      annotations:
+        # Roll the pod when the served content or config would change.
+        checksum/config: {{ printf "%s|%s|%s" $marimoImage $condaImage $basePath | sha256sum }}
+    spec:
+      initContainers:
+        # Copy `_static` out of the marimo image(s) into the shared emptyDir,
+        # keyed by tag. Resolved through the interpreter rather than a
+        # hard-coded site-packages path so the uv and pixi layouts both work.
+        - name: copy-assets
+          image: {{ $marimoImage | quote }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/python3
+            - -c
+            - "import marimo, pathlib, shutil; shutil.copytree(pathlib.Path(marimo.__file__).parent / '_static', '/data/{{ $marimoTag }}', dirs_exist_ok=True)"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        {{- if ne $marimoTag $condaTag }}
+        - name: copy-assets-conda
+          image: {{ $condaImage | quote }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/python3
+            - -c
+            - "import marimo, pathlib, shutil; shutil.copytree(pathlib.Path(marimo.__file__).parent / '_static', '/data/{{ $condaTag }}', dirs_exist_ok=True)"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        {{- end }}
+      containers:
+        - name: nginx
+          image: {{ .Values.staticAssets.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          {{- with .Values.staticAssets.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              readOnly: true
+            - name: config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: {{ $fullname }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "kubimo-controller.labels" . | nindent 4 }}
+    app.kubernetes.io/component: static-assets
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "kubimo-controller.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: static-assets
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "kubimo-controller.labels" . | nindent 4 }}
+    app.kubernetes.io/component: static-assets
+  annotations:
+    kubernetes.io/ingress.class: {{ $ingressClassName | quote }}
+    {{- if $controller.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ $controller.clusterIssuer | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $ingressClassName | quote }}
+  {{- if $hosts }}
+  tls:
+    - hosts:
+        {{- range $hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      # Same derivation as the runner Ingresses (apply_ingress.rs), so the
+      # certificate Secret is shared rather than issued a second time.
+      {{- $tlsName := "" }}
+      {{- range $hosts }}
+      {{- $tlsName = printf "%s%s-" $tlsName (regexReplaceAll "[^a-z0-9]" (lower .) "-" | trimPrefix "-") }}
+      {{- end }}
+      secretName: {{ printf "%stls" $tlsName | quote }}
+  rules:
+    {{- range $hosts }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: {{ $basePath }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}
+                port:
+                  name: http
+    {{- end }}
+  {{- else }}
+  rules:
+    - http:
+        paths:
+          - path: {{ $basePath }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}
+                port:
+                  name: http
+  {{- end }}
+{{- end }}
