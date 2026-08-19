@@ -116,6 +116,13 @@ spec:
               value: "0.0.0.0:{{ $.Values.metrics.port }}"
             - name: KUBIMO__METRICS__ENABLED
               value: {{ if $.Values.metrics.enabled }}"true"{{ else }}"false"{{ end }}
+            {{- if $.Values.staticAssets.enabled }}
+            # Points every runner's marimo at the shared static-asset origin
+            # (templates/static-assets.yaml). Tied to `staticAssets.enabled` so
+            # runners never reference a path nothing serves.
+            - name: KUBIMO__RUNNER_ASSET_BASE_PATH
+              value: {{ $.Values.staticAssets.basePath | default "/marimo-assets" | quote }}
+            {{- end }}
       {{- with .Values.volumes }}
       volumes:
         {{- toYaml . | nindent 8 }}

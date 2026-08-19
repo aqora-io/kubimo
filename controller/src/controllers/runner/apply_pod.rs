@@ -44,13 +44,15 @@ impl RunnerReconciler {
             }) => TokenSource::SecretEnv(secret_ref),
             _ => TokenSource::None,
         };
+        let image = ctx.config.marimo_image(python_runtime).to_string();
         let pod = build_runner_pod(RunnerPodParams {
             name: runner.name()?.to_string(),
             namespace: namespace.to_string(),
             labels: self.pod_labels(runner)?,
             annotations: None,
             owner_reference: runner.static_controller_owner_ref()?,
-            image: ctx.config.marimo_image(python_runtime).to_string(),
+            asset_url: ctx.config.runner_asset_url(&image),
+            image,
             base_url: ingress_path(runner)?,
             token,
             log_level: runner.spec.log_level,
@@ -96,7 +98,7 @@ impl RunnerReconciler {
                     .api_namespaced::<Pod>(namespace)
                     .get_opt(runner.name()?)
                     .await;
-                if matches!(&live, Ok(Some(live)) if runtime_class_drifted(live, &pod) || volumes_drifted(live, &pod))
+                if matches!(&live, Ok(Some(live)) if runtime_class_drifted(live, &pod) || volumes_drifted(live, &pod) || asset_env_drifted(live, &pod))
                 {
                     ctx.api_namespaced::<Pod>(namespace)
                         .delete_opt(runner.name()?)
@@ -140,6 +142,28 @@ fn volumes_drifted(live: &Pod, desired: &Pod) -> bool {
             .map(String::as_str)
     }
     volume_python_runtime(live) != volume_python_runtime(desired)
+}
+
+/// Whether the live pod's shared-asset env differs from the desired one. Env
+/// is immutable on a live pod, so flipping `runner_asset_base_path` (or
+/// moving the image tag while it is set) can only be honoured by replacement
+/// — without this, every pre-existing pod 422-loops forever after the flip.
+/// The env is baked into start.sh's marimo flags at boot, so an in-place
+/// container restart could not apply it either.
+fn asset_env_drifted(live: &Pod, desired: &Pod) -> bool {
+    fn asset_url(pod: &Pod) -> Option<&str> {
+        pod.spec
+            .as_ref()?
+            .containers
+            .first()?
+            .env
+            .as_ref()?
+            .iter()
+            .find(|var| var.name == crate::controllers::runner_pod::ASSET_URL_ENV)?
+            .value
+            .as_deref()
+    }
+    asset_url(live) != asset_url(desired)
 }
 
 pub(crate) fn runner_port(runner: &Runner) -> i32 {
@@ -211,6 +235,51 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    /// Env is immutable on a live pod, so enabling (or disabling) the shared
+    /// asset origin can only converge by replacement — while a pod that
+    /// already matches must never be a candidate, or any unrelated 422 would
+    /// take a working notebook down.
+    #[test]
+    fn only_asset_env_drift_marks_a_pod_for_replacement() {
+        use kubimo::k8s_openapi::api::core::v1::{Container, EnvVar};
+        fn pod_with_asset_env(value: Option<&str>) -> Pod {
+            Pod {
+                spec: Some(PodSpec {
+                    containers: vec![Container {
+                        env: value.map(|value| {
+                            vec![EnvVar {
+                                name: crate::controllers::runner_pod::ASSET_URL_ENV.into(),
+                                value: Some(value.to_string()),
+                                ..Default::default()
+                            }]
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+        let desired = pod_with_asset_env(Some("/marimo-assets/src-abc"));
+        assert!(asset_env_drifted(&pod_with_asset_env(None), &desired));
+        assert!(asset_env_drifted(
+            &pod_with_asset_env(Some("/marimo-assets/src-old")),
+            &desired
+        ));
+        assert!(!asset_env_drifted(
+            &pod_with_asset_env(Some("/marimo-assets/src-abc")),
+            &desired
+        ));
+        assert!(asset_env_drifted(
+            &pod_with_asset_env(Some("/marimo-assets/src-abc")),
+            &pod_with_asset_env(None),
+        ));
+        assert!(!asset_env_drifted(
+            &pod_with_asset_env(None),
+            &pod_with_asset_env(None)
+        ));
     }
 
     /// Only a pod whose live runtime class differs from the desired one is a

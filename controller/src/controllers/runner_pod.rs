@@ -24,6 +24,11 @@ use crate::command::cmd;
 use crate::controllers::slot_volume;
 use crate::resources::Resources;
 
+/// How the shared static-asset URL reaches start.sh. An env var, never a
+/// flag: an older image must start normally rather than crash on an unknown
+/// argument (same contract as the claim marker).
+pub(crate) const ASSET_URL_ENV: &str = "KUBIMO_ASSET_URL";
+
 /// How the marimo access token reaches start.sh.
 pub(crate) enum TokenSource<'a> {
     /// As a `--token` argument, from `spec.token.value` or a pool's minted
@@ -43,6 +48,10 @@ pub(crate) struct RunnerPodParams<'a> {
     pub owner_reference: OwnerReference,
     pub image: String,
     pub base_url: String,
+    /// The shared static-asset URL for this pod's image
+    /// (`Config::runner_asset_url`), reaching start.sh as `KUBIMO_ASSET_URL`.
+    /// `None` leaves marimo serving assets under its own base-url.
+    pub asset_url: Option<String>,
     pub token: TokenSource<'a>,
     pub log_level: Option<LogLevel>,
     pub port: i32,
@@ -76,6 +85,13 @@ pub(crate) fn build_runner_pod(params: RunnerPodParams<'_>) -> Pod {
         .to_string();
     let mut command = cmd!["bash", "/setup/start.sh", "--base-url", params.base_url];
     let mut env = params.env;
+    if let Some(asset_url) = params.asset_url {
+        env.push(EnvVar {
+            name: ASSET_URL_ENV.into(),
+            value: Some(asset_url),
+            ..Default::default()
+        });
+    }
     match params.token {
         TokenSource::Value(token) => command.extend(cmd!["--token", token]),
         TokenSource::SecretEnv(secret_ref) => env.push(EnvVar {
