@@ -172,8 +172,8 @@ impl RunnerReconciler {
     }
 
     /// Converge on a pod this runner has already claimed: heal `status.claim`,
-    /// keep the sidecar Secret filled until the agent acks, and turn a failed
-    /// claim back into a cold start.
+    /// keep the sidecar Secret filled, and turn a failed claim back into a
+    /// cold start.
     async fn adopt_claimed_pod(
         &self,
         ctx: &Context,
@@ -221,10 +221,37 @@ impl RunnerReconciler {
         if runner.status.as_ref().and_then(|s| s.claim.as_ref()) != Some(&claim) {
             self.record_claim(ctx, runner, Some(claim)).await?;
         }
-        if !acked {
-            self.copy_sidecar_secrets(ctx, runner, &pod).await?;
-        }
+        // Ack or no ack: the ack only means the slot is hydrated, not that
+        // the sidecar Secret was ever filled. Gated on `!acked`, a controller
+        // that crashed — or hit Secrets the platform had not created yet —
+        // before one copy succeeded would never copy them at all once the
+        // agent acked, and a sidecar reading the claim Secret would wait on
+        // it forever.
+        self.copy_sidecar_secrets(ctx, runner, &pod).await?;
         Ok(ClaimOutcome::Claimed { acked })
+    }
+
+    /// Drop a recorded claim whose pod is gone, returning whether one was
+    /// dropped. A cold start makes `spec` the routing truth again, and every
+    /// consumer — the platform, `effective_ingress_path`, the status loop —
+    /// prefers `status.claim` when present: left behind, a stale claim keeps
+    /// them all pointed at the dead pod's base-url/token forever, while the
+    /// cold pod serves the spec's.
+    pub(crate) async fn clear_stale_claim(
+        &self,
+        ctx: &Context,
+        runner: &Runner,
+    ) -> Result<bool, kubimo::Error> {
+        if runner
+            .status
+            .as_ref()
+            .and_then(|status| status.claim.as_ref())
+            .is_none()
+        {
+            return Ok(false);
+        }
+        self.record_claim(ctx, runner, None).await?;
+        Ok(true)
     }
 
     async fn record_claim(
