@@ -104,16 +104,20 @@ impl Reconciler for PoolReconciler {
 
         // A crash between pod- and Secret-create leaves a warm pod whose
         // sidecars wait on a mount that will never appear; recreate it.
-        // Create-if-absent only: once a claim has copied data into the Secret,
-        // re-applying the empty template under the same field manager would
-        // relinquish — i.e. delete — that data.
+        // A bare create, not get-then-apply: a claim may copy sidecar data
+        // into the Secret between the two steps, and re-applying the empty
+        // template under the same field manager would relinquish — i.e.
+        // delete — that data. POST is atomic: an existing Secret, whatever it
+        // holds by now, answers 409 and is left untouched.
         for pod in &kept {
-            if secrets
-                .get_opt(&warm_pod::claim_secret_name(pod.name()?))
-                .await?
-                .is_none()
+            match secrets
+                .kube()
+                .create(&Default::default(), &warm_pod::claim_secret(pod)?)
+                .await
             {
-                secrets.patch(&warm_pod::claim_secret(pod)?).await?;
+                Ok(_) => {}
+                Err(kubimo::kube::Error::Api(status)) if status.code == 409 => {}
+                Err(err) => return Err(err.into()),
             }
         }
 
@@ -219,7 +223,9 @@ pub fn controller(ctx: &Context) -> Controller<Pool> {
         // pod's controller ownerReference from the Pool to the Runner, so
         // ownership-based mapping would go blind at exactly the event this
         // pool most needs — "one of my warm pods was just taken".
-        .watches(pods, watcher::Config::default(), |pod| {
+        // Existence selector: only pool-labelled pods reach the mapper, so
+        // every other pod churn in the cluster stays off this watch.
+        .watches(pods, watcher::Config::default().labels(POOL_LABEL), |pod| {
             let namespace = pod.metadata.namespace.clone()?;
             let pool = pod.metadata.labels.as_ref()?.get(POOL_LABEL)?;
             Some(ObjectRef::new(pool).within(&namespace))

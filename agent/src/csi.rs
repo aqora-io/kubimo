@@ -362,7 +362,7 @@ impl KubimoNode {
         self.has_env_credentials.then(|| self.s3.clone())
     }
 
-    fn forget_credentials(&self, namespace: &str, workspace: &str) {
+    pub(crate) fn forget_credentials(&self, namespace: &str, workspace: &str) {
         self.lock_s3_clients()
             .remove(&Self::slot_key(namespace, workspace));
     }
@@ -624,12 +624,16 @@ impl KubimoNode {
     /// `lastSyncedAt` is deliberately not set here. It means "this content
     /// reached S3", which is only true after a flush, and claiming it at publish
     /// time would make an unflushed slot look durable.
+    /// `limit_bytes` is `None` when the caller does not know the quota
+    /// actually in effect — a claim without a workspace storage max keeps the
+    /// pool's interim quota — and reporting a made-up zero would be worse
+    /// than reporting nothing.
     pub(crate) async fn publish_slot_status(
         &self,
         workspace: &str,
         namespace: &str,
         slot: &crate::store::ResolvedSlot,
-        limit_bytes: u64,
+        limit_bytes: Option<u64>,
         archive: Option<&crate::hydrate::ArchiveLocation>,
     ) {
         // A manager of its own, not the indexer's. Server-side apply gives a
@@ -646,7 +650,7 @@ impl KubimoNode {
             slot: Some(kubimo::WorkspaceSlotStatus {
                 node: Some(self.node_id.clone()),
                 id: Some(slot.id.to_string()),
-                quota: Some(indexer::disk::storage_quantity(limit_bytes)),
+                quota: limit_bytes.map(indexer::disk::storage_quantity),
             }),
             archive: archive.map(|archive| kubimo::WorkspaceArchiveStatus {
                 key_prefix: archive.key_prefix.clone(),
@@ -741,18 +745,36 @@ impl KubimoNode {
         // for a fresh hydration; an unflushed one may hold the only copy of
         // the tenant's newest work and is always served as-is.
         if !resolved.created && self.slot_is_superseded(namespace, workspace).await {
-            tracing::info!(
-                workspace,
-                slot = %resolved.id,
-                "dropping a slot superseded on another node; re-hydrating from S3"
-            );
-            self.store
-                .remove_slot(namespace, workspace)
-                .map_err(|err| Status::internal(format!("dropping superseded slot: {err}")))?;
-            resolved = self
-                .store
-                .resolve_or_create(namespace, workspace)
-                .map_err(|err| Status::internal(format!("resolving slot: {err}")))?;
+            // Never out from under a live mount: a sibling volume published on
+            // this node is actively serving this copy however stale the status
+            // makes it look — a claim that raced onto another node does exactly
+            // this — and removing it would delete a mounted directory. An
+            // unreadable publish state counts as published: keeping a stale
+            // cache is recoverable, wiping a live slot is not.
+            let published = self.store.is_published(namespace, workspace).unwrap_or_else(|err| {
+                tracing::warn!(%err, workspace, "could not check the publish state; keeping the slot");
+                true
+            });
+            if published {
+                tracing::info!(
+                    workspace,
+                    slot = %resolved.id,
+                    "slot looks superseded but is published on this node; serving the live copy"
+                );
+            } else {
+                tracing::info!(
+                    workspace,
+                    slot = %resolved.id,
+                    "dropping a slot superseded on another node; re-hydrating from S3"
+                );
+                self.store
+                    .remove_slot(namespace, workspace)
+                    .map_err(|err| Status::internal(format!("dropping superseded slot: {err}")))?;
+                resolved = self
+                    .store
+                    .resolve_or_create(namespace, workspace)
+                    .map_err(|err| Status::internal(format!("resolving slot: {err}")))?;
+            }
         }
         let dir = self.store.layout().slot_dir(&resolved.id);
         let quotas_enforced = quota::project_quota_enforced(self.store.layout().root())
@@ -1014,6 +1036,11 @@ impl KubimoNode {
                     tracing::error!(%remove_err, pod, slot = %slot.id,
                         "could not drop a pool slot whose provisioning failed; a retry will reuse it as-is");
                 }
+                // With the pool link gone, no teardown path finds this pod to
+                // forget its credentials — drop them here, or a pod that never
+                // publishes again leaks its S3 client for the agent's lifetime.
+                // A retry re-delivers the secrets at the top of this function.
+                self.forget_pool_credentials(&namespace, &pod);
                 return Err(err);
             }
         } else if quotas_enforced {
@@ -1225,8 +1252,14 @@ impl Node for KubimoNode {
                 python_runtime.map(String::as_str),
             )
             .await?;
-        self.publish_slot_status(&workspace, &namespace, &slot, limit_bytes, archive.as_ref())
-            .await;
+        self.publish_slot_status(
+            &workspace,
+            &namespace,
+            &slot,
+            Some(limit_bytes),
+            archive.as_ref(),
+        )
+        .await;
         if let Err(err) = self.store.record_publish(
             &request.volume_id,
             &crate::store::PublishedSlot {

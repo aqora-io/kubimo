@@ -401,9 +401,16 @@ pub struct RunnerClaim {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
+// Every field skips `None`: two field managers apply this status (the runner
+// reconciler for `claim`, the status poller for the rest), and under
+// server-side apply a serialized `null` is a claim on the field, not an
+// absence — each writer must only ever mention the fields it actually set.
 pub struct RunnerStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_active: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub marimo_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claim: Option<RunnerClaim>,
@@ -1130,10 +1137,27 @@ mod tests {
     }
 
     /// A status apply with only a claim recorded must not blank the fields the
-    /// runner_status loop owns, and the claim's optional token must not turn
-    /// into an explicit null.
+    /// runner_status loop owns: under server-side apply a serialized `null` is
+    /// a claim on the field, so unset fields must be absent everywhere in the
+    /// payload, not null.
     #[test]
     fn a_partial_runner_status_serializes_no_null_claim_fields() {
+        fn no_nulls(value: &serde_json::Value, path: &str) {
+            match value {
+                serde_json::Value::Null => panic!("null at {path}"),
+                serde_json::Value::Object(map) => {
+                    for (key, value) in map {
+                        no_nulls(value, &format!("{path}.{key}"));
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, value) in items.iter().enumerate() {
+                        no_nulls(value, &format!("{path}[{index}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
         let status = RunnerStatus {
             claim: Some(RunnerClaim {
                 pool: "editors".to_string(),
@@ -1144,9 +1168,10 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_value(&status).unwrap();
+        no_nulls(&json, "status");
         assert!(
-            json["claim"].get("token").is_none(),
-            "claim had a null token: {json}"
+            json.get("conditions").is_none() && json.get("lastActive").is_none(),
+            "unset fields must be absent, not present: {json}"
         );
         let parsed: RunnerStatus = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.claim.unwrap().pool, "editors");

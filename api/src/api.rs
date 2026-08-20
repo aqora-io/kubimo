@@ -9,7 +9,10 @@ use kube::{
 };
 
 #[cfg(feature = "runtime")]
-use kube::runtime::watcher::{Event, watcher};
+use kube::runtime::{
+    WatchStreamExt,
+    watcher::{Event, watcher},
+};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
@@ -131,7 +134,10 @@ where
         &self,
         params: &FilterParams,
     ) -> futures::stream::BoxStream<'static, Result<Event<T>>> {
+        // Backoff between watch failures, or an unreachable API server turns
+        // every consumer's error handling into a hot loop of instant retries.
         watcher(self.inner.clone(), params.into())
+            .default_backoff()
             .map_err(Into::into)
             .boxed()
     }

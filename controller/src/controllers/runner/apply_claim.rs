@@ -204,6 +204,43 @@ impl RunnerReconciler {
             return Ok(ClaimOutcome::ColdPath);
         }
 
+        // Two runners of one workspace can race the zero-pod eligibility check
+        // and each claim a warm pod — on two nodes, two diverging copies of
+        // the workspace's slot, the one thing pooled mode must never produce.
+        // Every reconcile re-checks here with the same deterministic rule
+        // (oldest claimed pod, name as tie-break), so whichever racer observes
+        // its rival and loses concedes: it deletes its own pod and cold-starts
+        // against the survivor, whose node the cold pod's workspace affinity
+        // then targets. Observations can differ for a moment, but concessions
+        // only ever shrink the set, and the requeue loop re-runs this until
+        // one pod remains.
+        let pods = ctx.api_namespaced::<Pod>(namespace);
+        let mut claimed = list_pods(
+            &pods,
+            &FilterParams::new()
+                .with_labels(workspace_affinity::workspace_label(&runner.spec.workspace)),
+        )
+        .await?;
+        claimed.retain(|other| {
+            has_label(other, POOL_LABEL)
+                && other.metadata.deletion_timestamp.is_none()
+                && may_hold_a_slot(other)
+        });
+        if let Some(winner) = claim_winner(&claimed)
+            && winner != pod.name()?
+        {
+            tracing::warn!(
+                runner = runner.name()?,
+                pod = pod.name()?,
+                winner,
+                "another claimed pod already holds this workspace; conceding to it"
+            );
+            pods.delete_opt(pod.name()?).await?;
+            // No status write needed: the ColdPath arm in the reconciler
+            // clears any claim an earlier reconcile recorded.
+            return Ok(ClaimOutcome::ColdPath);
+        }
+
         let acked =
             annotations.get(CLAIM_STATE_ANNOTATION).map(String::as_str) == Some(CLAIM_STATE_BOUND);
         let claim = RunnerClaim {
@@ -298,7 +335,18 @@ impl RunnerReconciler {
             // path kubelet would hold the sidecar back the same way, and the
             // backoff retries until the platform finishes creating them.
             let secret = secrets.get(&name).await?;
-            data.extend(secret.data.unwrap_or_default());
+            for (key, value) in secret.data.unwrap_or_default() {
+                // The claim Secret flattens every referenced Secret into one
+                // volume; a shared key would silently hand one sidecar the
+                // other's credential, so refuse loudly instead.
+                if data.insert(key.clone(), value).is_some() {
+                    return Err(kubimo::Error::Custom(format!(
+                        "sidecar Secrets of runner {runner} share the key {key:?}; \
+                         cannot flatten them into the claim Secret",
+                        runner = runner.name()?,
+                    )));
+                }
+            }
         }
         let mut claim_secret = crate::controllers::pool::warm_pod::claim_secret(pod)?;
         claim_secret.data = Some(data);
@@ -337,6 +385,23 @@ fn may_hold_a_slot(pod: &Pod) -> bool {
             .and_then(|status| status.phase.as_deref()),
         Some("Succeeded" | "Failed")
     )
+}
+
+/// The one claimed pod of a workspace every observer agrees should survive a
+/// double-claim: the oldest, by name on a timestamp tie. Racers may see
+/// different subsets for a moment, but any pod whose owner observes a rival
+/// and loses this comparison is deleted, so the set only ever shrinks toward
+/// a single survivor.
+fn claim_winner(claimed: &[Pod]) -> Option<&str> {
+    claimed
+        .iter()
+        .min_by_key(|pod| {
+            (
+                pod.metadata.creation_timestamp.clone(),
+                pod.metadata.name.clone(),
+            )
+        })
+        .and_then(|pod| pod.metadata.name.as_deref())
 }
 
 fn has_label(pod: &Pod, key: &str) -> bool {
@@ -676,6 +741,41 @@ mod tests {
         assert!(may_hold_a_slot(&pod_in_phase(Some("Pending"))));
         // No status at all: assume the worst.
         assert!(may_hold_a_slot(&Pod::default()));
+    }
+
+    /// Every observer of a double-claim must elect the same survivor, whatever
+    /// subset it sees: oldest first, name as the tie-break.
+    #[test]
+    fn double_claims_agree_on_one_winner() {
+        use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        use kubimo::k8s_openapi::jiff::Timestamp;
+        let pod = |name: &str, seconds: i64| Pod {
+            metadata: kubimo::kube::api::ObjectMeta {
+                name: Some(name.to_string()),
+                creation_timestamp: Some(Time(Timestamp::new(seconds, 0).unwrap())),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let older = pod("editors-bbbb", 100);
+        let newer = pod("editors-aaaa", 200);
+        let tied = pod("editors-cccc", 100);
+
+        assert_eq!(claim_winner(&[]), None);
+        assert_eq!(
+            claim_winner(std::slice::from_ref(&newer)),
+            Some("editors-aaaa")
+        );
+        // Age beats name…
+        assert_eq!(
+            claim_winner(&[newer.clone(), older.clone()]),
+            Some("editors-bbbb")
+        );
+        // …and a timestamp tie falls back to the name, in either order.
+        assert_eq!(
+            claim_winner(&[tied.clone(), older.clone()]),
+            claim_winner(&[older, tied]),
+        );
     }
 
     /// Both reference styles the platform uses must be found, deduplicated.

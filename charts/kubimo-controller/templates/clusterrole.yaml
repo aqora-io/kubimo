@@ -15,13 +15,17 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["*"]
-  # Secrets: the pool controller creates each warm pod's `<pod>-claim` Secret
-  # and the claim path copies a runner's sidecar secrets into it; the status
-  # poller also reads `spec.token.secretRef` tokens (which 403'd before this
-  # rule existed).
   - apiGroups: [""]
-    resources: ["pods", "pods/exec", "pods/log", "services", "persistentvolumeclaims", "serviceaccounts", "secrets"]
+    resources: ["pods", "pods/exec", "pods/log", "services", "persistentvolumeclaims", "serviceaccounts"]
     verbs: ["*"]
+  # Secrets get exactly what the controller does and nothing more: create each
+  # warm pod's `<pod>-claim` Secret, copy a runner's sidecar secrets into it
+  # (server-side apply = patch), and read `spec.token.secretRef` tokens (which
+  # 403'd before this rule existed). No delete — claim Secrets are collected
+  # through their pod ownerReference — and no list/watch of cluster secrets.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]
   - apiGroups: ["snapshot.storage.k8s.io"]
     resources: ["volumesnapshots"]
     verbs: ["*"]
