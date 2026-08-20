@@ -5,6 +5,7 @@
 //! project quota, hand it to a runner pod as a bind mount, and reclaim it when
 //! the workspace is done with it.
 
+mod claim;
 mod clients;
 mod csi;
 mod drain;
@@ -424,6 +425,7 @@ fn serve(
                     // reclaim a slot in the middle of a publish creating it.
                     store.clone(),
                     clients::NamespacedClients::new(true),
+                    node_name.clone(),
                     idle_slot_ttl,
                     client.clone().map(|client| reaper::StaleMountSweep {
                         client,
@@ -436,13 +438,20 @@ fn serve(
                     "no Kubernetes access; slots for deleted workspaces will not be reclaimed"
                 );
             }
-            let node = csi::KubimoNode::new(
+            let node = std::sync::Arc::new(csi::KubimoNode::new(
                 node_name,
                 store,
                 default_limit_bytes,
                 allow_unquotaed_slots,
-                client,
-            );
+                client.clone(),
+            ));
+            // The claim watcher turns anonymous pool slots into workspace
+            // slots when the controller stamps a claim on a warm pod. Without
+            // cluster access there is nothing to watch — and no pool pod
+            // could be acked anyway.
+            if let Some(client) = client {
+                tokio::spawn(claim::run(node.clone(), client));
+            }
             csi::serve(socket, node, async {
                 shutdown_signal().await;
                 tracing::info!("shutting down");

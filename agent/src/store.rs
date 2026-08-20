@@ -126,6 +126,22 @@ pub struct ResolvedSlot {
     pub created: bool,
 }
 
+/// An anonymous slot provisioned for a warm pool pod, keyed by the pod rather
+/// than a workspace — it has none until a claim adopts it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolSlot {
+    pub id: SlotId,
+    pub project_id: u32,
+    /// The CSI volume id it was published under. Unpublish only receives the
+    /// volume id, and an unclaimed pool pod's teardown must find its slot to
+    /// discard it.
+    pub volume_id: String,
+    /// UID of the pod it was provisioned for. A recreated pod that happens to
+    /// reuse a name must not inherit a previous incarnation's slot.
+    pub pod_uid: String,
+    pub created: bool,
+}
+
 impl SlotStore {
     pub fn new(layout: SlotLayout) -> Self {
         Self {
@@ -770,6 +786,211 @@ impl SlotStore {
             })
     }
 
+    /// The mutex serialising every operation on one pool pod's anonymous slot:
+    /// its publish, its claim-time adoption, and its discard.
+    ///
+    /// A distinct key family from [`Self::lock_for`] — `pool:` cannot collide
+    /// with any `namespace/workspace` key because a namespace can never contain
+    /// a colon. Lock order is always pool lock first, then workspace lock;
+    /// nothing takes them the other way around, so they cannot deadlock.
+    pub fn lock_for_pool(
+        &self,
+        namespace: &str,
+        pod: &str,
+    ) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let key = format!("pool:{namespace}/{pod}");
+        let mut locks = match self.locks.lock() {
+            Ok(locks) => locks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        locks.entry(key).or_default().clone()
+    }
+
+    /// Path of the on-disk link recording which slot a pool pod's anonymous
+    /// volume owns. Same dot-join disambiguation as [`Self::workspace_link`];
+    /// pod names are DNS names, so the same validation applies.
+    fn pool_link(&self, namespace: &str, pod: &str) -> PathBuf {
+        self.index_dir().join(format!("pool-{namespace}.{pod}"))
+    }
+
+    /// Look up the anonymous slot recorded for `pod` in `namespace`, if any.
+    pub fn lookup_pool(&self, namespace: &str, pod: &str) -> Result<Option<PoolSlot>, StoreError> {
+        validate_workspace_name(namespace)?;
+        validate_workspace_name(pod)?;
+        self.read_pool_link(&self.pool_link(namespace, pod), pod)
+    }
+
+    fn read_pool_link(&self, link: &Path, pod: &str) -> Result<Option<PoolSlot>, StoreError> {
+        let raw = match std::fs::read_to_string(link) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io_err(format!("reading {}", link.display()))(err)),
+        };
+        let mut lines = raw.lines();
+        let id = SlotId::parse(lines.next().unwrap_or_default().trim()).map_err(|source| {
+            StoreError::CorruptIndex {
+                workspace: pod.to_string(),
+                source,
+            }
+        })?;
+        if !self.layout.slot_dir(&id).is_dir() {
+            return Ok(None);
+        }
+        let volume_id = lines.next().unwrap_or_default().trim().to_string();
+        let pod_uid = lines.next().unwrap_or_default().trim().to_string();
+        let project_id = std::fs::read_to_string(self.project_id_path(&id))
+            .map_err(io_err(format!("reading project id for {id}")))?
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| StoreError::CorruptIndex {
+                workspace: pod.to_string(),
+                source: SlotIdError::MissingPrefix,
+            })?;
+        Ok(Some(PoolSlot {
+            id,
+            project_id,
+            volume_id,
+            pod_uid,
+            created: false,
+        }))
+    }
+
+    /// Resolve the anonymous slot for a pool pod, allocating one if it has
+    /// none. Callers must hold [`Self::lock_for_pool`] across the call.
+    ///
+    /// A recorded slot whose pod UID differs belonged to a previous pod that
+    /// happened to reuse the name; it is discarded rather than inherited —
+    /// nothing was ever flushed from an anonymous slot, so there is nothing to
+    /// lose.
+    pub fn resolve_or_create_pool(
+        &self,
+        namespace: &str,
+        pod: &str,
+        pod_uid: &str,
+        volume_id: &str,
+    ) -> Result<PoolSlot, StoreError> {
+        validate_workspace_name(namespace)?;
+        validate_workspace_name(pod)?;
+        if let Some(existing) = self.lookup_pool(namespace, pod)? {
+            if existing.pod_uid == pod_uid {
+                return Ok(existing);
+            }
+            self.remove_pool_slot(namespace, pod)?;
+        }
+        let id = SlotId::generate();
+        let project_id = self.allocate_project_id()?;
+        std::fs::create_dir_all(self.index_dir()).map_err(io_err("creating index dir"))?;
+        std::fs::write(self.project_id_path(&id), project_id.to_string())
+            .map_err(io_err("writing project id"))?;
+        // Index before directory, for the same crash-ordering reasons as
+        // [`Self::record`]: a link to a missing directory reads as "no slot".
+        std::fs::write(
+            self.pool_link(namespace, pod),
+            format!("{}\n{volume_id}\n{pod_uid}", id.as_str()),
+        )
+        .map_err(io_err("writing pool index"))?;
+        std::fs::create_dir_all(self.layout.slot_dir(&id)).map_err(io_err("creating slot dir"))?;
+        Ok(PoolSlot {
+            id,
+            project_id,
+            volume_id: volume_id.to_string(),
+            pod_uid: pod_uid.to_string(),
+            created: true,
+        })
+    }
+
+    /// Find the anonymous slot published under `volume_id`, as
+    /// `(namespace, pod, slot)`.
+    ///
+    /// A scan rather than an index: unpublish receives only the volume id, and
+    /// the number of pool pods per node is small.
+    pub fn lookup_pool_by_volume(
+        &self,
+        volume_id: &str,
+    ) -> Result<Option<(String, String, PoolSlot)>, StoreError> {
+        for (namespace, pod) in self.pool_pods()? {
+            if let Some(slot) = self.lookup_pool(&namespace, &pod)?
+                && slot.volume_id == volume_id
+            {
+                return Ok(Some((namespace, pod, slot)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Every pool pod this node holds an anonymous slot for, as
+    /// `(namespace, pod)`.
+    pub fn pool_pods(&self) -> Result<Vec<(String, String)>, StoreError> {
+        let entries = match std::fs::read_dir(self.index_dir()) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(io_err("listing index dir")(err)),
+        };
+        Ok(entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let stripped = name.to_str()?.strip_prefix("pool-")?;
+                let (namespace, pod) = stripped.split_once('.')?;
+                validate_workspace_name(namespace).ok()?;
+                validate_workspace_name(pod).ok()?;
+                Some((namespace.to_string(), pod.to_string()))
+            })
+            .collect())
+    }
+
+    /// Discard a pool pod's anonymous slot: directory, project id, and link.
+    ///
+    /// Nothing to flush — an anonymous slot holds only the venv template. The
+    /// flush marker is removed defensively so a recycled slot id can never
+    /// bequeath one.
+    pub fn remove_pool_slot(&self, namespace: &str, pod: &str) -> Result<bool, StoreError> {
+        validate_workspace_name(namespace)?;
+        validate_workspace_name(pod)?;
+        let link = self.pool_link(namespace, pod);
+        let Some(id) = self.read_slot_id(&link, pod)? else {
+            let _ = std::fs::remove_file(&link);
+            return Ok(false);
+        };
+        let dir = self.layout.slot_dir(&id);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(io_err(format!("removing {}", dir.display()))(err)),
+        }
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(self.project_id_path(&id));
+        let _ = std::fs::remove_file(self.flushed_path(&id));
+        Ok(true)
+    }
+
+    /// Turn a pool pod's anonymous slot into `workspace`'s slot.
+    ///
+    /// The slot directory and project id stay exactly as they are — only the
+    /// index changes hands, which is what lets a claim rebind a live mount
+    /// without touching it. Callers hold both the pool lock and the workspace
+    /// lock (in that order).
+    pub fn adopt_pool_slot(
+        &self,
+        pod_namespace: &str,
+        pod: &str,
+        namespace: &str,
+        workspace: &str,
+    ) -> Result<Option<ResolvedSlot>, StoreError> {
+        validate_workspace_name(namespace)?;
+        validate_workspace_name(workspace)?;
+        let Some(slot) = self.lookup_pool(pod_namespace, pod)? else {
+            return Ok(None);
+        };
+        self.record(namespace, workspace, &slot.id, slot.project_id)?;
+        let _ = std::fs::remove_file(self.pool_link(pod_namespace, pod));
+        Ok(Some(ResolvedSlot {
+            id: slot.id,
+            project_id: slot.project_id,
+            created: false,
+        }))
+    }
+
     /// Resolve the slot for `workspace` in `namespace`, allocating one if it
     /// has none.
     ///
@@ -1233,6 +1454,108 @@ mod tests {
         assert!(
             !store
                 .other_published_volumes("tenant-b", "workspace", "csi-elsewhere")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn pool_slots_round_trip_and_stay_out_of_workspace_scans() {
+        let (_dir, store) = store();
+        let slot = store
+            .resolve_or_create_pool("platform", "editors-a1b2c3d4", "uid-1", "csi-warm")
+            .unwrap();
+        assert!(slot.created);
+        let again = store
+            .resolve_or_create_pool("platform", "editors-a1b2c3d4", "uid-1", "csi-warm")
+            .unwrap();
+        assert!(!again.created);
+        assert_eq!(slot.id, again.id);
+
+        // Anonymous slots are invisible to everything workspace-shaped: the
+        // reaper's sweep, publish accounting, workspace lookups.
+        assert!(store.workspaces().unwrap().is_empty());
+        assert!(store.published_workspaces().unwrap().is_empty());
+
+        assert_eq!(
+            store.lookup_pool_by_volume("csi-warm").unwrap().unwrap().1,
+            "editors-a1b2c3d4"
+        );
+        assert!(store.lookup_pool_by_volume("csi-other").unwrap().is_none());
+    }
+
+    /// A recreated pod that reuses a name must not inherit the previous
+    /// incarnation's slot: nothing tracked what the old pod did with it.
+    #[test]
+    fn a_reused_pod_name_with_a_new_uid_gets_a_fresh_slot() {
+        let (_dir, store) = store();
+        let first = store
+            .resolve_or_create_pool("platform", "editors-a1b2c3d4", "uid-1", "csi-warm")
+            .unwrap();
+        let second = store
+            .resolve_or_create_pool("platform", "editors-a1b2c3d4", "uid-2", "csi-warm2")
+            .unwrap();
+        assert!(second.created);
+        assert_ne!(first.id, second.id);
+        assert!(!store.layout().slot_dir(&first.id).is_dir());
+    }
+
+    /// Adoption re-keys the slot without touching its directory or project id
+    /// — the pod's bind mount must stay valid across it.
+    #[test]
+    fn adoption_moves_the_slot_from_pod_to_workspace() {
+        let (_dir, store) = store();
+        let pool = store
+            .resolve_or_create_pool("platform", "editors-a1b2c3d4", "uid-1", "csi-warm")
+            .unwrap();
+        let adopted = store
+            .adopt_pool_slot("platform", "editors-a1b2c3d4", "platform", "bmow-abc")
+            .unwrap()
+            .unwrap();
+        assert_eq!(adopted.id, pool.id);
+        assert_eq!(adopted.project_id, pool.project_id);
+        assert!(!adopted.created);
+
+        // The pool identity is gone; the workspace identity resolves.
+        assert!(
+            store
+                .lookup_pool("platform", "editors-a1b2c3d4")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.lookup("platform", "bmow-abc").unwrap().unwrap().id,
+            pool.id
+        );
+        // A fresh workspace slot has never flushed.
+        assert_eq!(store.flushed_ago("platform", "bmow-abc").unwrap(), None);
+
+        // Adopting again finds no anonymous slot: the claim is idempotent by
+        // observation, not by repetition.
+        assert!(
+            store
+                .adopt_pool_slot("platform", "editors-a1b2c3d4", "platform", "bmow-abc")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Discarding an anonymous slot removes everything that indexed it.
+    #[test]
+    fn discarding_a_pool_slot_leaves_nothing_behind() {
+        let (_dir, store) = store();
+        let slot = store
+            .resolve_or_create_pool("platform", "editors-a1b2c3d4", "uid-1", "csi-warm")
+            .unwrap();
+        assert!(
+            store
+                .remove_pool_slot("platform", "editors-a1b2c3d4")
+                .unwrap()
+        );
+        assert!(!store.layout().slot_dir(&slot.id).is_dir());
+        assert!(store.pool_pods().unwrap().is_empty());
+        assert!(
+            !store
+                .remove_pool_slot("platform", "editors-a1b2c3d4")
                 .unwrap()
         );
     }

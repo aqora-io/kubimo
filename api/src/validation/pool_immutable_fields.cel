@@ -1,0 +1,3 @@
+self.spec.command == oldSelf.spec.command &&
+(has(self.spec.pythonRuntime) == has(oldSelf.spec.pythonRuntime)) &&
+(!has(self.spec.pythonRuntime) || self.spec.pythonRuntime == oldSelf.spec.pythonRuntime)

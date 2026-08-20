@@ -65,6 +65,15 @@ const ATTR_SEED_SECRETS: &str = "seedSecrets";
 /// workspaces belong to whoever created them. Looking one up in the wrong
 /// namespace returns "not found", which every caller here reads as "deleted".
 const ATTR_POD_NAMESPACE: &str = "csi.storage.k8s.io/pod.namespace";
+/// Pod name and UID, likewise from `podInfoOnMount`. Only pooled volumes need
+/// them: an anonymous slot is keyed by the pod it was minted for.
+const ATTR_POD_NAME: &str = "csi.storage.k8s.io/pod.name";
+const ATTR_POD_UID: &str = "csi.storage.k8s.io/pod.uid";
+/// Marks an anonymous warm-pool slot: template-seeded, quota'd, but belonging
+/// to no workspace until a claim adopts it. Mutually exclusive with
+/// `workspace` and the archive attributes — an agent seeing both is looking at
+/// a controller bug and must refuse rather than guess.
+const ATTR_POOLED: &str = kubimo::pool::POOLED_VOLUME_ATTRIBUTE;
 
 /// Owner of every slot's contents: the `me` user baked into the marimo image,
 /// so the runner can write without kubelet's `fsGroup` recursion — which on a
@@ -181,7 +190,7 @@ struct Watcher {
 /// The agent writes as root, so without this the runner (uid 1000) cannot
 /// modify its own files. `fsGroup` cannot do this job: on a shared node volume
 /// kubelet would apply it to every slot on the node, not just this one.
-fn chown_tree(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn chown_tree(dir: &Path) -> std::io::Result<()> {
     for entry in walkdir(dir)? {
         // `lchown`, never `chown`: `chown` follows symlinks, and this tree is
         // tenant-controlled. `restore` creates symlinks straight from the
@@ -251,12 +260,15 @@ impl KubimoNode {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn store(&self) -> &SlotStore {
         &self.store
     }
 
-    async fn client_for(&self, namespace: &str) -> Option<kubimo::Client> {
+    pub(crate) fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
+    pub(crate) async fn client_for(&self, namespace: &str) -> Option<kubimo::Client> {
         self.clients.get(namespace).await
     }
 
@@ -285,6 +297,54 @@ impl KubimoNode {
             .insert(Self::slot_key(namespace, workspace), client);
     }
 
+    /// The key an unclaimed pool pod's credentials are held under. Cannot
+    /// collide with [`Self::slot_key`]: a namespace can never contain a colon.
+    fn pool_key(namespace: &str, pod: &str) -> String {
+        format!("pool:{namespace}/{pod}")
+    }
+
+    /// Remember the pool's S3 credentials, delivered when the anonymous volume
+    /// was published. This is the only time kubelet hands them over — the
+    /// claim, which is when they are first used, carries no secrets.
+    fn remember_pool_credentials(
+        &self,
+        namespace: &str,
+        pod: &str,
+        secrets: &std::collections::HashMap<String, String>,
+    ) {
+        if secrets.is_empty() {
+            return;
+        }
+        let client = indexer::s3::S3Client::from_options(secrets.iter());
+        self.lock_s3_clients()
+            .insert(Self::pool_key(namespace, pod), client);
+    }
+
+    fn forget_pool_credentials(&self, namespace: &str, pod: &str) {
+        self.lock_s3_clients()
+            .remove(&Self::pool_key(namespace, pod));
+    }
+
+    /// Move a pool pod's remembered credentials to the workspace that just
+    /// adopted its slot, so the watcher and final flush find them where every
+    /// other path looks. Returns whether any were held.
+    pub(crate) fn adopt_credentials(
+        &self,
+        pod_namespace: &str,
+        pod: &str,
+        namespace: &str,
+        workspace: &str,
+    ) -> bool {
+        let mut clients = self.lock_s3_clients();
+        match clients.remove(&Self::pool_key(pod_namespace, pod)) {
+            Some(client) => {
+                clients.insert(Self::slot_key(namespace, workspace), client);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The S3 client to use for `workspace` in `namespace`.
     ///
     /// `None` means there is nowhere to read or write this workspace's archive:
@@ -292,7 +352,7 @@ impl KubimoNode {
     /// Callers must say so rather than proceeding, because the failure is
     /// otherwise invisible — a hydrate looks like an empty workspace and a
     /// flush is logged and dropped.
-    fn s3_for(&self, namespace: &str, workspace: &str) -> Option<indexer::s3::S3Client> {
+    pub(crate) fn s3_for(&self, namespace: &str, workspace: &str) -> Option<indexer::s3::S3Client> {
         if let Some(client) = self
             .lock_s3_clients()
             .get(&Self::slot_key(namespace, workspace))
@@ -302,7 +362,7 @@ impl KubimoNode {
         self.has_env_credentials.then(|| self.s3.clone())
     }
 
-    fn forget_credentials(&self, namespace: &str, workspace: &str) {
+    pub(crate) fn forget_credentials(&self, namespace: &str, workspace: &str) {
         self.lock_s3_clients()
             .remove(&Self::slot_key(namespace, workspace));
     }
@@ -317,7 +377,7 @@ impl KubimoNode {
     }
 
     /// Start continuous sync for a freshly published slot.
-    async fn start_watcher(
+    pub(crate) async fn start_watcher(
         &self,
         volume_id: &str,
         namespace: &str,
@@ -564,12 +624,16 @@ impl KubimoNode {
     /// `lastSyncedAt` is deliberately not set here. It means "this content
     /// reached S3", which is only true after a flush, and claiming it at publish
     /// time would make an unflushed slot look durable.
-    async fn publish_slot_status(
+    /// `limit_bytes` is `None` when the caller does not know the quota
+    /// actually in effect — a claim without a workspace storage max keeps the
+    /// pool's interim quota — and reporting a made-up zero would be worse
+    /// than reporting nothing.
+    pub(crate) async fn publish_slot_status(
         &self,
         workspace: &str,
         namespace: &str,
         slot: &crate::store::ResolvedSlot,
-        limit_bytes: u64,
+        limit_bytes: Option<u64>,
         archive: Option<&crate::hydrate::ArchiveLocation>,
     ) {
         // A manager of its own, not the indexer's. Server-side apply gives a
@@ -586,7 +650,7 @@ impl KubimoNode {
             slot: Some(kubimo::WorkspaceSlotStatus {
                 node: Some(self.node_id.clone()),
                 id: Some(slot.id.to_string()),
-                quota: Some(indexer::disk::storage_quantity(limit_bytes)),
+                quota: limit_bytes.map(indexer::disk::storage_quantity),
             }),
             archive: archive.map(|archive| kubimo::WorkspaceArchiveStatus {
                 key_prefix: archive.key_prefix.clone(),
@@ -605,7 +669,7 @@ impl KubimoNode {
     /// Returns whether anything was written. Split out from [`Self::prepare_slot`]
     /// so its failure can be handled in one place: a half-hydrated slot has to be
     /// discarded, or the retry inherits it and publishes it empty.
-    async fn hydrate_new_slot(
+    pub(crate) async fn hydrate_new_slot(
         &self,
         workspace: &str,
         slot: &crate::slot::SlotId,
@@ -668,10 +732,50 @@ impl KubimoNode {
         seed: Option<&crate::hydrate::SeedArchive>,
         python_runtime: Option<&str>,
     ) -> Result<(crate::store::ResolvedSlot, PathBuf), Status> {
-        let resolved = self
+        let mut resolved = self
             .store
             .resolve_or_create(namespace, workspace)
             .map_err(|err| Status::internal(format!("resolving slot: {err}")))?;
+        // An existing slot is normally trusted as-is — that is the warm-slot
+        // fast path. But when the workspace's current slot (per its status,
+        // written by whichever node last served it) is on *another* node, this
+        // copy predates newer work that reached S3 through that node — pool
+        // claims land wherever their warm pod happens to be, so this is now
+        // routine rather than rare. A flushed copy is a cache and is dropped
+        // for a fresh hydration; an unflushed one may hold the only copy of
+        // the tenant's newest work and is always served as-is.
+        if !resolved.created && self.slot_is_superseded(namespace, workspace).await {
+            // Never out from under a live mount: a sibling volume published on
+            // this node is actively serving this copy however stale the status
+            // makes it look — a claim that raced onto another node does exactly
+            // this — and removing it would delete a mounted directory. An
+            // unreadable publish state counts as published: keeping a stale
+            // cache is recoverable, wiping a live slot is not.
+            let published = self.store.is_published(namespace, workspace).unwrap_or_else(|err| {
+                tracing::warn!(%err, workspace, "could not check the publish state; keeping the slot");
+                true
+            });
+            if published {
+                tracing::info!(
+                    workspace,
+                    slot = %resolved.id,
+                    "slot looks superseded but is published on this node; serving the live copy"
+                );
+            } else {
+                tracing::info!(
+                    workspace,
+                    slot = %resolved.id,
+                    "dropping a slot superseded on another node; re-hydrating from S3"
+                );
+                self.store
+                    .remove_slot(namespace, workspace)
+                    .map_err(|err| Status::internal(format!("dropping superseded slot: {err}")))?;
+                resolved = self
+                    .store
+                    .resolve_or_create(namespace, workspace)
+                    .map_err(|err| Status::internal(format!("resolving slot: {err}")))?;
+            }
+        }
         let dir = self.store.layout().slot_dir(&resolved.id);
         let quotas_enforced = quota::project_quota_enforced(self.store.layout().root())
             .map_err(|err| Status::internal(format!("checking quota support: {err}")))?;
@@ -741,53 +845,16 @@ impl KubimoNode {
         seed: Option<&crate::hydrate::SeedArchive>,
         python_runtime: Option<&str>,
     ) -> Result<(), Status> {
-        match (quotas_enforced, self.allow_unquotaed_slots) {
-            (true, _) => {
-                // Stamp the project before anything is written: inodes
-                // created beforehand keep the old project and escape
-                // accounting.
-                quota::assign_project(dir, resolved.project_id)
-                    .map_err(|err| Status::internal(format!("assigning project: {err}")))?;
-                quota::set_project_limit(
-                    self.store.layout().root(),
-                    resolved.project_id,
-                    limit_bytes,
-                )
-                .map_err(|err| Status::internal(format!("setting quota: {err}")))?;
-            }
-            (false, true) => tracing::warn!(
-                workspace,
-                slot = %resolved.id,
-                "filesystem has no project-quota enforcement and \
-                 --allow-unquotaed-slots is set: this slot has NO capacity limit \
-                 and can fill the node volume"
-            ),
-            (false, false) => {
-                return Err(unquotaed_refusal(self.store.layout().root()));
-            }
-        }
-        std::fs::set_permissions(
-            dir,
-            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
-        )
-        .map_err(|err| Status::internal(format!("setting slot permissions: {err}")))?;
-        std::os::unix::fs::chown(dir, Some(SLOT_UID), Some(SLOT_GID))
-            .map_err(|err| Status::internal(format!("chowning slot: {err}")))?;
-        tracing::info!(
+        self.provision_slot_basics(
             workspace,
-            slot = %resolved.id,
-            project_id = resolved.project_id,
+            &resolved.id,
+            resolved.project_id,
+            dir,
             limit_bytes,
-            "allocated slot"
-        );
-        // Seed the venv from the node template before hydrating, so the
-        // runner does not have to build ~920MB of it from scratch. Failure
-        // is not fatal: `uv sync` will build one, just slowly.
-        match crate::venv::seed_from_template(self.store.layout().root(), dir, python_runtime).await
-        {
-            Ok(seeded) => tracing::info!(workspace, seeded, "venv template"),
-            Err(err) => tracing::warn!(%err, workspace, "could not seed venv template"),
-        }
+            quotas_enforced,
+            python_runtime,
+        )
+        .await?;
         // Only a freshly created slot is hydrated. Re-hydrating one that is
         // already populated would overwrite the tenant's newer local edits
         // with whatever was last synced — this is the path that makes
@@ -805,6 +872,251 @@ impl KubimoNode {
                 .map_err(|err| Status::internal(format!("chowning hydrated slot: {err}")))?;
         }
         Ok(())
+    }
+
+    /// Whether this node's slot for `workspace` has been superseded by one on
+    /// another node.
+    ///
+    /// True only when *both* hold: the workspace's `status.slot` names a
+    /// different node (last-writer-wins, written at every publish and claim),
+    /// and this node's copy is flushed — its contents are in S3, so dropping
+    /// it costs one re-hydrate. Every uncertain case — no API access, an API
+    /// error, no slot status, an unflushed copy — reads as "not superseded":
+    /// availability and the unflushed copy always win.
+    pub(crate) async fn slot_is_superseded(&self, namespace: &str, workspace: &str) -> bool {
+        let flushed = matches!(self.store.flushed_ago(namespace, workspace), Ok(Some(_)));
+        if !flushed {
+            return false;
+        }
+        let Some(client) = self.client_for(namespace).await else {
+            return false;
+        };
+        let slot_node = match client.api::<kubimo::Workspace>().get_opt(workspace).await {
+            Ok(Some(found)) => found
+                .status
+                .as_ref()
+                .and_then(|status| status.slot.as_ref())
+                .and_then(|slot| slot.node.clone()),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(%err, workspace, "could not check the workspace's slot status; keeping the local copy");
+                None
+            }
+        };
+        slot_node.is_some_and(|node| node != self.node_id)
+    }
+
+    /// The identity-free half of provisioning: project quota, ownership, and
+    /// the venv template. Shared between a workspace's fresh slot (which goes
+    /// on to hydrate) and a pool pod's anonymous one (which deliberately does
+    /// not — it has no workspace to hydrate from yet).
+    #[allow(clippy::too_many_arguments)]
+    async fn provision_slot_basics(
+        &self,
+        owner: &str,
+        id: &crate::slot::SlotId,
+        project_id: u32,
+        dir: &Path,
+        limit_bytes: u64,
+        quotas_enforced: bool,
+        python_runtime: Option<&str>,
+    ) -> Result<(), Status> {
+        match (quotas_enforced, self.allow_unquotaed_slots) {
+            (true, _) => {
+                // Stamp the project before anything is written: inodes
+                // created beforehand keep the old project and escape
+                // accounting.
+                quota::assign_project(dir, project_id)
+                    .map_err(|err| Status::internal(format!("assigning project: {err}")))?;
+                quota::set_project_limit(self.store.layout().root(), project_id, limit_bytes)
+                    .map_err(|err| Status::internal(format!("setting quota: {err}")))?;
+            }
+            (false, true) => tracing::warn!(
+                owner,
+                slot = %id,
+                "filesystem has no project-quota enforcement and \
+                 --allow-unquotaed-slots is set: this slot has NO capacity limit \
+                 and can fill the node volume"
+            ),
+            (false, false) => {
+                return Err(unquotaed_refusal(self.store.layout().root()));
+            }
+        }
+        std::fs::set_permissions(
+            dir,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .map_err(|err| Status::internal(format!("setting slot permissions: {err}")))?;
+        std::os::unix::fs::chown(dir, Some(SLOT_UID), Some(SLOT_GID))
+            .map_err(|err| Status::internal(format!("chowning slot: {err}")))?;
+        tracing::info!(
+            owner,
+            slot = %id,
+            project_id,
+            limit_bytes,
+            "allocated slot"
+        );
+        // Seed the venv from the node template before hydrating, so the
+        // runner does not have to build ~920MB of it from scratch. Failure
+        // is not fatal: `uv sync` will build one, just slowly.
+        match crate::venv::seed_from_template(self.store.layout().root(), dir, python_runtime).await
+        {
+            Ok(seeded) => tracing::info!(owner, seeded, "venv template"),
+            Err(err) => tracing::warn!(%err, owner, "could not seed venv template"),
+        }
+        Ok(())
+    }
+
+    /// Publish an anonymous warm-pool slot: provision it like any fresh slot,
+    /// but hydrate nothing, watch nothing, record no publish and write no
+    /// status — it belongs to no workspace until a claim adopts it.
+    async fn publish_pool_volume(
+        &self,
+        request: proto::NodePublishVolumeRequest,
+    ) -> Result<Response<proto::NodePublishVolumeResponse>, Status> {
+        // A pooled volume that also names a workspace or an archive is a
+        // controller bug: honouring either half silently would hydrate a slot
+        // the claim will hydrate again, or bind a workspace nothing claimed.
+        for attr in [ATTR_WORKSPACE, ATTR_BUCKET, ATTR_SEED_BUCKET] {
+            if request.volume_context.contains_key(attr) {
+                return Err(Status::invalid_argument(format!(
+                    "a pooled volume must not carry the {attr:?} attribute"
+                )));
+            }
+        }
+        let require = |attr: &str| {
+            request.volume_context.get(attr).cloned().ok_or_else(|| {
+                Status::invalid_argument(format!(
+                    "volume attribute {attr:?} is required for a pooled volume; the CSIDriver \
+                     must set podInfoOnMount"
+                ))
+            })
+        };
+        let namespace = require(ATTR_POD_NAMESPACE)?;
+        let pod = require(ATTR_POD_NAME)?;
+        let pod_uid = require(ATTR_POD_UID)?;
+        let limit_bytes = match request.volume_context.get(ATTR_LIMIT_BYTES) {
+            None => self.default_limit_bytes,
+            Some(raw) => raw.parse::<u64>().map_err(|_| {
+                Status::invalid_argument(format!(
+                    "volume attribute {ATTR_LIMIT_BYTES:?} must be a byte count, got {raw:?}"
+                ))
+            })?,
+        };
+        let python_runtime = request.volume_context.get(ATTR_PYTHON_RUNTIME);
+
+        let lock = self.store.lock_for_pool(&namespace, &pod);
+        let _guard = lock.lock().await;
+        // Held for the claim: kubelet only delivers secrets at publish time,
+        // and hydration happens at claim time.
+        self.remember_pool_credentials(&namespace, &pod, &request.secrets);
+        let slot = self
+            .store
+            .resolve_or_create_pool(&namespace, &pod, &pod_uid, &request.volume_id)
+            .map_err(|err| Status::internal(format!("resolving pool slot: {err}")))?;
+        let dir = self.store.layout().slot_dir(&slot.id);
+        let quotas_enforced = quota::project_quota_enforced(self.store.layout().root())
+            .map_err(|err| Status::internal(format!("checking quota support: {err}")))?;
+        if slot.created {
+            if let Err(err) = self
+                .provision_slot_basics(
+                    &pod,
+                    &slot.id,
+                    slot.project_id,
+                    &dir,
+                    limit_bytes,
+                    quotas_enforced,
+                    python_runtime.map(String::as_str),
+                )
+                .await
+            {
+                // Same rollback reasoning as prepare_slot: a half-provisioned
+                // slot must not survive to be reused as-is by kubelet's retry.
+                if let Err(remove_err) = self.store.remove_pool_slot(&namespace, &pod) {
+                    tracing::error!(%remove_err, pod, slot = %slot.id,
+                        "could not drop a pool slot whose provisioning failed; a retry will reuse it as-is");
+                }
+                // With the pool link gone, no teardown path finds this pod to
+                // forget its credentials — drop them here, or a pod that never
+                // publishes again leaks its S3 client for the agent's lifetime.
+                // A retry re-delivers the secrets at the top of this function.
+                self.forget_pool_credentials(&namespace, &pod);
+                return Err(err);
+            }
+        } else if quotas_enforced {
+            quota::set_project_limit(self.store.layout().root(), slot.project_id, limit_bytes)
+                .map_err(|err| Status::internal(format!("setting quota: {err}")))?;
+        } else if !self.allow_unquotaed_slots {
+            return Err(unquotaed_refusal(self.store.layout().root()));
+        }
+        let target = Path::new(&request.target_path);
+        let mounted = crate::mount::bind(&dir, target, request.readonly)
+            .map_err(|err| Status::internal(format!("publishing pool slot: {err}")))?;
+        if mounted {
+            tracing::info!(
+                pod,
+                slot = %slot.id,
+                target = %target.display(),
+                "published anonymous pool slot"
+            );
+        }
+        Ok(Response::new(proto::NodePublishVolumeResponse {}))
+    }
+
+    /// Discard the anonymous slot behind `volume_id`, if it is still
+    /// anonymous. Returns the publish record to flush instead when a claim
+    /// adopted the slot while its pod was already being torn down.
+    async fn discard_anonymous_slot(&self, volume_id: &str) -> Option<crate::store::PublishedSlot> {
+        let (namespace, pod, _) = match self.store.lookup_pool_by_volume(volume_id) {
+            Ok(Some(found)) => found,
+            // No pool link. A claim can have adopted the slot between the
+            // caller's publish lookup and this scan; the claim writes its
+            // publish record *before* it removes the link, so re-reading the
+            // record now catches that hand-off — returning None here instead
+            // would strand a freshly written record forever.
+            Ok(None) => {
+                return self
+                    .store
+                    .lookup_publish(volume_id)
+                    .map_err(|err| {
+                        tracing::warn!(%err, "could not re-read the publish record after adoption");
+                    })
+                    .ok()
+                    .flatten();
+            }
+            Err(err) => {
+                tracing::warn!(%err, "could not scan pool slots; skipping anonymous discard");
+                return None;
+            }
+        };
+        let lock = self.store.lock_for_pool(&namespace, &pod);
+        let _guard = lock.lock().await;
+        // Re-check under the lock: a claim can have adopted the slot between
+        // the scan and here. Once adopted it has a publish record, and the
+        // caller must run the ordinary flush path for it instead.
+        match self.store.lookup_pool_by_volume(volume_id) {
+            Ok(Some((namespace, pod, slot))) => {
+                match self.store.remove_pool_slot(&namespace, &pod) {
+                    Ok(_) => tracing::info!(pod, slot = %slot.id, "discarded anonymous pool slot"),
+                    Err(err) => {
+                        tracing::warn!(%err, pod, "could not discard the anonymous pool slot")
+                    }
+                }
+                self.forget_pool_credentials(&namespace, &pod);
+                None
+            }
+            Ok(None) => match self.store.lookup_publish(volume_id) {
+                Ok(published) => published,
+                Err(err) => {
+                    tracing::warn!(%err, "could not re-read the publish record after adoption");
+                    None
+                }
+            },
+            Err(err) => {
+                tracing::warn!(%err, "could not re-scan pool slots; skipping anonymous discard");
+                None
+            }
+        }
     }
 }
 
@@ -848,6 +1160,9 @@ impl Node for KubimoNode {
         }
         if request.target_path.is_empty() {
             return Err(Status::invalid_argument("target_path is required"));
+        }
+        if request.volume_context.get(ATTR_POOLED).map(String::as_str) == Some("true") {
+            return self.publish_pool_volume(request).await;
         }
         let workspace = request
             .volume_context
@@ -937,8 +1252,14 @@ impl Node for KubimoNode {
                 python_runtime.map(String::as_str),
             )
             .await?;
-        self.publish_slot_status(&workspace, &namespace, &slot, limit_bytes, archive.as_ref())
-            .await;
+        self.publish_slot_status(
+            &workspace,
+            &namespace,
+            &slot,
+            Some(limit_bytes),
+            archive.as_ref(),
+        )
+        .await;
         if let Err(err) = self.store.record_publish(
             &request.volume_id,
             &crate::store::PublishedSlot {
@@ -993,7 +1314,7 @@ impl Node for KubimoNode {
         // means we cannot tell which workspace this volume belonged to, so the
         // final flush is skipped and the slot's newest work stays only on this
         // node.
-        let published = match self.store.lookup_publish(&request.volume_id) {
+        let mut published = match self.store.lookup_publish(&request.volume_id) {
             Ok(published) => published,
             Err(err) => {
                 tracing::warn!(
@@ -1004,6 +1325,14 @@ impl Node for KubimoNode {
                 None
             }
         };
+        // No publish record can also mean an unclaimed pool pod going away:
+        // its anonymous slot holds only the venv template, so it is discarded
+        // outright rather than kept as a warm cache. If a claim adopted it
+        // mid-teardown this returns the freshly written record instead, and
+        // the ordinary flush path below runs for it.
+        if published.is_none() {
+            published = self.discard_anonymous_slot(&request.volume_id).await;
+        }
         // Everything that decides and performs the final flush runs under the
         // workspace lock, taken *before* we forget our own record or check for
         // siblings — the same lock the publish path holds across slot resolution
@@ -1129,16 +1458,19 @@ impl Node for KubimoNode {
 /// Split out from [`serve`] so tests can drive it over a socket without
 /// duplicating the registration, which is exactly where a proto or service-name
 /// mismatch would hide.
-fn router(node: KubimoNode) -> tonic::service::Routes {
+///
+/// Takes the node by `Arc` because it no longer belongs to the CSI server
+/// alone: the claim watcher shares the same store, credentials and watchers.
+fn router(node: std::sync::Arc<KubimoNode>) -> tonic::service::Routes {
     tonic::service::Routes::default()
         .add_service(IdentityServer::new(KubimoIdentity))
-        .add_service(NodeServer::new(node))
+        .add_service(NodeServer::from_arc(node))
 }
 
 /// Serve the plugin on a unix socket until `shutdown` resolves.
 pub async fn serve(
     socket_path: &Path,
-    node: KubimoNode,
+    node: std::sync::Arc<KubimoNode>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // A stale socket from a previous run would make bind() fail with EADDRINUSE.
@@ -1303,7 +1635,7 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_routes(router(node))
+                .add_routes(router(std::sync::Arc::new(node)))
                 .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener))
                 .await
         });
@@ -1543,6 +1875,189 @@ mod tests {
                 .is_some(),
             "an existing slot must survive a refused publish"
         );
+    }
+
+    /// A pooled volume that also names a workspace or an archive is a
+    /// controller bug, not input to tolerate: one half would be silently
+    /// ignored, and which half decides whether a tenant's data is hydrated.
+    #[tokio::test]
+    async fn a_pooled_volume_must_not_name_a_workspace_or_archive() {
+        let (_dir, node) = node();
+        for (attr, value) in [
+            (ATTR_WORKSPACE, "bmow-abc"),
+            (ATTR_BUCKET, "archives"),
+            (ATTR_SEED_BUCKET, "seeds"),
+        ] {
+            let err = node
+                .publish_pool_volume(proto::NodePublishVolumeRequest {
+                    volume_id: "csi-warm".into(),
+                    target_path: "/tmp/kubimo-test-pool".into(),
+                    volume_context: [
+                        (ATTR_POOLED.to_string(), "true".to_string()),
+                        (attr.to_string(), value.to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                })
+                .await
+                .expect_err("must refuse the ambiguous volume");
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "{attr}");
+            assert!(err.message().contains(attr), "{}", err.message());
+        }
+    }
+
+    /// Anonymous slots are keyed by pod, so the pod identity attributes are
+    /// not optional — without podInfoOnMount there is nothing to key on.
+    #[tokio::test]
+    async fn a_pooled_volume_requires_the_pod_identity() {
+        let (_dir, node) = node();
+        let err = node
+            .publish_pool_volume(proto::NodePublishVolumeRequest {
+                volume_id: "csi-warm".into(),
+                target_path: "/tmp/kubimo-test-pool".into(),
+                volume_context: [(ATTR_POOLED.to_string(), "true".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("must refuse without pod info");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("podInfoOnMount"));
+    }
+
+    /// Deleting an unclaimed warm pod discards its anonymous slot outright —
+    /// there is nothing to flush and nothing worth caching — while the
+    /// bookkeeping for real workspaces stays untouched.
+    #[tokio::test]
+    async fn unpublishing_an_unclaimed_pool_volume_discards_the_slot() {
+        let (dir, node) = node();
+        let slot = node
+            .store()
+            .resolve_or_create_pool("platform", "editors-a1b2c3d4", "uid-1", "csi-warm")
+            .unwrap();
+        let target = dir.path().join("never-mounted");
+        node.node_unpublish_volume(Request::new(proto::NodeUnpublishVolumeRequest {
+            volume_id: "csi-warm".into(),
+            target_path: target.display().to_string(),
+        }))
+        .await
+        .unwrap();
+        assert!(!node.store().layout().slot_dir(&slot.id).is_dir());
+        assert!(node.store().pool_pods().unwrap().is_empty());
+    }
+
+    /// Once a claim has adopted the slot — the pool link is gone and a publish
+    /// record exists — the unpublish must treat it exactly like any workspace
+    /// slot: keep the directory (it is a warm cache now) and take the flush
+    /// bookkeeping path.
+    #[tokio::test]
+    async fn unpublishing_an_adopted_pool_volume_takes_the_flush_path() {
+        let (dir, node) = node();
+        let slot = node
+            .store()
+            .resolve_or_create_pool("platform", "editors-a1b2c3d4", "uid-1", "csi-warm")
+            .unwrap();
+        let adopted = node
+            .store()
+            .adopt_pool_slot("platform", "editors-a1b2c3d4", "platform", "bmow-abc")
+            .unwrap()
+            .unwrap();
+        node.store()
+            .record_publish(
+                "csi-warm",
+                &crate::store::PublishedSlot {
+                    workspace: "bmow-abc".into(),
+                    namespace: "platform".into(),
+                    slot: adopted.id.clone(),
+                    bucket: None,
+                    key_prefix: None,
+                },
+            )
+            .unwrap();
+
+        let target = dir.path().join("never-mounted");
+        node.node_unpublish_volume(Request::new(proto::NodeUnpublishVolumeRequest {
+            volume_id: "csi-warm".into(),
+            target_path: target.display().to_string(),
+        }))
+        .await
+        .unwrap();
+
+        // The publish record is consumed (last one out), but the slot itself
+        // survives as a warm cache, exactly like a cold workspace slot.
+        assert!(node.store().lookup_publish("csi-warm").unwrap().is_none());
+        assert!(node.store().layout().slot_dir(&slot.id).is_dir());
+        assert!(
+            node.store()
+                .lookup("platform", "bmow-abc")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// The unpublish path samples the publish record and the pool link at
+    /// different instants, so a claim can hand the slot over in between: the
+    /// caller saw no record yet, and by the time the pool scan runs the link
+    /// is gone. The claim writes its record before removing the link, and the
+    /// scan's miss must fall back to that record — swallowing it here would
+    /// leave it pinning the workspace as published on this node forever.
+    #[tokio::test]
+    async fn an_adoption_between_the_lookup_and_the_scan_is_still_found() {
+        let (_dir, node) = node();
+        node.store()
+            .resolve_or_create_pool("platform", "editors-a1b2c3d4", "uid-1", "csi-warm")
+            .unwrap();
+        // What `bind` leaves behind, in its order: record first, link gone.
+        node.store()
+            .record_publish(
+                "csi-warm",
+                &crate::store::PublishedSlot {
+                    workspace: "bmow-abc".into(),
+                    namespace: "platform".into(),
+                    slot: node
+                        .store()
+                        .lookup_pool("platform", "editors-a1b2c3d4")
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                    bucket: None,
+                    key_prefix: None,
+                },
+            )
+            .unwrap();
+        node.store()
+            .adopt_pool_slot("platform", "editors-a1b2c3d4", "platform", "bmow-abc")
+            .unwrap()
+            .unwrap();
+
+        let published = node
+            .discard_anonymous_slot("csi-warm")
+            .await
+            .expect("the freshly adopted publish record must be surfaced");
+        assert_eq!(published.workspace, "bmow-abc");
+        assert_eq!(published.namespace, "platform");
+    }
+
+    /// Credentials handed over at the anonymous publish must survive the
+    /// adoption under the workspace's own key, or the claim-time hydration and
+    /// the final flush would both come up empty-handed.
+    #[test]
+    fn adopted_credentials_move_to_the_workspace_key() {
+        let (_dir, node) = node();
+        node.remember_pool_credentials(
+            "platform",
+            "editors-a1b2c3d4",
+            &[("access_key_id".to_string(), "AKIA".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        assert!(node.s3_for("platform", "bmow-abc").is_none());
+        assert!(node.adopt_credentials("platform", "editors-a1b2c3d4", "platform", "bmow-abc"));
+        assert!(node.s3_for("platform", "bmow-abc").is_some());
+        // A second adoption finds nothing: the move is one-shot.
+        assert!(!node.adopt_credentials("platform", "editors-a1b2c3d4", "platform", "bmow-abc"));
     }
 
     /// Advertising STAGE_UNSTAGE would make kubelet call NodeStageVolume, which

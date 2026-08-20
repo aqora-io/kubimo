@@ -1,3 +1,4 @@
+mod apply_claim;
 mod apply_ingress;
 mod apply_owner_reference;
 mod apply_pod;
@@ -70,6 +71,44 @@ impl Reconciler for RunnerReconciler {
         };
 
         let python_runtime = get_workspace_python_runtime(&workspace)?;
+
+        match self
+            .apply_claim(ctx, runner, &workspace, python_runtime)
+            .await?
+        {
+            apply_claim::ClaimOutcome::Claimed { acked: false } => {
+                // The agent is still hydrating the claimed slot. Service and
+                // Ingress are withheld until its ack so no user reaches an
+                // unhydrated workspace. The claimed pod carries an
+                // ownerReference to this runner and this controller owns
+                // pods, so the ack annotation triggers a reconcile promptly;
+                // the requeue is only a safety net.
+                self.apply_owner_reference(ctx, runner).await?;
+                return Ok(Action::requeue(Duration::from_secs(2)));
+            }
+            apply_claim::ClaimOutcome::Claimed { acked: true } => {
+                // apply_pod is skipped wholesale: the claimed pod keeps its
+                // pool name and its warm-slot volume, and must never be
+                // measured against — or replaced by — the cold pod shape.
+                futures::future::try_join_all([
+                    self.apply_owner_reference(ctx, runner).boxed(),
+                    self.apply_service(ctx, runner).map_ok(|_| ()).boxed(),
+                    self.apply_ingress(ctx, runner).map_ok(|_| ()).boxed(),
+                ])
+                .await?;
+                return Ok(Action::await_change());
+            }
+            apply_claim::ClaimOutcome::ColdPath => {
+                // A claim recorded by an earlier reconcile whose pod has since
+                // died must not survive into the cold path — the Ingress and
+                // the platform both prefer `status.claim` over the spec.
+                // Clearing it triggers a reconcile of its own, so stop here
+                // rather than apply resources shaped by the stale claim.
+                if self.clear_stale_claim(ctx, runner).await? {
+                    return Ok(Action::requeue(Duration::from_secs(1)));
+                }
+            }
+        }
 
         let applied = futures::future::try_join_all([
             self.apply_owner_reference(ctx, runner)
