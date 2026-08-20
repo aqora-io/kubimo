@@ -12,5 +12,5 @@ members = [
 default-members = ["controller"]
 
 [workspace.package]
-version = "0.2.8"
+version = "0.2.9-dev.2"
 license = "MIT"
