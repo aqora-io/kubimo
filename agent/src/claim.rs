@@ -216,12 +216,25 @@ async fn bind(
     // restart in between) must fail loudly — hydrating nothing and serving an
     // empty workspace as if it were the tenant's is the one unacceptable
     // outcome.
-    if !node.adopt_credentials(pod_namespace, pod_name, pod_namespace, workspace)
+    let adopted_credentials =
+        node.adopt_credentials(pod_namespace, pod_name, pod_namespace, workspace);
+    if !adopted_credentials
         && node.s3_for(pod_namespace, workspace).is_none()
         && claim.bucket.is_some()
     {
         return Err("no S3 credentials held for this pod");
     }
+    // Failures between here and the publish record must give back what
+    // `adopt_credentials` took: the pod is doomed (the failed ack deletes
+    // it) and its teardown only knows to forget the *pool* key, so a client
+    // left under the workspace key would outlive it for the agent's
+    // lifetime. Failures after the record need no hand-back — the unpublish
+    // flush path uses the credentials and then forgets them itself.
+    let forget_adopted = || {
+        if adopted_credentials {
+            node.forget_credentials(pod_namespace, workspace);
+        }
+    };
     let archive = claim
         .bucket
         .clone()
@@ -256,9 +269,11 @@ async fn bind(
         .await
         .map_err(|err| {
             tracing::warn!(err = %err.message(), workspace, "claim hydration failed");
+            forget_adopted();
             "hydration failed"
         })?;
     if restored && crate::csi::chown_tree(&dir).is_err() {
+        forget_adopted();
         return Err("could not chown the hydrated files");
     }
 
@@ -300,11 +315,13 @@ async fn bind(
         Ok(None) => return Err("the anonymous slot vanished mid-claim"),
         Err(_) => return Err("could not adopt the slot"),
     };
+    // No made-up quota: absent `limit_bytes` means the slot keeps the pool's
+    // interim quota, whose exact value this claim does not know.
     node.publish_slot_status(
         workspace,
         pod_namespace,
         &adopted,
-        claim.limit_bytes.unwrap_or_default(),
+        claim.limit_bytes,
         archive.as_ref(),
     )
     .await;
