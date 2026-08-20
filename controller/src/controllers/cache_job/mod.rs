@@ -48,6 +48,16 @@ impl Reconciler for CacheJobReconciler {
             return Ok(Action::requeue(Duration::from_secs(5)));
         }
 
+        // Held back deliberately (see `CacheJobSpec::start_after`): requeue
+        // until due instead of creating the Job. The deadline lives in the
+        // spec, so it survives a controller restart where a timer would not.
+        if let Some(start_after) = cache_job.spec.start_after {
+            let remaining = start_after - chrono::Utc::now();
+            if let Ok(remaining) = remaining.to_std() {
+                return Ok(Action::requeue(remaining));
+            }
+        }
+
         self.apply_job(ctx, cache_job).await?;
         Ok(Action::await_change())
     }

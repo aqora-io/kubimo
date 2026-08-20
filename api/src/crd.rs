@@ -533,6 +533,13 @@ pub struct CacheJobSpec {
     pub env: Option<Vec<EnvVar>>,
     pub env_from: Option<Vec<EnvFromSource>>,
     pub backoff_limit: Option<i32>,
+    /// Hold the underlying Job back until this instant. Lets a creator record
+    /// the intent durably — in the CR, not in its own memory — while still
+    /// deferring the work: a cache job's pod holds the workspace's slot while
+    /// it runs, which would cost a first open arriving in the meantime its
+    /// warm-pod claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_after: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, Debug, Display)]

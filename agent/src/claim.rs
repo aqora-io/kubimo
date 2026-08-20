@@ -262,20 +262,22 @@ async fn bind(
         return Err("could not chown the hydrated files");
     }
 
-    // From here the slot is the workspace's: unpublish flushes it, the
-    // reaper treats it as a warm cache, and the anonymous identity is gone.
-    let adopted = match store.adopt_pool_slot(pod_namespace, pod_name, pod_namespace, workspace) {
-        Ok(Some(adopted)) => adopted,
-        Ok(None) => return Err("the anonymous slot vanished mid-claim"),
-        Err(_) => return Err("could not adopt the slot"),
-    };
+    // The publish record is written *before* adoption removes the pool link,
+    // so at every instant an unpublish racing this claim finds at least one
+    // of the two: the link (it then blocks on the pool lock and re-checks) or
+    // the record (it runs the ordinary flush path). A window with neither
+    // would let the teardown skip cleanup entirely, and the record written
+    // just after would pin the workspace as published on this node forever —
+    // blocking every future claim and skipping every final flush. Should
+    // adoption fail below, the premature record is harmless: the controller
+    // deletes the pod and the unpublish path consumes the record as usual.
     if store
         .record_publish(
             &pool_slot.volume_id,
             &crate::store::PublishedSlot {
                 workspace: workspace.to_string(),
                 namespace: pod_namespace.to_string(),
-                slot: adopted.id.clone(),
+                slot: pool_slot.id.clone(),
                 bucket: archive.as_ref().map(|archive| archive.bucket.clone()),
                 key_prefix: archive
                     .as_ref()
@@ -291,6 +293,13 @@ async fn bind(
             "could not record the adopted publish; flush on stop will be skipped"
         );
     }
+    // From here the slot is the workspace's: unpublish flushes it, the
+    // reaper treats it as a warm cache, and the anonymous identity is gone.
+    let adopted = match store.adopt_pool_slot(pod_namespace, pod_name, pod_namespace, workspace) {
+        Ok(Some(adopted)) => adopted,
+        Ok(None) => return Err("the anonymous slot vanished mid-claim"),
+        Err(_) => return Err("could not adopt the slot"),
+    };
     node.publish_slot_status(
         workspace,
         pod_namespace,

@@ -1041,7 +1041,22 @@ impl KubimoNode {
     /// adopted the slot while its pod was already being torn down.
     async fn discard_anonymous_slot(&self, volume_id: &str) -> Option<crate::store::PublishedSlot> {
         let (namespace, pod, _) = match self.store.lookup_pool_by_volume(volume_id) {
-            Ok(found) => found?,
+            Ok(Some(found)) => found,
+            // No pool link. A claim can have adopted the slot between the
+            // caller's publish lookup and this scan; the claim writes its
+            // publish record *before* it removes the link, so re-reading the
+            // record now catches that hand-off — returning None here instead
+            // would strand a freshly written record forever.
+            Ok(None) => {
+                return self
+                    .store
+                    .lookup_publish(volume_id)
+                    .map_err(|err| {
+                        tracing::warn!(%err, "could not re-read the publish record after adoption");
+                    })
+                    .ok()
+                    .flatten();
+            }
             Err(err) => {
                 tracing::warn!(%err, "could not scan pool slots; skipping anonymous discard");
                 return None;
@@ -1947,6 +1962,49 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    /// The unpublish path samples the publish record and the pool link at
+    /// different instants, so a claim can hand the slot over in between: the
+    /// caller saw no record yet, and by the time the pool scan runs the link
+    /// is gone. The claim writes its record before removing the link, and the
+    /// scan's miss must fall back to that record — swallowing it here would
+    /// leave it pinning the workspace as published on this node forever.
+    #[tokio::test]
+    async fn an_adoption_between_the_lookup_and_the_scan_is_still_found() {
+        let (_dir, node) = node();
+        node.store()
+            .resolve_or_create_pool("platform", "editors-a1b2c3d4", "uid-1", "csi-warm")
+            .unwrap();
+        // What `bind` leaves behind, in its order: record first, link gone.
+        node.store()
+            .record_publish(
+                "csi-warm",
+                &crate::store::PublishedSlot {
+                    workspace: "bmow-abc".into(),
+                    namespace: "platform".into(),
+                    slot: node
+                        .store()
+                        .lookup_pool("platform", "editors-a1b2c3d4")
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                    bucket: None,
+                    key_prefix: None,
+                },
+            )
+            .unwrap();
+        node.store()
+            .adopt_pool_slot("platform", "editors-a1b2c3d4", "platform", "bmow-abc")
+            .unwrap()
+            .unwrap();
+
+        let published = node
+            .discard_anonymous_slot("csi-warm")
+            .await
+            .expect("the freshly adopted publish record must be surfaced");
+        assert_eq!(published.workspace, "bmow-abc");
+        assert_eq!(published.namespace, "platform");
     }
 
     /// Credentials handed over at the anonymous publish must survive the

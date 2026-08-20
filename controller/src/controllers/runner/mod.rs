@@ -98,7 +98,16 @@ impl Reconciler for RunnerReconciler {
                 .await?;
                 return Ok(Action::await_change());
             }
-            apply_claim::ClaimOutcome::ColdPath => {}
+            apply_claim::ClaimOutcome::ColdPath => {
+                // A claim recorded by an earlier reconcile whose pod has since
+                // died must not survive into the cold path — the Ingress and
+                // the platform both prefer `status.claim` over the spec.
+                // Clearing it triggers a reconcile of its own, so stop here
+                // rather than apply resources shaped by the stale claim.
+                if self.clear_stale_claim(ctx, runner).await? {
+                    return Ok(Action::requeue(Duration::from_secs(1)));
+                }
+            }
         }
 
         let applied = futures::future::try_join_all([
