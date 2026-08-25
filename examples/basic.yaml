@@ -1,26 +1,31 @@
+# S3 credentials for the workspace's archive. They must arrive as an
+# `envFrom` secret reference: the agent receives that Secret as the slot
+# volume's nodePublishSecretRef, while literal `pod.env` values never reach it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: "workspace-s3"
+stringData:
+  AWS_ENDPOINT: "http://minio-tenant-hl.minio-tenant.svc.cluster.local:9000"
+  AWS_REGION: "us-east-1"
+  AWS_ALLOW_HTTP: "true"
+  AWS_ACCESS_KEY_ID: "minioadmin"
+  AWS_SECRET_ACCESS_KEY: "minioadmin"
+---
 apiVersion: kubimo.aqora.io/v1
 kind: Workspace
 metadata:
   name: "workspace"
 spec:
   storage:
-    min: "10Gi"
+    max: "10Gi"
   indexer:
     bucket: "bucket"
     keyPrefix: "workspace/"
-    uploadContent: true
     pod:
-      env:
-        - name: "AWS_ENDPOINT"
-          value: "http://minio-tenant-hl.minio-tenant.svc.cluster.local:9000"
-        - name: "AWS_REGION"
-          value: "us-east-1"
-        - name: "AWS_ALLOW_HTTP"
-          value: "true"
-        - name: "AWS_ACCESS_KEY_ID"
-          value: "minioadmin"
-        - name: "AWS_SECRET_ACCESS_KEY"
-          value: "minioadmin"
+      envFrom:
+        - secretRef:
+            name: "workspace-s3"
 ---
 apiVersion: kubimo.aqora.io/v1
 kind: Runner

@@ -7,18 +7,19 @@ metadata:
     {{- include "kubimo-controller.labels" . | nindent 4 }}
     app.kubernetes.io/component: agent
 ---
-# NOTE: this is a deliberate privilege *concentration* relative to the dedicated
-# path, where each workspace got its own ServiceAccount and a Role scoped with
-# `resourceNames: [<workspace>]`. One agent serves every slot on its node, so it
-# necessarily needs access to every workspace it might host.
+# NOTE: this is a deliberate privilege *concentration* relative to the retired
+# per-workspace indexer pods, where each workspace got its own ServiceAccount
+# and a Role scoped with `resourceNames: [<workspace>]`. One agent serves every
+# slot on its node, so it necessarily needs access to every workspace it might
+# host.
 #
 # The compensating control is that the agent has no Secrets RBAC of its own:
 # credentials reach it per-mount, as a per-workspace Secret named by the
 # volume's `nodePublishSecretRef`, resolved by kubelet in the *runner pod's*
 # namespace and handed to NodePublishVolume, so the agent holds them only in
-# memory while a slot is published. Per-slot scoped credentials (STS
-# AssumeRole with an `s3:prefix` condition) should still gate flipping the
-# default workspace mode to Pooled in production.
+# memory while a slot is published. Production deployments must still scope
+# each per-mount credential to its own workspace's S3 prefix (STS AssumeRole
+# with an `s3:prefix` condition).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

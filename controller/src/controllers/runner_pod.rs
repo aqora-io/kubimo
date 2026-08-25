@@ -16,8 +16,7 @@ use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kubimo::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{
-    CpuQuantity, LogLevel, Requirement, RunnerCommand, StorageQuantity, WorkspaceMode,
-    WorkspacePythonRuntime,
+    CpuQuantity, LogLevel, Requirement, RunnerCommand, StorageQuantity, WorkspacePythonRuntime,
 };
 
 use crate::command::cmd;
@@ -64,12 +63,11 @@ pub(crate) struct RunnerPodParams<'a> {
     pub memory: Option<Requirement<StorageQuantity>>,
     pub env: Vec<EnvVar>,
     pub env_from: Option<Vec<EnvFromSource>>,
-    pub mode: WorkspaceMode,
     /// `None` for warm pods: they belong to no workspace yet, so there is
     /// nothing to co-locate with.
     pub affinity: Option<Affinity>,
-    /// The volume mounted at `/home/me` — a workspace's slot or PVC, or a warm
-    /// pod's anonymous slot.
+    /// The volume mounted at `/home/me` — a workspace's slot, or a warm pod's
+    /// anonymous slot.
     pub slot_volume: Volume,
     /// Additional volumes referenced by sidecars (a warm pod's claim Secret).
     /// Never mounted into the runner container.
@@ -136,7 +134,7 @@ pub(crate) fn build_runner_pod(params: RunnerPodParams<'_>) -> Pod {
             .memory(params.memory)
             .into(),
         volume_mounts: Some(vec![VolumeMount {
-            mount_path: "/home/me".to_string(),
+            mount_path: slot_volume::MOUNT_DIR.to_string(),
             name: volume_name,
             ..Default::default()
         }]),
@@ -188,7 +186,11 @@ pub(crate) fn build_runner_pod(params: RunnerPodParams<'_>) -> Pod {
             automount_service_account_token: Some(false),
             enable_service_links: Some(false),
             affinity: params.affinity,
-            security_context: slot_volume::pod_security_context(params.mode),
+            // No `fsGroup`: kubelet would recursively chown the **entire**
+            // shared node volume — every slot on the node — at every pod
+            // start. The agent chowns exactly the slot it creates instead,
+            // and the runner image already runs as uid 1000.
+            security_context: None,
             hostname: Some("kubimo".into()),
             containers,
             volumes: Some(volumes),

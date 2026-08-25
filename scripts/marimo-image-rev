@@ -13,86 +13,84 @@
 # own `src-` tag did not prevent it: the tag protects the agent *container*, while the
 # venv-template initContainer still followed the chart appVersion.
 #
-# The path list is every input that ends up in the image: the indexer binary's sources
-# (the image ships it), the Dockerfile and the files baked into it, and the bake file
-# that pins the marimo fork. As with the agent, err toward including — over-including
-# costs an unnecessary roll, under-including ships a stale image against a newer
-# controller, and only the second is dangerous. docker-bake.hcl is included whole for
-# that reason, though only its MARIMO_GIT variable feeds this image.
+# The path list is every input that ends up in the image: the Dockerfile, the files baked
+# into it, and the bake file that pins the marimo fork. The image ships no Rust — the
+# workspace crates feed the agent and controller images only. As with the agent, err
+# toward including — over-including costs an unnecessary roll, under-including ships a
+# stale image against a newer controller, and only the second is dangerous.
+# docker-bake.hcl is included whole for that reason, though only its MARIMO_GIT variable
+# feeds this image.
 #
-# This is a content hash rather than a git revision on purpose, and the workspace version
-# is normalized out by scripts/normalize-cargo-version, for exactly the reasons
+# This is a content hash rather than a git revision on purpose, for exactly the reasons
 # agent-image-rev explains.
 #
 #   marimo-image-rev            print the hash
 #   marimo-image-rev --check    verify the path list still covers the image
 set -eu
+cd -- "$(dirname -- "$0")/.."
 
-MARIMO_PATHS="indexer api notebook_meta json-patch-macros k8s-crd-snapshot-storage Cargo.toml Cargo.lock docker/Dockerfile.marimo docker/setup docker/app docker-bake.hcl"
-
-# The members deliberately excluded: neither ends up in this image. If the indexer ever
-# depends on one, the scheme is unsound — a change there would alter the image's contents
-# without moving the tag.
-EXCLUDED_MEMBERS="controller agent"
+MARIMO_PATHS="docker/Dockerfile.marimo docker/setup docker/app docker-bake.hcl"
 
 check() {
-    status=0
-
-    # 1. Every workspace member except the excluded ones must be hashed, so that a newly
-    #    added crate the indexer depends on cannot silently fail to trigger a rebuild.
-    members=$(cargo metadata --format-version 1 --no-deps \
-        | jq -r '.workspace_root as $root
-                 | .packages[]
-                 | (.manifest_path | rtrimstr("/Cargo.toml") | ltrimstr($root + "/"))')
-
-    for member in $members; do
-        skip=0
-        for excluded in $EXCLUDED_MEMBERS; do
-            [ "$member" = "$excluded" ] && skip=1
-        done
-        [ "$skip" -eq 1 ] && continue
-        case " $MARIMO_PATHS " in
-            *" $member "*) ;;
-            *)
-                echo "error: workspace member '$member' is not in MARIMO_PATHS." >&2
-                echo "       Add it, or the marimo image will not be rebuilt when it changes." >&2
-                status=1
-                ;;
-        esac
-    done
-
-    # 2. The indexer must not depend on an excluded member, directly or transitively.
-    for excluded in $EXCLUDED_MEMBERS; do
-        excluded_pkg=$(cargo metadata --format-version 1 --no-deps \
-            | jq -r --arg root "$excluded" '.workspace_root as $wr
-                     | .packages[]
-                     | select((.manifest_path | rtrimstr("/Cargo.toml") | ltrimstr($wr + "/")) == $root)
-                     | .name')
-
-        if [ -n "$excluded_pkg" ] \
-            && cargo tree --package indexer --edges normal,build --prefix none 2>/dev/null \
-            | grep -qx "$excluded_pkg v.*"; then
-            echo "error: indexer depends on '$excluded_pkg', which is excluded from MARIMO_PATHS." >&2
-            echo "       A change there could then alter the marimo image without moving its tag." >&2
-            status=1
-        fi
-    done
-
-    [ "$status" -eq 0 ] && echo "marimo image path list is consistent"
-    return "$status"
+    dockerfile=docker/Dockerfile.marimo
+    if ! [ -f "$dockerfile" ]; then
+        echo "error: $dockerfile not found — did it move? Update MARIMO_PATHS and this check." >&2
+        return 1
+    fi
+    # Every build-context path the image consumes must be under MARIMO_PATHS, or a
+    # change to it would alter the image without moving its tag. Context paths enter
+    # via COPY/ADD sources (stage copies with --from= and checksum-pinned URL/git
+    # sources don't read the context; ARG-valued sources are pinned by the Dockerfile
+    # and docker-bake.hcl, both hashed) and via RUN bind mounts without a from= stage.
+    uncovered=$(awk -v paths="$MARIMO_PATHS" '
+        BEGIN { n = split(paths, allow, " ") }
+        function covered(p,  i) {
+            for (i = 1; i <= n; i++)
+                if (p == allow[i] || index(p, allow[i] "/") == 1) return 1
+            return 0
+        }
+        {
+            for (i = 1; i <= NF; i++) {
+                # Bind is the default mount type, so only an explicit other
+                # type or a from= stage rules a mount out.
+                if ($i !~ /^--mount=/ || $i ~ /from=/) continue
+                if ($i ~ /[=,]type=/ && $i !~ /[=,]type=bind(,|$)/) continue
+                # The context path is source= (or src=); omitted means the
+                # context root, which no path list covers.
+                if (match($i, /[=,](source|src)=[^,]*/)) {
+                    src = substr($i, RSTART, RLENGTH)
+                    sub(/^[=,](source|src)=/, "", src)
+                    if (!covered(src)) print FNR ": " $i
+                } else
+                    print FNR ": " $i " (bind-mounts the build context root)"
+            }
+        }
+        toupper($1) == "COPY" || toupper($1) == "ADD" {
+            if ($0 ~ /--from=/) next
+            for (i = 2; i < NF; i++) {
+                if ($i ~ /^--/) continue
+                if ($i ~ /^[a-z+.-]+:\/\//) continue
+                if ($i ~ /^\$\{?[A-Za-z_]/) continue
+                if (!covered($i)) print FNR ": " $i
+            }
+        }
+    ' "$dockerfile")
+    if [ -n "$uncovered" ]; then
+        echo "error: $dockerfile consumes context paths MARIMO_PATHS does not cover:" >&2
+        echo "$uncovered" | sed 's/^/       line /' >&2
+        echo "       Add them to MARIMO_PATHS, or the marimo image will not be rebuilt" >&2
+        echo "       when they change." >&2
+        return 1
+    fi
+    echo "marimo image path list is consistent"
 }
 
 rev() {
-    normalize="$(dirname "$0")/normalize-cargo-version"
-
     {
         git ls-files -- $MARIMO_PATHS | sort | while IFS= read -r file; do
             # Name as well as content, so a rename or deletion moves the hash.
             echo "$file"
-            case "$file" in
-                Cargo.toml | Cargo.lock) "$normalize" "$file" ;;
-                *) cat "$file" ;;
-            esac
+            cat "$file"
         done
     } | sha256sum | cut -c1-16
 }

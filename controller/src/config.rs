@@ -1,4 +1,4 @@
-use kubimo::{WorkspaceMode, WorkspacePythonRuntime};
+use kubimo::WorkspacePythonRuntime;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -153,11 +153,6 @@ pub struct Config {
     #[cfg(feature = "metrics")]
     #[serde(default)]
     pub metrics: MetricsConfig,
-    /// Mode given to workspaces that have not yet materialized `status.mode`.
-    /// Changing this only affects new workspaces: existing ones pin their mode
-    /// in status on first reconcile, so flipping this is reversible.
-    #[serde(default)]
-    pub default_workspace_mode: WorkspaceMode,
 }
 
 impl Config {
@@ -236,25 +231,6 @@ mod tests {
             .add_source(source)
             .build()?
             .try_deserialize()
-    }
-
-    #[test]
-    fn default_workspace_mode_is_pooled_when_unset() {
-        let config = load_from(&[]).unwrap();
-        assert_eq!(config.default_workspace_mode, WorkspaceMode::Pooled);
-    }
-
-    /// The cutover switch. If this does not deserialize, flipping the default
-    /// silently does nothing.
-    #[test]
-    fn default_workspace_mode_parses_from_env() {
-        let config = load_from(&[("KUBIMO__DEFAULT_WORKSPACE_MODE", "Pooled")]).unwrap();
-        assert_eq!(config.default_workspace_mode, WorkspaceMode::Pooled);
-    }
-
-    #[test]
-    fn default_workspace_mode_rejects_unknown_value() {
-        assert!(load_from(&[("KUBIMO__DEFAULT_WORKSPACE_MODE", "Nonsense")]).is_err());
     }
 
     /// Unset means off: no asset URL is minted and pods stay unchanged.

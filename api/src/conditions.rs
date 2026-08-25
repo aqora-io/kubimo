@@ -7,12 +7,13 @@
 //! controller so that both the writer and its readers compile against the same
 //! constant.
 
-/// The workspace's storage is attached and usable.
+/// The workspace's storage is attached and usable: the runner's slot on the
+/// node data volume is mounted (or, for a claimed warm pod, the claim is
+/// acked).
 ///
-/// Named for the `Dedicated` mechanism (a bound PVC), and deliberately kept
-/// under that name for `Pooled`, where it instead reflects the runner's slot
-/// mount. The mechanism differs; the meaning — "storage is ready" — does not,
-/// and consumers key off the name.
+/// Named for the retired `Dedicated` mechanism (a bound PVC) and deliberately
+/// kept under that name: consumers match the string byte-exactly, and renaming
+/// it would silently pin every runner at the phase before it.
 pub const PVC_BOUND: &str = "PvcBound";
 /// The runner's `Workspace` reports `Ready`.
 pub const WORKSPACE_READY: &str = "WorkspaceReady";

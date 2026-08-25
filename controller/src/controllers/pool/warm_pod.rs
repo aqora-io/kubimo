@@ -14,7 +14,7 @@ use kubimo::pool::{
     CLAIM_MARKER_ENV, CLAIM_MARKER_RELATIVE_PATH, POOL_LABEL, POOL_STATE_LABEL, POOL_STATE_WARM,
     POOL_TEMPLATE_HASH_ANNOTATION, WARM_BASE_URL_ANNOTATION, WARM_TOKEN_ANNOTATION,
 };
-use kubimo::{Pool, WorkspaceMode, prelude::*};
+use kubimo::{Pool, prelude::*};
 use sha2::{Digest, Sha256};
 
 use crate::Config;
@@ -105,7 +105,10 @@ pub(crate) fn build_warm_pod(
     let mut env = pool.spec.env.clone().unwrap_or_default();
     env.push(EnvVar {
         name: CLAIM_MARKER_ENV.to_string(),
-        value: Some(format!("/home/me/{CLAIM_MARKER_RELATIVE_PATH}")),
+        value: Some(format!(
+            "{dir}/{CLAIM_MARKER_RELATIVE_PATH}",
+            dir = slot_volume::MOUNT_DIR
+        )),
         ..Default::default()
     });
     Ok(build_runner_pod(RunnerPodParams {
@@ -146,7 +149,6 @@ pub(crate) fn build_warm_pod(
         memory: pool.spec.memory.clone(),
         env,
         env_from: None,
-        mode: WorkspaceMode::Pooled,
         affinity: None,
         slot_volume: slot_volume::warm_slot_volume(
             pool.spec

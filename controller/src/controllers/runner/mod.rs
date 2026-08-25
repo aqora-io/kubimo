@@ -21,7 +21,6 @@ use kubimo::{
 use crate::backoff::default_error_policy;
 use crate::context::Context;
 use crate::controllers::workspace_affinity;
-use crate::controllers::workspace_python_runtime::get_workspace_python_runtime;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 
@@ -70,7 +69,7 @@ impl Reconciler for RunnerReconciler {
             Some(workspace) => workspace,
         };
 
-        let python_runtime = get_workspace_python_runtime(&workspace)?;
+        let python_runtime = workspace.spec.python_runtime.unwrap_or_default();
 
         match self
             .apply_claim(ctx, runner, &workspace, python_runtime)
@@ -185,12 +184,10 @@ pub(crate) fn is_invalid_request(err: &kubimo::Error) -> bool {
 
 pub(crate) fn is_workspace_ready(workspace: &Workspace) -> bool {
     workspace.status.as_ref().is_some_and(|status| {
-        let ready_condition = status
+        status
             .conditions
             .as_ref()
-            .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"));
-        let has_python_runtime = status.python_runtime.is_some();
-        ready_condition && has_python_runtime
+            .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
     })
 }
 
@@ -205,6 +202,7 @@ pub fn controller(ctx: &Context) -> Controller<Runner> {
         .owns(ings, Default::default())
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn run(
     ctx: Arc<Context>,
     shutdown_signal: impl Future<Output = ()> + Send + Sync + 'static,

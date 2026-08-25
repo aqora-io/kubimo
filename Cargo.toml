@@ -7,7 +7,6 @@ members = [
   "json-patch-macros",
   "indexer",
   "notebook_meta",
-  "k8s-crd-snapshot-storage",
 ]
 default-members = ["controller"]
 

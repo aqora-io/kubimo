@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use kubimo::Workspace;
-use kubimo::k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
+use kubimo::k8s_openapi::api::core::v1::Pod;
 use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kubimo::k8s_openapi::jiff::Timestamp;
 
@@ -31,36 +31,8 @@ fn condition(
     }
 }
 
-pub(super) fn pvc_bound_condition(
-    pvc_name: &str,
-    pvc: Option<&PersistentVolumeClaim>,
-    observed_generation: Option<i64>,
-) -> Condition {
-    let (status, reason, message) = match pvc {
-        None => (
-            "False",
-            "NotFound",
-            format!("PersistentVolumeClaim {pvc_name:?} not found"),
-        ),
-        Some(pvc) => match pvc.status.as_ref().and_then(|s| s.phase.as_deref()) {
-            Some("Bound") => (
-                "True",
-                "Bound",
-                "PersistentVolumeClaim is bound".to_string(),
-            ),
-            Some("Lost") => ("False", "Lost", "PersistentVolumeClaim is lost".to_string()),
-            _ => (
-                "False",
-                "Pending",
-                "PersistentVolumeClaim is pending".to_string(),
-            ),
-        },
-    };
-    condition(PVC_BOUND, status, reason, message, observed_generation)
-}
-
-/// The `Pooled`-mode counterpart of [`pvc_bound_condition`]: reports whether
-/// the workspace's slot on the node data volume is assigned and mountable.
+/// Reports whether the workspace's slot on the node data volume is assigned
+/// and mountable.
 ///
 /// Deliberately keeps the `PvcBound` condition *type*. The platform matches on
 /// that exact string and treats a **missing** condition as unsatisfied, so
@@ -326,7 +298,7 @@ fn container_state_detail(pod: &Pod) -> Option<(String, String)> {
 /// changes; a reason change updates reason/message/observed_generation but
 /// keeps the timestamp; message-only changes are ignored to avoid status
 /// churn from fluctuating messages (e.g. back-off countdowns).
-pub(super) fn upsert_condition(conditions: &mut Vec<Condition>, new: Condition) {
+pub(crate) fn upsert_condition(conditions: &mut Vec<Condition>, new: Condition) {
     let Some(current) = conditions.iter_mut().find(|cond| cond.type_ == new.type_) else {
         conditions.push(new);
         return;
@@ -414,20 +386,10 @@ mod tests {
     use kubimo::WorkspaceStatus;
     use kubimo::k8s_openapi::api::core::v1::{
         ContainerState, ContainerStateRunning, ContainerStateTerminated, ContainerStateWaiting,
-        ContainerStatus, PersistentVolumeClaimStatus, PodCondition, PodStatus,
+        ContainerStatus, PodCondition, PodStatus,
     };
     use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
     use kubimo::k8s_openapi::jiff::Timestamp;
-
-    fn pvc_with_phase(phase: Option<&str>) -> PersistentVolumeClaim {
-        PersistentVolumeClaim {
-            status: phase.map(|phase| PersistentVolumeClaimStatus {
-                phase: Some(phase.to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
 
     fn pod_with_container(state: ContainerState, started: Option<bool>) -> Pod {
         Pod {
@@ -604,42 +566,6 @@ mod tests {
         assert_eq!(condition.type_, type_);
         assert_eq!(condition.status, status);
         assert_eq!(condition.reason, reason);
-    }
-
-    #[test]
-    fn pvc_bound_missing_pvc_is_not_found() {
-        let condition = pvc_bound_condition("ws", None, Some(1));
-        assert_condition(&condition, PVC_BOUND, "False", "NotFound");
-        assert!(condition.message.contains("ws"));
-        assert_eq!(condition.observed_generation, Some(1));
-    }
-
-    #[test]
-    fn pvc_bound_no_status_is_pending() {
-        let pvc = pvc_with_phase(None);
-        let condition = pvc_bound_condition("ws", Some(&pvc), None);
-        assert_condition(&condition, PVC_BOUND, "False", "Pending");
-    }
-
-    #[test]
-    fn pvc_bound_pending_phase_is_pending() {
-        let pvc = pvc_with_phase(Some("Pending"));
-        let condition = pvc_bound_condition("ws", Some(&pvc), None);
-        assert_condition(&condition, PVC_BOUND, "False", "Pending");
-    }
-
-    #[test]
-    fn pvc_bound_bound_phase_is_true() {
-        let pvc = pvc_with_phase(Some("Bound"));
-        let condition = pvc_bound_condition("ws", Some(&pvc), None);
-        assert_condition(&condition, PVC_BOUND, "True", "Bound");
-    }
-
-    #[test]
-    fn pvc_bound_lost_phase_is_lost() {
-        let pvc = pvc_with_phase(Some("Lost"));
-        let condition = pvc_bound_condition("ws", Some(&pvc), None);
-        assert_condition(&condition, PVC_BOUND, "False", "Lost");
     }
 
     #[test]

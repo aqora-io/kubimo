@@ -393,13 +393,14 @@ fn serve(
             // storage path working if RBAC is misconfigured.
             //
             // `kubimo-indexer`, not the inferred default: the agent writes the
-            // same `status.storage` and `WorkspaceDirectory` fields the indexer
-            // does, and in a pooled workspace the cache job still runs an
-            // indexer container. Two managers apply-patching the same fields
-            // conflict, and server-side apply reports that as a 409 we only
-            // log. Sharing the indexer's identity makes the writes idempotent
-            // instead. It must stay distinct from the controller's
-            // `kubimo-controller`, which owns `status.mode` on the same object.
+            // same `status.storage` and `WorkspaceDirectory` fields the
+            // standalone indexer pod once wrote under this identity. Two
+            // managers apply-patching the same fields conflict, and
+            // server-side apply reports that as a 409 we only log. Keeping the
+            // indexer's identity makes the writes idempotent instead. It must
+            // stay distinct from the controller's `kubimo-controller`, which
+            // owns `status.conditions` and `status.pythonRuntime` on the same
+            // object.
             let client = match kubimo::Client::builder()
                 .name("kubimo-indexer")
                 .build()

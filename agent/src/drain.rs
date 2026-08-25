@@ -178,10 +178,10 @@ mod tests {
         assert!(holds_a_slot(&pod_with(vec![slot_volume()])));
     }
 
-    /// A Dedicated workspace's pod survives an agent restart untouched; deleting it
-    /// would be gratuitous disruption.
+    /// A pod on an ordinary PVC volume holds no slot; deleting it would be
+    /// gratuitous disruption.
     #[test]
-    fn ignores_a_pod_on_a_dedicated_pvc() {
+    fn ignores_a_pod_on_a_pvc() {
         let pod = pod_with(vec![Volume {
             name: "workspace".to_string(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource::default()),

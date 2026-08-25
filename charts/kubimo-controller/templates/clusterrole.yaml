@@ -12,11 +12,8 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["*"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles", "rolebindings"]
-    verbs: ["*"]
   - apiGroups: [""]
-    resources: ["pods", "pods/exec", "pods/log", "services", "persistentvolumeclaims", "serviceaccounts"]
+    resources: ["pods", "pods/exec", "pods/log", "services"]
     verbs: ["*"]
   # Secrets get exactly what the controller does and nothing more: create each
   # warm pod's `<pod>-claim` Secret, copy a runner's sidecar secrets into it
@@ -26,6 +23,3 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create", "update", "patch"]
-  - apiGroups: ["snapshot.storage.k8s.io"]
-    resources: ["volumesnapshots"]
-    verbs: ["*"]

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use k8s_openapi::api::core::v1::{Container, EnvFromSource, EnvVar, SecretKeySelector, Volume};
+use k8s_openapi::api::core::v1::{Container, EnvFromSource, EnvVar, SecretKeySelector};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{CustomResource, CustomResourceExt, Resource};
@@ -16,10 +16,7 @@ use crate::validation::{
     budget_selector_not_empty, log_level, pool_command_not_render, pool_immutable_fields,
     pool_max_cpu_greater_than_min, pool_max_memory_greater_than_min, pool_python_runtime_uv,
     runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
-    workspace_auto_scale_bounds, workspace_clone_not_pooled, workspace_immutable_fields,
-    workspace_max_storage_greater_than_min, workspace_mode_no_downgrade,
-    workspace_no_new_dedicated, workspace_no_volume_with_name, workspace_python_runtime_exclusive,
-    workspace_restore_from_exclusive, workspace_restore_from_not_indexer_prefix,
+    workspace_immutable_fields, workspace_restore_from_not_indexer_prefix,
 };
 
 use crate::{
@@ -59,40 +56,13 @@ pub struct Requirement<T> {
     pub max: Option<T>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct AutoScale {
-    pub from: f64,
-    pub to: f64,
-}
-
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageRequirement {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min: Option<StorageQuantity>,
+    /// Hard quota for the workspace's slot on the node data volume. Unset
+    /// means the agent's default limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max: Option<StorageQuantity>,
-    /// DEPRECATED: only honoured in `Dedicated` mode. `Pooled` workspaces take
-    /// their slot quota from `max`, so there is nothing to grow.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto: Option<AutoScale>,
-}
-
-/// How a workspace's files are stored.
-#[derive(
-    Clone, Copy, Debug, Default, Display, Deserialize, Serialize, JsonSchema, PartialEq, Eq,
-)]
-pub enum WorkspaceMode {
-    /// DEPRECATED: refused for new workspaces (`workspace_no_new_dedicated`).
-    /// Existing `Dedicated` workspaces keep running. One ReadWriteOnce PVC per
-    /// workspace. Costs one volume attachment per workspace (Scaleway allows 15
-    /// per node) and gates the runner on volume provisioning.
-    Dedicated,
-    /// A slot on a shared per-node data volume, with S3 as the source of truth.
-    /// One attachment per node regardless of workspace count.
-    #[default]
-    Pooled,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -111,6 +81,8 @@ pub struct WorkspaceIndexer {
     pub bucket: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_prefix: Option<String>,
+    /// Accepted for backward compatibility and ignored: the agent always
+    /// uploads file contents when it flushes a slot to the archive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upload_content: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,12 +136,6 @@ pub struct WorkspaceStatus {
     pub conditions: Option<Vec<Condition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage: Option<WorkspaceStorageStatus>,
-    /// The materialized effective mode, resolved once on first reconcile and
-    /// never changed afterwards. This is what makes flipping the operator's
-    /// default mode safe: without it, changing the default would silently
-    /// re-mode every existing workspace and orphan its PVC.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<WorkspaceMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slot: Option<WorkspaceSlotStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -193,9 +159,8 @@ pub struct WorkspaceStorageStatus {
 /// and any files matched by its `.secrets` patterns).
 ///
 /// The strum spellings are the transport encoding: the controller hands the
-/// mode to the restore init container as the `KUBIMO_RESTORE_SECRETS`
-/// environment variable and to the node agent as the `seedSecrets` volume
-/// attribute, both of which older binaries ignore.
+/// mode to the node agent as the `seedSecrets` volume attribute, which older
+/// agents ignore.
 #[derive(
     Clone,
     Copy,
@@ -230,16 +195,18 @@ pub struct WorkspaceRestoreFrom {
     pub bucket: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_prefix: Option<String>,
-    /// Env for the restore init container (AWS credentials), same shape as
-    /// `indexer.pod`.
+    /// Accepted for backward compatibility and ignored: the restore init
+    /// container this configured is gone. The agent fetches the seed with the
+    /// workspace's own credentials — `indexer.pod.envFrom`, delivered as the
+    /// slot volume's nodePublishSecretRef — so the source archive must be
+    /// readable by those.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pod: Option<WorkspaceIndexerPod>,
     /// How to treat the archive's secrets. Absent means `NamesOnly`.
     ///
-    /// Skips serializing like `WorkspaceSpec.mode` and for the same reason:
-    /// the generated schema lists the permitted enum values and an explicit
-    /// `null` is not among them, so a spec built from `Default` would be
-    /// rejected with "Unsupported value: null".
+    /// Skips serializing because it is an enum: the generated schema lists the
+    /// permitted values and an explicit `null` is not among them, so a spec
+    /// built from `Default` would be rejected with "Unsupported value: null".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secrets: Option<WorkspaceRestoreSecrets>,
 }
@@ -285,50 +252,15 @@ impl std::fmt::Display for WorkspacePythonRuntime {
     shortname = "bmow",
     namespaced,
     status = "WorkspaceStatus",
-    validation = workspace_max_storage_greater_than_min(),
-    validation = workspace_auto_scale_bounds(),
-    validation = workspace_no_volume_with_name(),
-    validation = workspace_restore_from_exclusive(),
     validation = workspace_restore_from_not_indexer_prefix(),
-    validation = workspace_mode_no_downgrade(),
-    validation = workspace_clone_not_pooled(),
-    validation = workspace_no_new_dedicated(),
     validation = workspace_immutable_fields(),
-    validation = workspace_python_runtime_exclusive(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSpec {
-    /// Storage backend for this workspace. Absent means `Pooled` (the operator
-    /// default); the operator's `KUBIMO__DEFAULT_WORKSPACE_MODE` only applies to
-    /// workspaces that have not yet materialized `status.mode`. `Dedicated` is
-    /// deprecated and refused for new workspaces (`workspace_no_new_dedicated`).
-    ///
-    /// This one had to skip before the rest, because it is an enum: the
-    /// generated schema lists the permitted values, and an explicit `null` is
-    /// not among them. Serializing it anyway made every spec built from
-    /// `Default` — which is what the integration tests and any client that
-    /// fills in only the fields it cares about produce — rejected outright with
-    /// "Unsupported value: null". Nullable object fields tolerate it, so the
-    /// breakage arrived with this field and went unnoticed while those tests
-    /// were ignored.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<WorkspaceMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageRequirement>,
-    /// DEPRECATED: only honoured in `Dedicated` mode. `Pooled` workspaces have
-    /// no init Job to run these in; seeding is expressed via `restoreFrom` or
-    /// `cloneWorkspaceName` instead.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub init_containers: Option<Vec<Container>>,
-    /// DEPRECATED: only ever applied to the init Job's pod, so it has no effect
-    /// in `Pooled` mode.
-    #[schemars(length(max = 25))]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub volumes: Option<Vec<Volume>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexer: Option<WorkspaceIndexer>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub clone_workspace_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restore_from: Option<WorkspaceRestoreFrom>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -491,19 +423,6 @@ impl Runner {
 }
 
 impl Workspace {
-    /// Which storage path this workspace takes.
-    ///
-    /// `status.mode` wins once set, so a workspace never changes mode because
-    /// the operator's default changed. Only workspaces that have not yet
-    /// materialized a mode fall through to `default_mode`.
-    pub fn effective_mode(&self, default_mode: WorkspaceMode) -> WorkspaceMode {
-        self.status
-            .as_ref()
-            .and_then(|status| status.mode)
-            .or(self.spec.mode)
-            .unwrap_or(default_mode)
-    }
-
     pub fn new_runner(&self, name: &str, spec: RunnerSpec) -> Result<Runner> {
         let mut runner = Runner::new(
             name,
@@ -615,10 +534,11 @@ pub struct BudgetStatus {
 pub struct BudgetSpec {
     /// matchLabels — objects whose labels are a superset of this map are governed by the budget.
     pub selector: BTreeMap<String, String>,
-    /// Maximum total storage summed across all matching Workspaces. Only
-    /// Workspaces that declare an explicit `spec.storage.min` count against and
-    /// are constrained by this limit; storage-class-default Workspaces (no `min`)
-    /// are neither sized nor refused here.
+    /// Maximum total storage across all matching Workspaces, compared against
+    /// the sum of their agent-reported usage (`status.storage.used`).
+    /// Advisory: overrun is reported through the `Exceeded` condition, nothing
+    /// is refused — the hard per-workspace cap is the `spec.storage.max` slot
+    /// quota.
     pub storage: Option<StorageQuantity>,
 }
 
@@ -918,7 +838,7 @@ mod tests {
     /// A status patch must never carry an explicit `null`.
     ///
     /// `status.slot` and `status.archive` are written by different field
-    /// managers than `status.storage` and `status.mode`, and server-side apply
+    /// managers than `status.storage`, and server-side apply
     /// treats a serialized `null` as "I own this field and it is empty". A
     /// partial write would therefore blank whatever another manager had set.
     #[test]
@@ -950,8 +870,7 @@ mod tests {
     fn a_partial_spec_serializes_no_nulls() {
         let spec = WorkspaceSpec {
             storage: Some(StorageRequirement {
-                min: Some("2Gi".parse().expect("a quantity")),
-                ..Default::default()
+                max: Some("2Gi".parse().expect("a quantity")),
             }),
             indexer: Some(WorkspaceIndexer {
                 bucket: Some("archive".to_string()),
@@ -987,153 +906,9 @@ mod tests {
     fn workspace_crd_has_restore_from_validations() {
         let crd = serde_json::to_string(&Workspace::crd()).unwrap();
         assert!(crd.contains("restoreFrom"));
-        assert!(crd.contains("restoreFrom and cloneWorkspaceName are mutually exclusive"));
         assert!(crd.contains("must not write to the restoreFrom archive location"));
         // The secrets enum's permitted values are part of the schema.
         assert!(crd.contains("NamesOnly"));
-    }
-
-    fn workspace_with(
-        spec_mode: Option<WorkspaceMode>,
-        status_mode: Option<WorkspaceMode>,
-    ) -> Workspace {
-        let mut workspace = Workspace::new(
-            "ws",
-            WorkspaceSpec {
-                mode: spec_mode,
-                ..Default::default()
-            },
-        );
-        workspace.status = Some(WorkspaceStatus {
-            mode: status_mode,
-            ..Default::default()
-        });
-        workspace
-    }
-
-    #[test]
-    fn effective_mode_defaults_to_operator_default_when_unset() {
-        let workspace = workspace_with(None, None);
-        assert_eq!(
-            workspace.effective_mode(WorkspaceMode::Dedicated),
-            WorkspaceMode::Dedicated
-        );
-        assert_eq!(
-            workspace.effective_mode(WorkspaceMode::Pooled),
-            WorkspaceMode::Pooled
-        );
-    }
-
-    #[test]
-    fn effective_mode_prefers_spec_over_operator_default() {
-        let workspace = workspace_with(Some(WorkspaceMode::Pooled), None);
-        assert_eq!(
-            workspace.effective_mode(WorkspaceMode::Dedicated),
-            WorkspaceMode::Pooled
-        );
-    }
-
-    /// The safety property behind flipping `KUBIMO__DEFAULT_WORKSPACE_MODE`:
-    /// a workspace that already materialized a mode must never be re-moded by
-    /// a change to the operator default, or its PVC would be orphaned.
-    #[test]
-    fn materialized_status_mode_pins_against_operator_default_change() {
-        let workspace = workspace_with(None, Some(WorkspaceMode::Dedicated));
-        assert_eq!(
-            workspace.effective_mode(WorkspaceMode::Pooled),
-            WorkspaceMode::Dedicated
-        );
-    }
-
-    /// A workspace with no status at all (freshly created, never reconciled)
-    /// must still resolve, not panic.
-    #[test]
-    fn effective_mode_handles_absent_status() {
-        let workspace = Workspace::new("ws", WorkspaceSpec::default());
-        assert_eq!(
-            workspace.effective_mode(WorkspaceMode::Pooled),
-            WorkspaceMode::Pooled
-        );
-    }
-
-    /// The expression's shape is the contract, not just its presence: a
-    /// workspace is Pooled whenever *either* its spec or its materialized status
-    /// says so, and only an explicit Dedicated spec is refused.
-    #[test]
-    fn workspace_crd_has_mode_downgrade_validation() {
-        let crd = serde_json::to_string(&Workspace::crd()).unwrap();
-        assert!(crd.contains("cannot be changed back from Pooled to Dedicated"));
-
-        let expression = include_str!("./validation/workspace_mode_no_downgrade.cel");
-        assert!(
-            expression.contains("oldSelf.status.mode == \"Pooled\""),
-            "status.mode is materialized on every reconcile, so a Pooled workspace \
-             need not say so in its spec"
-        );
-        // Refusing only an explicit Dedicated is what keeps those same
-        // status-only-Pooled workspaces patchable at all: their spec has no mode,
-        // so demanding `self.spec.mode == \"Pooled\"` would reject every apply.
-        assert!(expression.contains("self.spec.mode == \"Dedicated\""));
-    }
-
-    /// `cloneWorkspaceName` is implemented only for `Dedicated` — `apply_pvc`
-    /// and `apply_job` are its only readers and neither runs under `Pooled`.
-    /// Before this rule the field was accepted and ignored, so a cloned pooled
-    /// workspace came up empty with nothing reporting a problem.
-    ///
-    /// The expression is asserted rather than just the message because its shape
-    /// is the contract: Pooled by spec *or* by materialized status is what
-    /// counts, since a workspace on a Pooled-default cluster carries no
-    /// `spec.mode` at all and reading only that admitted the clone.
-    #[test]
-    fn workspace_crd_refuses_clone_under_pooled() {
-        let crd = serde_json::to_string(&Workspace::crd()).unwrap();
-        assert!(
-            crd.contains("cloneWorkspaceName is not supported for Pooled workspaces"),
-            "the rule is missing from the generated CRD"
-        );
-
-        let expression = include_str!("./validation/workspace_clone_not_pooled.cel");
-        // Pooled + a clone is the rejected combination, whichever half of the
-        // object says Pooled...
-        assert!(expression.contains("self.spec.mode == \"Pooled\""));
-        assert!(
-            expression.contains("self.status.mode == \"Pooled\""),
-            "a workspace that is Pooled only by materialized status still has \
-             no PVC to clone"
-        );
-        assert!(expression.contains("has(self.spec.cloneWorkspaceName)"));
-        // ...and every read is guarded, so a workspace that has neither a spec
-        // mode nor a status is not rejected on a guess about the operator
-        // default, which CEL cannot see.
-        assert!(expression.contains("has(self.spec.mode)"));
-        assert!(expression.contains("has(self.status)"));
-    }
-
-    /// `Dedicated` is deprecated: a fresh `spec.mode: Dedicated` is refused,
-    /// while a workspace already materialized as Dedicated is grandfathered. The
-    /// expression is asserted, not just the message, because the grandfather
-    /// clause keying on `status.mode` — not `oldSelf` — is the contract that
-    /// keeps existing Dedicated workspaces writable.
-    #[test]
-    fn workspace_crd_refuses_new_dedicated() {
-        let crd = serde_json::to_string(&Workspace::crd()).unwrap();
-        assert!(
-            crd.contains("Dedicated workspaces are deprecated"),
-            "the rule is missing from the generated CRD"
-        );
-
-        let expression = include_str!("./validation/workspace_no_new_dedicated.cel");
-        // An explicit Dedicated spec is what is refused...
-        assert!(expression.contains("self.spec.mode == \"Dedicated\""));
-        // ...unless the workspace was already materialized Dedicated, which only
-        // the controller can do (status is ignored on create), so it
-        // grandfathers existing workspaces without admitting new ones.
-        assert!(
-            expression.contains("self.status.mode == \"Dedicated\""),
-            "existing Dedicated workspaces are grandfathered by materialized \
-             status, not by spec"
-        );
     }
 
     /// A status apply with only a claim recorded must not blank the fields the

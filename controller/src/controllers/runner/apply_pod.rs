@@ -25,14 +25,13 @@ impl RunnerReconciler {
         &self,
         ctx: &Context,
         runner: &Runner,
-        // The workspace decides how storage is attached. Passed in rather than
+        // The workspace supplies the slot's sources. Passed in rather than
         // fetched again: the caller has already read it to gate on Ready, and a
         // second GET could see a different generation than the gate did.
         workspace: &Workspace,
         python_runtime: WorkspacePythonRuntime,
     ) -> Result<PodApply, kubimo::Error> {
         let namespace = runner.require_namespace()?;
-        let mode = workspace.effective_mode(ctx.config.default_workspace_mode);
         let sources = slot_volume::SlotSources::from_workspace(Some(workspace));
         let token = match runner.spec.token.as_ref() {
             Some(RunnerToken {
@@ -64,13 +63,11 @@ impl RunnerReconciler {
             memory: runner.spec.memory.clone(),
             env: runner.spec.env.clone().unwrap_or_default(),
             env_from: runner.spec.env_from.clone(),
-            mode,
             affinity: Some(workspace_affinity::workspace_affinity(
                 &runner.spec.workspace,
             )),
             slot_volume: slot_volume::workspace_volume(
                 &runner.spec.workspace,
-                mode,
                 // Render never mutates user data, so give it a read-only
                 // bind and let one published version's slot be shared.
                 matches!(runner.spec.command, RunnerCommand::Render),
@@ -197,7 +194,6 @@ mod tests {
     use super::*;
     use crate::controllers::runner_pod::sandbox_runtime_class;
     use crate::controllers::slot_volume;
-    use kubimo::WorkspaceMode;
     use kubimo::k8s_openapi::api::core::v1::PodSpec;
 
     /// Render never mutates user data, so its bind is read-only — which also
@@ -211,7 +207,6 @@ mod tests {
         ] {
             let volume = slot_volume::workspace_volume(
                 "bmow-test",
-                WorkspaceMode::Pooled,
                 matches!(command, RunnerCommand::Render),
                 Default::default(),
                 Default::default(),

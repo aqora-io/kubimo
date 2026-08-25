@@ -21,10 +21,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Field manager for everything the agent writes *as the indexer*:
-/// `WorkspaceDirectory` objects and `status.storage`. Sharing the indexer's
-/// identity keeps the two idempotent instead of conflicting under server-side
-/// apply, and it must stay distinct from the controller's own manager, which
-/// owns `status.mode` on the same object.
+/// `WorkspaceDirectory` objects and `status.storage`. The standalone indexer
+/// pod wrote these fields under this identity, so keeping it makes the
+/// agent's applies idempotent with what existing objects already carry under
+/// server-side apply — and it must stay distinct from the controller's own
+/// manager, which owns `status.conditions` and `status.pythonRuntime` on the
+/// same object.
 const INDEXER_MANAGER: &str = "kubimo-indexer";
 
 /// Field manager for what only the agent knows: `status.slot` and

@@ -22,7 +22,7 @@
 #   agent-image-rev --check    verify the path list still covers the agent
 set -eu
 
-AGENT_PATHS="agent api indexer notebook_meta json-patch-macros k8s-crd-snapshot-storage Cargo.toml Cargo.lock docker/Dockerfile.agent"
+AGENT_PATHS="agent api indexer notebook_meta json-patch-macros Cargo.toml Cargo.lock docker/Dockerfile.agent"
 
 # The one member deliberately excluded. If the agent ever depends on it, the whole
 # scheme is unsound: a controller change would alter agent behaviour without moving

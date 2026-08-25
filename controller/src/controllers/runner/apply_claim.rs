@@ -18,8 +18,7 @@ use kubimo::pool::{
 };
 use kubimo::{
     CpuQuantity, CpuUnit, FilterParams, KubimoLabel, Pool, Requirement, Runner, RunnerClaim,
-    StorageQuantity, Workspace, WorkspaceMode, WorkspacePythonRuntime, json_patch_macros::*,
-    prelude::*,
+    StorageQuantity, Workspace, WorkspacePythonRuntime, json_patch_macros::*, prelude::*,
 };
 
 use crate::context::Context;
@@ -447,9 +446,6 @@ fn eligible(
     }
     if pool.spec.python_runtime.unwrap_or_default() != python_runtime {
         return Err("python runtime differs from the pool's");
-    }
-    if workspace.effective_mode(ctx.config.default_workspace_mode) != WorkspaceMode::Pooled {
-        return Err("workspace is not Pooled");
     }
     let sources = SlotSources::from_workspace(Some(workspace));
     // Load-bearing, not cosmetic: kubelet handed the agent the pool's S3

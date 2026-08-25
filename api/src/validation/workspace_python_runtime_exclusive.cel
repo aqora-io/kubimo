@@ -1,1 +1,0 @@
-!has(self.spec.pythonRuntime) || !has(self.spec.cloneWorkspaceName)
