@@ -28,7 +28,6 @@ mod validation;
 // of the same version this crate was built against.
 pub use chrono;
 pub use json_patch_macros;
-pub use k8s_crd_snapshot_storage;
 pub use k8s_openapi;
 pub use kube;
 pub use url;
@@ -38,15 +37,15 @@ pub use api::{Api, ApiListStream};
 #[cfg(feature = "client")]
 pub use client::{Client, ClientBuilder};
 pub use crd::{
-    AutoScale, Budget, BudgetResourceStatus, BudgetSpec, BudgetStatus, CacheJob, CacheJobField,
-    CacheJobSpec, LogLevel, Pool, PoolSpec, PoolStatus, Requirement, Runner, RunnerClaim,
-    RunnerCommand, RunnerField, RunnerIngress, RunnerLifecycle, RunnerSpec, RunnerStatus,
-    RunnerTls, RunnerToken, StorageRequirement, Workspace, WorkspaceArchiveStatus, WorkspaceDir,
-    WorkspaceDirContentUrl, WorkspaceDirDirectory, WorkspaceDirEntry, WorkspaceDirField,
-    WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache, WorkspaceDirSpec,
-    WorkspaceDirSymlink, WorkspaceField, WorkspaceIndexer, WorkspaceIndexerPod, WorkspaceMode,
-    WorkspacePythonRuntime, WorkspaceRestoreFrom, WorkspaceRestoreSecrets, WorkspaceSlotStatus,
-    WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus, all_crds,
+    Budget, BudgetResourceStatus, BudgetSpec, BudgetStatus, CacheJob, CacheJobField, CacheJobSpec,
+    LogLevel, Pool, PoolSpec, PoolStatus, Requirement, Runner, RunnerClaim, RunnerCommand,
+    RunnerField, RunnerIngress, RunnerLifecycle, RunnerSpec, RunnerStatus, RunnerTls, RunnerToken,
+    StorageRequirement, Workspace, WorkspaceArchiveStatus, WorkspaceDir, WorkspaceDirContentUrl,
+    WorkspaceDirDirectory, WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile,
+    WorkspaceDirMarimo, WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink,
+    WorkspaceField, WorkspaceIndexer, WorkspaceIndexerPod, WorkspacePythonRuntime,
+    WorkspaceRestoreFrom, WorkspaceRestoreSecrets, WorkspaceSlotStatus, WorkspaceSpec,
+    WorkspaceStatus, WorkspaceStorageStatus, all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;

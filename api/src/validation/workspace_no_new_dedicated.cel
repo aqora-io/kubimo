@@ -1,2 +1,0 @@
-!(has(self.spec.mode) && self.spec.mode == "Dedicated") ||
-(has(self.status) && has(self.status.mode) && self.status.mode == "Dedicated")

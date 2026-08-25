@@ -1,20 +1,19 @@
-//! The volume a workspace's files are mounted from, in either storage mode.
+//! The volume a workspace's files are mounted from.
 //!
 //! Shared by the runner pod and the cache job. They mount the same workspace at
 //! the same path, so a difference between them is never a design choice — it is
-//! a bug. Under `Pooled` in particular, a cache job that still asked for the
-//! workspace's PVC would sit Pending forever, because no such PVC exists.
+//! a bug.
 
 use std::collections::BTreeMap;
 
-use kubimo::k8s_openapi::api::core::v1::{
-    CSIVolumeSource, LocalObjectReference, PersistentVolumeClaimVolumeSource, PodSecurityContext,
-    Volume,
-};
-use kubimo::{Workspace, WorkspaceMode, WorkspacePythonRuntime, WorkspaceRestoreSecrets};
+use kubimo::k8s_openapi::api::core::v1::{CSIVolumeSource, LocalObjectReference, Volume};
+use kubimo::{Workspace, WorkspacePythonRuntime, WorkspaceRestoreSecrets};
 
 /// Must match the `CSIDriver` object the agent registers under.
 pub(crate) const SLOT_CSI_DRIVER: &str = "kubimo.aqora.io";
+
+/// Where workspace pods mount the slot (the runner image's home directory).
+pub(crate) const MOUNT_DIR: &str = "/home/me";
 
 /// Where the agent sources a slot's contents.
 #[derive(Debug, Default, Clone)]
@@ -26,15 +25,12 @@ pub(crate) struct SlotSources {
     /// starts empty and is never persisted.
     pub archive: Option<(Option<String>, Option<String>)>,
     /// Fallback source for a workspace that has never been indexed, from
-    /// `spec.restoreFrom`. Consumed by a restore init container under
-    /// `Dedicated`; under `Pooled` there is no init Job, so it travels to the
-    /// agent and is applied only when `archive` turns out to have no manifest.
-    /// Carries the secrets mode from `spec.restoreFrom.secrets` alongside the
-    /// location.
+    /// `spec.restoreFrom`. Travels to the agent and is applied only when
+    /// `archive` turns out to have no manifest. Carries the secrets mode from
+    /// `spec.restoreFrom.secrets` alongside the location.
     pub seed: Option<(String, Option<String>, WorkspaceRestoreSecrets)>,
     /// Secret holding the workspace's S3 credentials, from
-    /// `spec.indexer.pod.envFrom` — the same one the dedicated indexer pod
-    /// mounts.
+    /// `spec.indexer.pod.envFrom`.
     ///
     /// Passed to the agent as the volume's `nodePublishSecretRef` rather than
     /// configured on the agent itself, because a node serves workspaces from
@@ -76,9 +72,8 @@ impl SlotSources {
 /// The Secret an indexer spec pulls its S3 credentials from.
 ///
 /// Takes the first `envFrom` secret reference, which is how the platform
-/// expresses this and how the dedicated indexer container consumes it. `env`
-/// entries are not considered: a `secretKeyRef` there names a single key, not
-/// the whole credential set.
+/// expresses this. `env` entries are not considered: a `secretKeyRef` there
+/// names a single key, not the whole credential set.
 fn credentials_secret_name(indexer: &kubimo::WorkspaceIndexer) -> Option<String> {
     indexer
         .pod
@@ -89,48 +84,35 @@ fn credentials_secret_name(indexer: &kubimo::WorkspaceIndexer) -> Option<String>
         .find_map(|source| source.secret_ref.as_ref()?.name.clone().into())
 }
 
-/// The volume mounted at `/home/me`.
-///
-/// `Dedicated` uses the workspace's own PVC. `Pooled` uses an **inline
-/// ephemeral** CSI volume served by the node agent, which resolves the
-/// workspace to a slot on the node's shared data volume. Inline means no
-/// PersistentVolume and therefore no topology constraint, so the scheduler
-/// stays in charge — a per-node PVC would force hostname pinning, which
-/// cluster-autoscaler can never satisfy against its template node.
+/// The volume mounted at `/home/me`: an **inline ephemeral** CSI volume served
+/// by the node agent, which resolves the workspace to a slot on the node's
+/// shared data volume. Inline means no PersistentVolume and therefore no
+/// topology constraint, so the scheduler stays in charge — a per-node PVC
+/// would force hostname pinning, which cluster-autoscaler can never satisfy
+/// against its template node.
 pub(crate) fn workspace_volume(
     workspace_name: &str,
-    mode: WorkspaceMode,
     read_only: bool,
     sources: SlotSources,
     python_runtime: WorkspacePythonRuntime,
 ) -> Volume {
-    match mode {
-        WorkspaceMode::Dedicated => Volume {
-            name: workspace_name.to_string(),
-            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                claim_name: workspace_name.to_string(),
-                ..Default::default()
-            }),
+    Volume {
+        name: workspace_name.to_string(),
+        csi: Some(CSIVolumeSource {
+            driver: SLOT_CSI_DRIVER.to_string(),
+            read_only: Some(read_only),
+            // Resolved by kubelet in this pod's namespace and delivered to
+            // the agent as `NodePublishVolumeRequest.secrets`. Never put
+            // credentials in `volume_attributes`: those are stored on the
+            // Pod object and readable by anything that can read Pods.
+            node_publish_secret_ref: sources
+                .credentials_secret
+                .clone()
+                .map(|name| LocalObjectReference { name }),
+            volume_attributes: Some(slot_attributes(workspace_name, sources, python_runtime)),
             ..Default::default()
-        },
-        WorkspaceMode::Pooled => Volume {
-            name: workspace_name.to_string(),
-            csi: Some(CSIVolumeSource {
-                driver: SLOT_CSI_DRIVER.to_string(),
-                read_only: Some(read_only),
-                // Resolved by kubelet in this pod's namespace and delivered to
-                // the agent as `NodePublishVolumeRequest.secrets`. Never put
-                // credentials in `volume_attributes`: those are stored on the
-                // Pod object and readable by anything that can read Pods.
-                node_publish_secret_ref: sources
-                    .credentials_secret
-                    .clone()
-                    .map(|name| LocalObjectReference { name }),
-                volume_attributes: Some(slot_attributes(workspace_name, sources, python_runtime)),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
+        }),
+        ..Default::default()
     }
 }
 
@@ -214,22 +196,6 @@ pub(crate) fn warm_slot_volume(
     }
 }
 
-/// `fsGroup` is only safe on a volume the workspace owns outright.
-///
-/// On the shared node volume kubelet would recursively chown the **entire**
-/// volume — every slot on the node — at every pod start, which blows past the
-/// runner's 90s startup probe once a node is full. The agent chowns exactly the
-/// slot it creates instead, and the runner image already runs as uid 1000.
-pub(crate) fn pod_security_context(mode: WorkspaceMode) -> Option<PodSecurityContext> {
-    match mode {
-        WorkspaceMode::Dedicated => Some(PodSecurityContext {
-            fs_group: Some(1000),
-            ..Default::default()
-        }),
-        WorkspaceMode::Pooled => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,30 +214,8 @@ mod tests {
     }
 
     #[test]
-    fn dedicated_mode_uses_the_workspace_pvc() {
-        let volume = workspace_volume(
-            "bmow-test",
-            WorkspaceMode::Dedicated,
-            false,
-            sources(),
-            Default::default(),
-        );
-        assert_eq!(
-            volume.persistent_volume_claim.unwrap().claim_name,
-            "bmow-test"
-        );
-        assert!(volume.csi.is_none());
-    }
-
-    #[test]
-    fn pooled_mode_passes_the_slot_sources_through() {
-        let volume = workspace_volume(
-            "bmow-test",
-            WorkspaceMode::Pooled,
-            false,
-            sources(),
-            Default::default(),
-        );
+    fn workspace_volume_passes_the_slot_sources_through() {
+        let volume = workspace_volume("bmow-test", false, sources(), Default::default());
         assert!(volume.persistent_volume_claim.is_none());
         let csi = volume.csi.unwrap();
         assert_eq!(csi.driver, SLOT_CSI_DRIVER);
@@ -294,10 +238,9 @@ mod tests {
     /// The safe default travels explicitly, and only alongside a seed — a
     /// workspace without `restoreFrom` has nothing to gate.
     #[test]
-    fn pooled_mode_pins_the_seed_secrets_default() {
+    fn workspace_volume_pins_the_seed_secrets_default() {
         let volume = workspace_volume(
             "bmow-test",
-            WorkspaceMode::Pooled,
             false,
             SlotSources {
                 seed: Some(("bucket".into(), None, WorkspaceRestoreSecrets::default())),
@@ -313,14 +256,8 @@ mod tests {
     /// from several S3 accounts at once — so kubelet has to hand it each
     /// workspace's own, resolved from this ref in the *pod's* namespace.
     #[test]
-    fn pooled_mode_names_the_workspace_credentials_secret() {
-        let volume = workspace_volume(
-            "bmow-test",
-            WorkspaceMode::Pooled,
-            false,
-            sources(),
-            Default::default(),
-        );
+    fn workspace_volume_names_the_workspace_credentials_secret() {
+        let volume = workspace_volume("bmow-test", false, sources(), Default::default());
         assert_eq!(
             volume.csi.unwrap().node_publish_secret_ref.unwrap().name,
             "s3-credentials"
@@ -331,13 +268,7 @@ mod tests {
     /// read Pods. Credentials must only ever travel via the secret ref.
     #[test]
     fn credentials_never_appear_in_volume_attributes() {
-        let volume = workspace_volume(
-            "bmow-test",
-            WorkspaceMode::Pooled,
-            false,
-            sources(),
-            Default::default(),
-        );
+        let volume = workspace_volume("bmow-test", false, sources(), Default::default());
         let attrs = volume.csi.unwrap().volume_attributes.unwrap();
         for (key, value) in &attrs {
             if key == "seedSecrets" {
@@ -352,8 +283,6 @@ mod tests {
         }
     }
 
-    /// Derived from the same `envFrom` secret the dedicated indexer container
-    /// mounts, so the two modes read the same credentials.
     #[test]
     fn the_credentials_secret_comes_from_the_indexer_env_from() {
         use kubimo::k8s_openapi::api::core::v1::{EnvFromSource, SecretEnvSource};
@@ -382,10 +311,9 @@ mod tests {
     /// A workspace with no indexer config must not get a half-specified
     /// archive: the agent keys off `bucket` being absent to start empty.
     #[test]
-    fn pooled_mode_omits_archive_attributes_when_unconfigured() {
+    fn workspace_volume_omits_archive_attributes_when_unconfigured() {
         let volume = workspace_volume(
             "bmow-test",
-            WorkspaceMode::Pooled,
             false,
             SlotSources::default(),
             Default::default(),
@@ -399,7 +327,7 @@ mod tests {
     }
 
     /// A warm slot names no workspace and no archive — the mirror image of
-    /// `pooled_mode_passes_the_slot_sources_through`. An agent seeing both
+    /// `workspace_volume_passes_the_slot_sources_through`. An agent seeing both
     /// `pooled` and a workspace would be looking at a controller bug and must
     /// refuse, so the builder can never produce that combination.
     #[test]
@@ -435,18 +363,5 @@ mod tests {
             assert!(!key.to_lowercase().contains("secret"), "{key}");
             assert_ne!(value, "s3-credentials", "{key} leaked the secret name");
         }
-    }
-
-    /// Kubelet applies `fsGroup` to the whole volume, which on a shared node
-    /// volume is every tenant's slot.
-    #[test]
-    fn pooled_mode_drops_fs_group() {
-        assert!(pod_security_context(WorkspaceMode::Pooled).is_none());
-        assert_eq!(
-            pod_security_context(WorkspaceMode::Dedicated)
-                .unwrap()
-                .fs_group,
-            Some(1000)
-        );
     }
 }

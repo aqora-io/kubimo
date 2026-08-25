@@ -27,8 +27,8 @@ jobs:
       # against a newer controller.
       - name: Agent image path list
         run: ./scripts/agent-image-rev --check
-      # Same for the marimo image, which ships the indexer binary. Missing a crate here
-      # ships a stale indexer, and leaves runners on a venv the agent no longer stages.
+      # Same for the marimo image. It ships no Rust, so the check instead asserts the
+      # Dockerfile has not started copying workspace sources the path list misses.
       - name: Marimo image path list
         run: ./scripts/marimo-image-rev --check
       - name: Format

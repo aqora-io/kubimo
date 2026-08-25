@@ -29,6 +29,7 @@ impl Reconciler for WorkspaceDirectoryReconciler {
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn run(
     ctx: Arc<Context>,
     shutdown_signal: impl Future<Output = ()> + Send + Sync + 'static,

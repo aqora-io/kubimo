@@ -1,10 +1,10 @@
 //! Seeding a slot's virtualenv from a node-local template.
 //!
 //! The marimo image carries a ~920MB venv at `/home/me/venv` that is a near
-//! duplicate of its own system site-packages. The dedicated path copies that
-//! onto every workspace volume (`cp -a /home/me/.`), which is why a fresh 2Gi
-//! workspace reports ~962MB used before the user writes anything, and why
-//! `uv sync` on a cold slot is slow.
+//! duplicate of its own system site-packages. Copying that onto every
+//! workspace volume (`cp -a /home/me/.`) is why a fresh 2Gi workspace used to
+//! report ~962MB before the user wrote anything, and why `uv sync` on a cold
+//! slot is slow.
 //!
 //! Here the template is materialised **once per node** by an init container on
 //! the agent DaemonSet, and each slot gets a reflink copy: a new inode sharing
@@ -51,12 +51,10 @@ fn template_subdir(data_root: &Path, python_runtime: Option<&str>) -> Result<Pat
 /// Covers the whole home skeleton, not just the venv: a brand-new workspace
 /// also needs `workspace/pyproject.toml`, without which `uv sync` fails with
 /// "No `pyproject.toml` found" and the runner never starts. This is the same
-/// content the dedicated path's `init-dirs` container copies with
-/// `cp -a /home/me/. /mnt`.
+/// content the marimo image ships at `/home/me`.
 ///
 /// Runs *before* hydration, so a workspace that has an archive overlays its own
-/// files on top of the skeleton — matching the dedicated ordering of
-/// init-dirs then restore.
+/// files on top of the skeleton.
 ///
 /// Returns `false` when no template has been staged on this node, which is not
 /// an error: the runner falls back to building its own, exactly as today.

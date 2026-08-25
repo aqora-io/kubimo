@@ -9,10 +9,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 minikube addons enable dashboard
 minikube addons enable metrics-server
 
-# The node agent, so `Pooled` workspaces have something to mount. Its CSI plugin is
-# the only thing that can serve a slot, and a workspace created without one comes up
-# unmountable *permanently*: kubimo pins the mode into `status.mode` on first
-# reconcile and a CEL rule refuses Pooled -> Dedicated.
+# The node agent. Its CSI plugin is the only way a workspace gets storage: without
+# it every runner pod waits in ContainerCreating for the `kubimo.aqora.io` driver.
 #
 # The agent only. The controller is meant to run on the host under `cargo run` so it
 # can be iterated on, and a second one in-cluster would reconcile the same objects.

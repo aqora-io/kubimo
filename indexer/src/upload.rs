@@ -13,10 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
-use futures::{
-    FutureExt,
-    stream::{StreamExt, TryStreamExt, futures_unordered::FuturesUnordered},
-};
+use futures::stream::{StreamExt, TryStreamExt, futures_unordered::FuturesUnordered};
 use kubimo::FilterParams;
 use kubimo::{
     ManifestSecrets, ResourceNameExt, SecretEnvEntry, SecretFileEntry, Workspace,
@@ -712,94 +709,6 @@ async fn clean_url(client: &S3Client, url: Url) {
     } else {
         tracing::info!("Deleted object at {}", url);
     }
-}
-
-async fn clean_workspace_dir(client: &kubimo::Client, name: String) {
-    if let Err(err) = client.api::<WorkspaceDir>().delete(&name).await {
-        tracing::error!("Error deleting workspace dir {}: {}", name, err);
-    } else {
-        tracing::info!("Deleted workspace dir {}", name);
-    }
-}
-
-/// Purge everything a deleted workspace left behind: its `WorkspaceDirectory`
-/// CRs and every object they name, plus the archive manifest.
-///
-/// The manifest is passed in rather than discovered because its key is built
-/// from the bucket and prefix alone, never from the CRs. Leaving it behind is
-/// not merely litter: a workspace recreated at the same fixed `keyPrefix` finds
-/// that manifest, reads it as proof that an archive exists, and refuses to
-/// index itself until a file appears.
-///
-/// Known limitation: the sweep is driven by the CRs, so an archive whose CRs
-/// are already gone is missed entirely. Deleting by prefix instead would need a
-/// list API that `S3Client` does not have.
-pub async fn clean(
-    client: &kubimo::Client,
-    s3: &S3Client,
-    name: &str,
-    bucket: Option<&str>,
-    key_prefix: Option<&str>,
-) {
-    let mut workspace_dirs = client
-        .api::<WorkspaceDir>()
-        .list(&FilterParams::new().with_fields((WorkspaceDirField::Workspace, name)));
-    let futs = FuturesUnordered::new();
-    if let Some(bucket) = bucket {
-        match kubimo::manifest_url(bucket, key_prefix) {
-            Ok(url) => futs.push(clean_url(s3, url).boxed()),
-            Err(err) => tracing::error!("Error building manifest url: {err}"),
-        }
-        // The secrets object is keyed like the manifest and recorded nowhere
-        // else, so it too must be deleted by construction rather than by sweep.
-        match kubimo::secrets_url(bucket, key_prefix) {
-            Ok(url) => futs.push(clean_url(s3, url).boxed()),
-            Err(err) => tracing::error!("Error building secrets url: {err}"),
-        }
-    }
-    while let Some(workspace_dir) = workspace_dirs.next().await {
-        let workspace_dir = match workspace_dir {
-            Ok(dir) => dir.item,
-            Err(err) => {
-                tracing::error!("Error listing workspace dirs: {}", err);
-                continue;
-            }
-        };
-        match workspace_dir.name() {
-            Ok(name) => {
-                futs.push(clean_workspace_dir(client, name.to_owned()).boxed());
-            }
-            Err(err) => {
-                tracing::error!("Error getting workspace dir name: {}", err);
-            }
-        }
-        for entry in workspace_dir.spec.entries.unwrap_or_default().as_slice() {
-            let Some(file) = &entry.file else {
-                continue;
-            };
-            // Delete the file's content too. `clean` used to remove only the
-            // marimo meta/cache objects, so deleting a workspace left every
-            // uploaded file behind in the bucket forever.
-            if let Some(content) = &file.content {
-                futs.push(clean_url(s3, content.url.clone()).boxed());
-            }
-            let Some(marimo) = &file.marimo else {
-                continue;
-            };
-            if let Some(url) = &marimo.meta_json {
-                futs.push(clean_url(s3, url.url.clone()).boxed());
-            }
-            let Some(caches) = &marimo.caches else {
-                continue;
-            };
-            for cache in caches {
-                if let Some(url) = &cache.url {
-                    futs.push(clean_url(s3, url.url.clone()).boxed());
-                }
-            }
-        }
-    }
-    futs.collect::<()>().await;
 }
 
 #[derive(Debug, Error)]

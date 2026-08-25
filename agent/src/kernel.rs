@@ -1,7 +1,8 @@
 //! Kernel version gating.
 //!
 //! A shared node volume removes the per-workspace filesystem boundary that a
-//! dedicated PVC provided, so kernel filesystem bugs become cross-tenant.
+//! PVC per workspace would provide, so kernel filesystem bugs become
+//! cross-tenant.
 //! [CVE-2026-64600 ("RefluXFS")](https://www.openwall.com/lists/oss-security/2026/07/22/14)
 //! is the concrete example the design was reviewed against: an unprivileged
 //! local user can reflink-clone a readable file and race `O_DIRECT` writes to

@@ -474,8 +474,7 @@ impl KubimoNode {
     /// Deleting a workspace tears down its runners, and the resulting unpublish
     /// would otherwise flush the slot straight back into the S3 prefix the
     /// platform had just purged — recreating a full copy of data that was meant
-    /// to be erased, with no CR left to find it by. The dedicated path has no
-    /// equivalent, because its indexer pod does not upload on SIGTERM.
+    /// to be erased, with no CR left to find it by.
     ///
     /// Errors count as "still there": failing to reach the API server must not
     /// turn into silently dropping a legitimate flush.

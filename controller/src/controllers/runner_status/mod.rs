@@ -1,5 +1,5 @@
 mod apply_conditions;
-mod conditions;
+pub(crate) mod conditions;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -361,6 +361,7 @@ impl Reconciler for RunnerStatusReconciler {
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn run(
     ctx: Arc<Context>,
     shutdown_signal: impl Future<Output = ()> + Send + Sync + 'static,

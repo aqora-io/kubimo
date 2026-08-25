@@ -3,7 +3,7 @@
 minikube start --container-runtime=containerd \
   --network=minikube \
   --docker-opt containerd=/var/run/containerd/containerd.sock \
-  --addons=ingress,gvisor,metrics-server,dashboard,volumesnapshots,csi-hostpath-driver \
+  --addons=ingress,gvisor,metrics-server,dashboard,csi-hostpath-driver \
   ${MINIKUBE_SUBNET:+--subnet=$MINIKUBE_SUBNET}
 
 # Shamelessly copy-pasted from:
@@ -11,6 +11,3 @@ minikube start --container-runtime=containerd \
 minikube addons disable storage-provisioner
 minikube addons disable default-storageclass
 kubectl patch storageclass csi-hostpath-sc -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
-# Allow PVC expansion so Workspace storage auto-scaling can grow volumes in place.
-kubectl patch storageclass csi-hostpath-sc -p '{"allowVolumeExpansion": true}'
-kubectl patch volumesnapshotclass csi-hostpath-snapclass --type=merge -p '{"metadata":{"annotations":{"snapshot.storage.kubernetes.io/is-default-class":"true"}}}'

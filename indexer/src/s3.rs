@@ -400,10 +400,10 @@ mod tests {
 
     /// The exact key set every environment's S3 Secret carries.
     ///
-    /// These are the names the platform writes and the dedicated indexer
-    /// container already consumes through `envFrom`. The node agent gets the
-    /// same map from kubelet via `nodePublishSecretRef`, but as CSI secrets
-    /// rather than environment variables, so it maps the names itself.
+    /// These are the names the platform writes into each workspace's S3
+    /// Secret. The node agent gets the map from kubelet via
+    /// `nodePublishSecretRef`, as CSI secrets rather than environment
+    /// variables, so it maps the names itself.
     ///
     /// `AWS_ENDPOINT` is the one that matters. Every environment has its own
     /// endpoint — staging is Scaleway, each PR preview its own MinIO — and an

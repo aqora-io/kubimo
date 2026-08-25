@@ -68,8 +68,7 @@ spec:
           image: "{{ .Values.agent.marimoImage | default (include "kubimo-controller.marimoImage" .) }}"
           securityContext:
             # The marimo image runs as uid 1000, but the freshly provisioned
-            # data volume is root-owned, so the copy needs root — the same
-            # reason the dedicated path's init-dirs container runs as root.
+            # data volume is root-owned, so the copy needs root.
             runAsUser: 0
             runAsGroup: 0
           command:
@@ -105,8 +104,7 @@ spec:
           image: "{{ .Values.agent.marimoCondaImage | default (include "kubimo-controller.marimoCondaImage" .) }}"
           securityContext:
             # The marimo image runs as uid 1000, but the freshly provisioned
-            # data volume is root-owned, so the copy needs root — the same
-            # reason the dedicated path's init-dirs container runs as root.
+            # data volume is root-owned, so the copy needs root.
             runAsUser: 0
             runAsGroup: 0
           command:

@@ -64,15 +64,8 @@ target "marimo" {
   context = "."
   # platforms = [BAKE_LOCAL_PLATFORM]
   args = {
-    SCCACHE_ENDPOINT = SCCACHE_ENDPOINT
-    SCCACHE_BUCKET   = SCCACHE_BUCKET
-    SCCACHE_REGION   = SCCACHE_REGION
-    MARIMO_GIT       = MARIMO_GIT
+    MARIMO_GIT = MARIMO_GIT
   }
-  secret = [
-    "id=SCCACHE_AWS_ACCESS_KEY_ID,env=SCCACHE_AWS_ACCESS_KEY_ID",
-    "id=SCCACHE_AWS_SECRET_ACCESS_KEY,env=SCCACHE_AWS_SECRET_ACCESS_KEY",
-  ]
 }
 
 target "conda-marimo" {

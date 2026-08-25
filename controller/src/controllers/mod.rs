@@ -1,6 +1,6 @@
 pub mod budget;
 pub mod cache_job;
-pub mod indexer;
+
 pub(crate) mod ingress;
 pub mod pool;
 pub mod runner;
@@ -10,4 +10,3 @@ pub(crate) mod slot_volume;
 pub mod workspace;
 pub mod workspace_affinity;
 pub mod workspace_directory;
-pub mod workspace_python_runtime;

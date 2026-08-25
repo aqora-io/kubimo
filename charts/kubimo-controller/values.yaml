@@ -16,8 +16,9 @@ image:
 marimo:
   repository: ghcr.io/aqora-io/kubimo-marimo
   # Written by CI at release time to `src-<hash>`, hashed over the marimo image's own
-  # inputs: the indexer's sources (the image ships it), the Dockerfile and the files
-  # baked into it, and the pinned marimo fork. See scripts/marimo-image-rev.
+  # inputs: the Dockerfile, the files baked into it (docker/setup, docker/app), and the
+  # bake file that pins the marimo fork. The image ships no Rust, so workspace crate
+  # changes do not move it. See scripts/marimo-image-rev.
   #
   # This exists so a controller-only release leaves this tag alone. Moving it recreates
   # every runner pod *and* rolls the agent DaemonSet, which destroys each node's data
@@ -41,12 +42,6 @@ marimo:
 #       method: ServiceDns
 #       # host: https://kubimo.org
 #     intervalSecs: 10
-#   # Storage mode for workspaces that do not set spec.mode: Dedicated (a PVC each) or
-#   # Pooled (a slot on the shared per-node volume, which needs agent.enabled). Only
-#   # affects newly created workspaces — every workspace pins its mode into status.mode
-#   # on first reconcile, so flipping back changes what is created next and migrates
-#   # nothing. Requires the node agent to be running before it is set to Pooled.
-#   defaultWorkspaceMode: Dedicated
 
 # Shared static-asset origin for marimo's frontend. Runners serve their UI
 # under a per-runner (per-claim, for pooled runners) path prefix, so browsers

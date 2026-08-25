@@ -45,5 +45,3 @@ metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
-# For the operator examples only; the controller binary takes no arguments.
-clap = { version = "4.5", features = ["derive"] }
