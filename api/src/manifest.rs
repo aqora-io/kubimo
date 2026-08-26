@@ -40,6 +40,9 @@ pub struct WorkspaceManifest {
     /// restore can tell the two apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets: Option<ManifestSecrets>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_objects: Option<ManifestGitObjects>,
 }
 
 /// Names-only view of the archive's secrets.
@@ -61,6 +64,13 @@ pub struct ManifestDirectory {
     /// as `WorkspaceDirSpec.path`).
     pub path: String,
     pub entries: Vec<WorkspaceDirEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestGitObjects {
+    /// Associates git oids to path
+    pub sha1: BTreeMap<String, String>,
 }
 
 /// The url of the manifest object for an archive, matching the indexer's raw
@@ -90,6 +100,7 @@ pub fn build_manifest(
     upload_content: bool,
     dirs: &BTreeMap<String, WorkspaceDir>,
     secrets: ManifestSecrets,
+    git_objects: ManifestGitObjects,
 ) -> WorkspaceManifest {
     let mut directories = dirs
         .values()
@@ -119,9 +130,9 @@ pub fn build_manifest(
         // Always `Some`: this is what distinguishes a filtered archive from a
         // legacy one on restore.
         secrets: Some(secrets),
+        git_objects: Some(git_objects),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +192,7 @@ mod tests {
                 env_keys: vec!["API_KEY".to_string()],
                 file_paths: vec!["creds/key.pem".to_string()],
             }),
+            git_objects: None,
         };
 
         let json = serde_json::to_value(&manifest).unwrap();
@@ -295,7 +307,13 @@ mod build_manifest_tests {
                 ],
             ),
         ]);
-        let manifest = build_manifest("ws", true, &dirs, ManifestSecrets::default());
+        let manifest = build_manifest(
+            "ws",
+            true,
+            &dirs,
+            ManifestSecrets::default(),
+            ManifestGitObjects::default(),
+        );
         assert_eq!(manifest.directories[0].path, "");
         assert_eq!(manifest.directories[1].path, "sub");
         assert_eq!(manifest.directories[0].entries[0].name, "sub");
@@ -312,13 +330,25 @@ mod build_manifest_tests {
                 file_entry("too-big.bin", 5, false),
             ],
         )]);
-        let manifest = build_manifest("ws", true, &dirs, ManifestSecrets::default());
+        let manifest = build_manifest(
+            "ws",
+            true,
+            &dirs,
+            ManifestSecrets::default(),
+            ManifestGitObjects::default(),
+        );
         assert_eq!(manifest.total_content_bytes, 10);
     }
 
     #[test]
     fn test_build_manifest_header() {
-        let manifest = build_manifest("ws", false, &BTreeMap::new(), ManifestSecrets::default());
+        let manifest = build_manifest(
+            "ws",
+            false,
+            &BTreeMap::new(),
+            ManifestSecrets::default(),
+            ManifestGitObjects::default(),
+        );
         assert!(matches!(manifest.version, ManifestVersion::V1));
         assert_eq!(manifest.workspace, "ws");
         assert!(!manifest.upload_content);

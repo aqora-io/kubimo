@@ -54,8 +54,8 @@ pub use label::KubimoLabel;
 #[cfg(feature = "client")]
 pub use list_stream::{ApiListStreamExt, ListStream};
 pub use manifest::{
-    MANIFEST_FILE_NAME, ManifestDirectory, ManifestSecrets, ManifestVersion, SECRETS_FILE_NAME,
-    WorkspaceManifest, build_manifest, manifest_url, secrets_url,
+    MANIFEST_FILE_NAME, ManifestDirectory, ManifestGitObjects, ManifestSecrets, ManifestVersion,
+    SECRETS_FILE_NAME, WorkspaceManifest, build_manifest, manifest_url, secrets_url,
 };
 pub use meta::{ObjectMetaExt, ResourceNameExt, ResourceNamespaceExt, ResourceOwnerRefExt};
 pub use quantity::{CpuQuantity, CpuUnit, Quantity, StorageQuantity, StorageUnit};

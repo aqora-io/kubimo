@@ -17,9 +17,8 @@ use futures::{
     FutureExt,
     stream::{StreamExt, TryStreamExt, futures_unordered::FuturesUnordered},
 };
-use kubimo::FilterParams;
 use kubimo::{
-    ManifestSecrets, ResourceNameExt, SecretEnvEntry, SecretFileEntry, Workspace,
+    FilterParams, ManifestSecrets, ResourceNameExt, SecretEnvEntry, SecretFileEntry, Workspace,
     WorkspaceArchiveStatus, WorkspaceDir, WorkspaceDirContentUrl, WorkspaceDirDirectory,
     WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile, WorkspaceDirMarimo,
     WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink, WorkspaceSecrets,
@@ -38,6 +37,7 @@ use tokio::{
 
 use crate::disk;
 use crate::fingerprint::ContentCache;
+use crate::git;
 use crate::keys::{WorkspaceDirNameSet, WorkspaceFileUrlSet};
 use crate::python::{Notebook, get_marimo_notebook};
 use crate::s3::{CacheMarkers, DownloadError, S3Client, UploadError};
@@ -94,6 +94,22 @@ impl WorkspaceKeys {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct WorkspaceGitObjects {
+    sha1: Arc<Mutex<BTreeMap<String, git::Oid>>>,
+}
+
+impl WorkspaceGitObjects {
+    pub async fn insert(&self, path: String, oid: git::Oid) {
+        self.sha1.lock().await.insert(path, oid);
+    }
+
+    pub async fn take_objects(&self) -> BTreeMap<String, git::Oid> {
+        let mut objects = self.sha1.lock().await;
+        std::mem::take(&mut objects)
+    }
+}
+
 fn marimo_cache_path(path: impl AsRef<Path>, format: &str) -> Option<PathBuf> {
     let path = path.as_ref();
     let parent = path.parent()?;
@@ -123,6 +139,7 @@ pub struct WorkerOptions {
     /// Shared with the run that spawned these workers: what they could not
     /// upload is what the archive is missing, and only the run can report it.
     failures: Arc<AtomicUsize>,
+    git_objects: WorkspaceGitObjects,
 }
 
 #[derive(Clone)]
@@ -181,12 +198,17 @@ impl EntryWorker {
         size: u64,
         input: impl AsyncRead + AsyncSeek + Unpin,
     ) -> Result<WorkspaceDirContentUrl, WorkerError> {
-        let url = self.opts.keys.file_url(path.as_ref().to_path_buf()).await?;
+        let path = path.as_ref().to_path_buf();
+        let url = self.opts.keys.file_url(path.clone()).await?;
         let result = self
             .opts
             .s3
             .upload(&url, input, size, &self.opts.upload_permits)
             .await?;
+        self.opts
+            .git_objects
+            .insert(path.to_string_lossy().into_owned(), result.git_sha1)
+            .await;
         Ok(WorkspaceDirContentUrl {
             url,
             crc32: Some(result.crc32),
@@ -1025,6 +1047,7 @@ pub async fn run(
         1000,
     );
     let upload_permits = Arc::new(Semaphore::new(args.max_upload_concurrency));
+    let git_objects = WorkspaceGitObjects::default();
     let mut rx = process(
         &mut join_set,
         rx,
@@ -1037,6 +1060,7 @@ pub async fn run(
             upload_permits: upload_permits.clone(),
             keys: keys.clone(),
             failures: failures.clone(),
+            git_objects: git_objects.clone(),
         },
         1000,
         std::thread::available_parallelism()
@@ -1160,6 +1184,7 @@ pub async fn run(
             &workspace_dirs,
             manifest_secrets,
             &upload_permits,
+            git_objects,
         )
         .await;
         if !manifest_uploaded {
@@ -1378,12 +1403,21 @@ async fn upload_manifest(
     workspace_dirs: &BTreeMap<String, WorkspaceDir>,
     manifest_secrets: ManifestSecrets,
     upload_permits: &Semaphore,
+    git_objects: WorkspaceGitObjects,
 ) -> bool {
+    let git_objects = match git::manifest::build(workspace_dirs, git_objects.take_objects().await) {
+        Ok(git_objects) => git_objects,
+        Err(err) => {
+            tracing::error!("Error building git objects: {err}");
+            return false;
+        }
+    };
     let manifest = kubimo::build_manifest(
         &args.name,
         args.upload_content,
         workspace_dirs,
         manifest_secrets,
+        git_objects,
     );
     let url = match kubimo::manifest_url(bucket, args.key_prefix.as_deref()) {
         Ok(url) => url,

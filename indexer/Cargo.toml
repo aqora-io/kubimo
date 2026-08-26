@@ -39,3 +39,5 @@ bytes = "1.11"
 notify = "8.2"
 crc32fast = "1.5"
 rustix = { version = "1", features = ["fs"] }
+sha1 = "0.11.0"
+hex = "0.4.3"

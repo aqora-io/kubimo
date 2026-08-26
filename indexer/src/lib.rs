@@ -7,6 +7,7 @@
 
 pub mod disk;
 pub mod fingerprint;
+pub mod git;
 pub mod keys;
 pub mod python;
 pub mod restore;
