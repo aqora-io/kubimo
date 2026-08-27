@@ -17,9 +17,12 @@ use tokio::{
 };
 use tokio_util::io::ReaderStream;
 
+use crate::git;
+
 pub struct UploadResult {
     pub crc32: u32,
     pub e_tag: Option<String>,
+    pub git_sha1: git::Oid,
 }
 
 #[derive(Clone)]
@@ -192,13 +195,16 @@ impl S3Client {
         let res = if size < part_size {
             let mut payload = PutPayloadMut::new();
             let mut hasher = Crc32Hasher::new();
+            let mut git_sha1 = git::OidKind::Sha1.start_hash(git::ObjectKind::Blob, size);
             let mut stream = ReaderStream::new(input);
             while let Some(chunk) = stream.next().await {
                 let bytes = chunk?;
                 hasher.update(&bytes);
+                git_sha1.update(&bytes);
                 payload.push(bytes);
             }
             let crc32 = hasher.finalize();
+            let git_sha1 = git_sha1.finalize();
             if let Ok(e_tag) = self
                 .get_cached(&s3, bucket.clone(), key.clone(), crc32)
                 .await
@@ -206,6 +212,7 @@ impl S3Client {
                 return Ok(UploadResult {
                     crc32,
                     e_tag: Some(e_tag),
+                    git_sha1,
                 });
             }
             let e_tag = s3
@@ -219,14 +226,22 @@ impl S3Client {
                 )
                 .await?
                 .e_tag;
-            UploadResult { crc32, e_tag }
+            UploadResult {
+                crc32,
+                e_tag,
+                git_sha1,
+            }
         } else {
             let mut hasher = Crc32Hasher::new();
+            let mut git_sha1 = git::OidKind::Sha1.start_hash(git::ObjectKind::Blob, size);
             let mut stream = ReaderStream::new(&mut input);
             while let Some(chunk) = stream.next().await {
-                hasher.update(&chunk?);
+                let chunk = chunk?;
+                hasher.update(&chunk);
+                git_sha1.update(&chunk);
             }
             let crc32 = hasher.finalize();
+            let git_sha1 = git_sha1.finalize();
             if let Ok(e_tag) = self
                 .get_cached(&s3, bucket.clone(), key.clone(), crc32)
                 .await
@@ -234,6 +249,7 @@ impl S3Client {
                 return Ok(UploadResult {
                     crc32,
                     e_tag: Some(e_tag),
+                    git_sha1,
                 });
             }
             input.rewind().await?;
@@ -254,7 +270,11 @@ impl S3Client {
                 multipart.put(chunk?);
             }
             let e_tag = multipart.finish().await?.e_tag;
-            UploadResult { crc32, e_tag }
+            UploadResult {
+                crc32,
+                e_tag,
+                git_sha1,
+            }
         };
         if let Some(e_tag) = &res.e_tag {
             self.cache_markers

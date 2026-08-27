@@ -648,6 +648,7 @@ mod tests {
             // Legacy shape: most of these tests predate secrets, and `None`
             // exercises the diversion path a filtered archive never takes.
             secrets: None,
+            git_objects: None,
         }
     }
 
