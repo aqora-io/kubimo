@@ -9,7 +9,7 @@ use futures::prelude::*;
 use kubimo::k8s_openapi::api::core::v1::Secret;
 use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition as K8sCondition;
 use kubimo::kube::runtime::controller::Action;
-use kubimo::{Runner, RunnerCommand, RunnerStatus, prelude::*};
+use kubimo::{Runner, RunnerStatus, prelude::*};
 use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
@@ -18,6 +18,7 @@ use crate::backoff::default_error_policy;
 use crate::config::StatusCheckResolution;
 use crate::context::Context;
 use crate::controllers::ingress::effective_ingress_path;
+use crate::controllers::runner::runner_port;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
 
@@ -41,9 +42,10 @@ fn runner_api_endpoint(
 ) -> Result<Url, RunnerStatusError> {
     Ok(match resolution {
         StatusCheckResolution::ServiceDns => Url::parse(&format!(
-            "http://{name}.{namespace}.svc.cluster.local/",
+            "http://{name}.{namespace}.svc.cluster.local:{port}/",
             name = runner.name()?,
             namespace = runner.require_namespace()?,
+            port = runner_port(runner),
         ))?,
         StatusCheckResolution::Ingress { host } => host.clone(),
     }
@@ -201,6 +203,21 @@ fn is_inactive_past_deadline(
     since + (delete_after_secs_inactive as i64) < now_secs
 }
 
+/// Whether to leave the runner's API alone this reconcile.
+///
+/// A claimed runner has no Service until the agent acks the claim, so polling
+/// would only fail against a pod that is otherwise Ready and warn-log every
+/// few seconds about an outage that isn't one. Renderers are polled like the
+/// rest: marimo-ssr >= 0.2 serves `/api/status/connections` and `/api/version`.
+fn poll_deferred(runner: &Runner, conditions: &[K8sCondition]) -> bool {
+    runner
+        .status
+        .as_ref()
+        .and_then(|s| s.claim.as_ref())
+        .is_some()
+        && !conditions::volume_is_bound(conditions)
+}
+
 #[derive(Debug, Clone, Default)]
 struct RunnerStatusReconciler {
     client: reqwest::Client,
@@ -323,16 +340,7 @@ impl Reconciler for RunnerStatusReconciler {
         let startup_complete = self
             .apply_startup_conditions(ctx, runner, &mut status)
             .await?;
-        // A claimed runner has no Service until the agent acks the claim, so
-        // polling would only fail against a pod that is otherwise Ready and
-        // warn-log every few seconds about an outage that isn't one.
-        let claim_pending = runner
-            .status
-            .as_ref()
-            .and_then(|s| s.claim.as_ref())
-            .is_some()
-            && !conditions::volume_is_bound(status.conditions.as_deref().unwrap_or_default());
-        let action = if matches!(runner.spec.command, RunnerCommand::Render) || claim_pending {
+        let action = if poll_deferred(runner, status.conditions.as_deref().unwrap_or_default()) {
             Action::await_change()
         } else {
             let action = self.poll_api_status(ctx, runner, &mut status).await?;
@@ -383,8 +391,102 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
     use kubimo::k8s_openapi::jiff::Timestamp;
+    use kubimo::{RunnerClaim, RunnerCommand, RunnerIngress, RunnerSpec};
+
+    fn runner_with(namespace: &str, command: RunnerCommand, ingress_path: &str) -> Runner {
+        let mut runner = Runner::new(
+            "bmor-test",
+            RunnerSpec {
+                command,
+                ingress: Some(RunnerIngress {
+                    path: Some(ingress_path.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        runner.metadata.namespace = Some(namespace.to_string());
+        runner
+    }
+
+    fn volume_bound() -> Vec<K8sCondition> {
+        vec![K8sCondition {
+            type_: kubimo::conditions::PVC_BOUND.to_string(),
+            status: "True".to_string(),
+            reason: "Test".to_string(),
+            message: String::new(),
+            last_transition_time: Time(Timestamp::from_second(0).unwrap()),
+            observed_generation: None,
+        }]
+    }
+
+    /// The Service publishes the runner's own port, 8080 for a renderer, so
+    /// the in-cluster poll has to name it. `url` elides `:80`, which leaves
+    /// editors and viewers exactly as before.
+    #[test]
+    fn service_dns_endpoint_carries_the_runner_port() {
+        let resolution = Config::test_default().runner_status.resolution;
+        let render = runner_with("platform", RunnerCommand::Render, "/runner/abc");
+        assert_eq!(
+            runner_api_endpoint(&resolution, &render).unwrap().as_str(),
+            "http://bmor-test.platform.svc.cluster.local:8080/runner/abc/api/"
+        );
+        let edit = runner_with("platform", RunnerCommand::Edit, "/runner/abc");
+        let url = runner_api_endpoint(&resolution, &edit).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "http://bmor-test.platform.svc.cluster.local/runner/abc/api/"
+        );
+        assert_eq!(url.port_or_known_default(), Some(80));
+    }
+
+    /// Through the ingress the backend port is the ingress rule's business.
+    #[test]
+    fn ingress_endpoint_ignores_the_runner_port() {
+        let resolution = StatusCheckResolution::Ingress {
+            host: "https://aqora.io".parse().unwrap(),
+        };
+        let render = runner_with("platform", RunnerCommand::Render, "/runner/abc");
+        assert_eq!(
+            runner_api_endpoint(&resolution, &render).unwrap().as_str(),
+            "https://aqora.io/runner/abc/api/"
+        );
+    }
+
+    /// marimo-ssr >= 0.2 serves the status endpoints, so a renderer is polled
+    /// like any other runner and can be collected once idle.
+    #[test]
+    fn a_render_runner_is_polled() {
+        let render = runner_with("platform", RunnerCommand::Render, "/runner/abc");
+        assert!(!poll_deferred(&render, &[]));
+    }
+
+    #[test]
+    fn a_claimed_runner_is_not_polled_until_its_volume_is_bound() {
+        let mut runner = runner_with("platform", RunnerCommand::Run, "/runner/abc");
+        runner.status = Some(RunnerStatus {
+            claim: Some(RunnerClaim {
+                pool: "pool".into(),
+                pod_name: "pod".into(),
+                ingress_path: "/runner/abc".into(),
+                token: None,
+            }),
+            ..Default::default()
+        });
+        assert!(poll_deferred(&runner, &[]));
+        assert!(!poll_deferred(&runner, &volume_bound()));
+    }
+
+    /// The wire contract shared with marimo and marimo-ssr.
+    #[test]
+    fn the_connections_payload_parses() {
+        let parse = |json: &str| serde_json::from_str::<Connections>(json).unwrap();
+        assert!(parse(r#"{"active":1}"#).is_active());
+        assert!(!parse(r#"{"active":0}"#).is_active());
+    }
 
     fn pod_ready_at(status: &str, transitioned_secs: i64) -> Vec<K8sCondition> {
         vec![K8sCondition {

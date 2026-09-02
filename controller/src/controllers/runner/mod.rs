@@ -4,6 +4,8 @@ mod apply_owner_reference;
 mod apply_pod;
 mod apply_service;
 
+pub(crate) use apply_pod::runner_port;
+
 use std::sync::Arc;
 use std::{collections::BTreeMap, time::Duration};
 

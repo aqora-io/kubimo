@@ -357,8 +357,8 @@ pub(super) fn pod_ready_age_secs(conditions: &[Condition], now_secs: i64) -> Opt
 /// Requeue interval while the startup conditions are not all True.
 ///
 /// Startup is genuinely slow, so the first window polls fast. But a pod that
-/// never becomes ready — a crashloop, or a `Render` runner that is never even
-/// polled — stays in this branch forever, and at 3s that is ~28,800 reconciles
+/// never becomes ready — a crashloop — stays in this branch forever, and at
+/// 3s that is ~28,800 reconciles
 /// a day each, every one of them re-GETting the pod, PVC and Workspace. Decay
 /// once it is clear this is not a startup any more.
 pub(super) fn startup_requeue_interval(
@@ -916,9 +916,8 @@ mod tests {
         );
     }
 
-    /// A pod that never becomes ready — a crashloop, or a `Render` runner that
-    /// is never polled at all — would otherwise sit at 3s forever, ~28,800
-    /// reconciles a day each.
+    /// A pod that never becomes ready — a crashloop — would otherwise sit at
+    /// 3s forever, ~28,800 reconciles a day each.
     #[test]
     fn startup_requeue_decays_for_a_pod_that_never_becomes_ready() {
         let poll = Duration::from_secs(10);
