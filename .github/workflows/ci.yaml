@@ -89,8 +89,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        # marimo pinned to the MARIMO_GIT tag in docker/Dockerfile.marimo;
-        # bump this together with that pin.
-        run: pip install 'marimo==0.23.6' pytest
+        # Upstream release the MARIMO_GIT fork pin in docker-bake.hcl is based
+        # on; bump this together with that pin.
+        run: pip install 'marimo==0.24.0' pytest
       - name: Test cache.py
         run: pytest docker/app/test_cache.py -v

@@ -10,7 +10,13 @@ import fnmatch
 from functools import lru_cache
 
 import marimo
-from marimo._server.export import export_as_md, run_app_then_export_as_html
+from marimo._export.file import export_html, export_markdown
+from marimo._export.requests import (
+    HTMLFileExportRequest,
+    MarkdownFileExportRequest,
+    NotebookExecutionOptions,
+)
+from marimo._schemas.export_options import HTMLExportOptions, MarkdownExportOptions
 from marimo._utils.marimo_path import MarimoPath
 
 logging.basicConfig(level=logging.INFO)
@@ -28,13 +34,16 @@ def _write_export(export_dir: Path, result):
 async def _cache_app(path: Path, *, include_code: bool):
     logger.info(f"Caching {path}")
     marimo_path = MarimoPath(path)
-    html_result = await run_app_then_export_as_html(
-        marimo_path,
-        include_code=include_code,
-        cli_args={},
-        argv=[],
+    html_result = await export_html(
+        HTMLFileExportRequest(
+            path=marimo_path,
+            options=HTMLExportOptions(files=(), include_code=include_code),
+            execution=NotebookExecutionOptions(cli_args={}, argv=[]),
+        )
     )
-    md_result = export_as_md(marimo_path)
+    md_result = export_markdown(
+        MarkdownFileExportRequest(path=marimo_path, options=MarkdownExportOptions())
+    )
     export_dir = path.parent / "__marimo__"
     export_dir.mkdir(parents=True, exist_ok=True)
     _write_export(export_dir, html_result)
