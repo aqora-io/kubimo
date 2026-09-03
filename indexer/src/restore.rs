@@ -834,6 +834,9 @@ mod tests {
         tokio::io::AsyncWriteExt::write_all(&mut file, b"downloaded")
             .await
             .unwrap();
+        // tokio performs the write on its blocking pool; without the flush a
+        // read can land first and see an empty file, as it did on CI.
+        tokio::io::AsyncWriteExt::flush(&mut file).await.unwrap();
         drop(file);
 
         // The symlink target must be untouched and the link path must now be
