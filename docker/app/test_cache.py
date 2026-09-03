@@ -73,3 +73,23 @@ def test_cache_exports_html_and_markdown(tmp_path):
     md_text = md.read_text()
     assert "# Hello" in md_text
     assert "x = 21 * 2" in md_text
+
+
+def test_cache_writes_the_snapshots_the_renderer_serves(tmp_path):
+    # marimo-ssr refuses to render without both: it answers "Notebook has no
+    # session cache" without the session file and "Notebook was not properly
+    # exported" without the notebook file.
+    notebook = tmp_path / "nb.py"
+    notebook.write_text(NOTEBOOK)
+
+    result = subprocess.run(
+        [sys.executable, str(CACHE_SCRIPT), "--include-code", str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    session = tmp_path / "__marimo__" / "session" / "nb.py.json"
+    snapshot = tmp_path / "__marimo__" / "notebook" / "nb.py.json"
+    assert session.is_file() and session.stat().st_size > 0, result.stderr
+    assert snapshot.is_file() and snapshot.stat().st_size > 0, result.stderr

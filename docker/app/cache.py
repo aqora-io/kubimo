@@ -7,9 +7,11 @@ import subprocess
 import itertools
 from dataclasses import dataclass
 import fnmatch
+import json
 from functools import lru_cache
 
 import marimo
+from marimo._convert import MarimoConvert
 from marimo._export.file import export_html, export_markdown
 from marimo._export.requests import (
     HTMLFileExportRequest,
@@ -17,6 +19,7 @@ from marimo._export.requests import (
     NotebookExecutionOptions,
 )
 from marimo._schemas.export_options import HTMLExportOptions, MarkdownExportOptions
+from marimo._utils.paths import notebook_output_dir
 from marimo._utils.marimo_path import MarimoPath
 
 logging.basicConfig(level=logging.INFO)
@@ -43,6 +46,14 @@ async def _cache_app(path: Path, *, include_code: bool):
     )
     md_result = export_markdown(
         MarkdownFileExportRequest(path=marimo_path, options=MarkdownExportOptions())
+    )
+    # marimo-ssr renders from two snapshots: the session one export_html
+    # persists as a side effect, and the notebook one that only the fork's
+    # `marimo export json-notebook` writes. Same converter, same file.
+    notebook_cache = notebook_output_dir(path) / "notebook" / f"{path.name}.json"
+    notebook_cache.parent.mkdir(parents=True, exist_ok=True)
+    notebook_cache.write_text(
+        json.dumps(MarimoConvert.from_py(path.read_text()).to_notebook_v1())
     )
     export_dir = path.parent / "__marimo__"
     export_dir.mkdir(parents=True, exist_ok=True)
