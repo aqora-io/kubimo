@@ -109,8 +109,22 @@ uv_sync_workspace() {
   /usr/local/bin/uv sync --no-install-package marimo
 }
 
+# Serialized on a lock file on the slot: the runner and the workspace's cache
+# job mount the same slot and both install into the same detached env at
+# start. pixi does not guard the prefix against a second installer, and the
+# loser dies in the clobber registry ("Expected just reordering, got
+# something else"). The lock lives under $HOME so both pods see it.
+#
+# Any further arguments run as a command under the same lock, after the
+# install: the runner's pyproject.toml check-then-append is not atomic either,
+# and a second runner on the workspace (edit + run) races it the same way.
 pixi_install_workspace() {
-  /usr/local/bin/pixi install
+  mkdir -p "$HOME/.cache"
+  (
+    /usr/bin/flock 9
+    /usr/local/bin/pixi install
+    "$@"
+  ) 9>"$HOME/.cache/.kubimo-pixi-install.lock"
 }
 
 is_marimo_venv_configured() {
@@ -141,10 +155,12 @@ sync_workspace_env() {
   # get for genuinely missing packages.
   if [[ -n "$UV_PROJECT" ]]; then
     uv_sync_workspace &
+    ensure_marimo_venv_config
   elif [[ -x /usr/local/bin/pixi ]]; then
-    pixi_install_workspace
+    pixi_install_workspace ensure_marimo_venv_config
+  else
+    ensure_marimo_venv_config
   fi
-  ensure_marimo_venv_config
 }
 
 # Warm-pool pre-boot. Set (as an env var, never a flag — an older image must
@@ -235,8 +251,11 @@ elif [[ "$CMD" == "cache" ]]; then
   if [[ -n "$UV_PROJECT" ]]; then
     uv_sync_workspace
   elif [[ -x /usr/local/bin/pixi ]]; then
+    # The image's VIRTUAL_ENV already points at the detached pixi env (the
+    # path pinned in pixi-pyproject.toml). CONDA_PREFIX is only set inside
+    # `pixi shell`/`pixi run`; exporting it here emptied VIRTUAL_ENV and
+    # exec'd /bin/python3.
     pixi_install_workspace
-    export VIRTUAL_ENV="$CONDA_PREFIX"
   fi
   exec "$VIRTUAL_ENV/bin/python3" /app/cache.py \
     --include-code "${common_flags[@]}"
