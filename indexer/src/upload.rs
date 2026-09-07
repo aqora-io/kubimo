@@ -36,6 +36,7 @@ use tokio::{
 use crate::disk;
 use crate::fingerprint::ContentCache;
 use crate::keys::{WorkspaceDirNameSet, WorkspaceFileUrlSet};
+use crate::marimo_cache::MarimoCacheKind;
 use crate::python::{Notebook, get_marimo_notebook};
 use crate::s3::{CacheMarkers, DownloadError, S3Client, UploadError};
 use crate::secrets;
@@ -66,8 +67,6 @@ pub struct UploadOptions {
     pub directory: PathBuf,
 }
 
-const CACHE_FORMATS: &[&str] = &["md", "html", "ipynb"];
-
 #[derive(Clone)]
 pub struct WorkspaceKeys {
     dir_names: Arc<Mutex<WorkspaceDirNameSet>>,
@@ -89,18 +88,6 @@ impl WorkspaceKeys {
     pub async fn file_url(&self, path: PathBuf) -> Result<Url, kubimo::url::ParseError> {
         self.file_urls.lock().await.get_or_insert(path)
     }
-}
-
-fn marimo_cache_path(path: impl AsRef<Path>, format: &str) -> Option<PathBuf> {
-    let path = path.as_ref();
-    let parent = path.parent()?;
-    let file_name = path.file_name()?;
-    Some(
-        parent
-            .join("__marimo__")
-            .join(file_name)
-            .with_extension(format),
-    )
 }
 
 fn marimo_meta_path(path: impl AsRef<Path>) -> PathBuf {
@@ -217,16 +204,11 @@ impl EntryWorker {
 
     async fn process_marimo_cache(
         &self,
+        kind: MarimoCacheKind,
         path: impl AsRef<Path>,
     ) -> Result<Option<WorkspaceDirMarimoCache>, WorkerError> {
         let path = path.as_ref();
-        let Some(format) = path.extension().and_then(OsStr::to_str) else {
-            return Ok(None);
-        };
         let full_path = self.opts.directory.join(path);
-        if !CACHE_FORMATS.contains(&format) {
-            return Ok(None);
-        }
         if !tokio::fs::try_exists(&full_path).await? {
             return Ok(None);
         }
@@ -239,7 +221,7 @@ impl EntryWorker {
             return Ok(None);
         }
         let mut out = WorkspaceDirMarimoCache {
-            format: format.to_string(),
+            format: kind.format().to_string(),
             size: Some(size),
             created: metadata.created().ok().map(Into::into),
             modified: metadata.modified().ok().map(Into::into),
@@ -282,9 +264,9 @@ impl EntryWorker {
             tokio::spawn(async move { worker.upload_meta_json(&path, meta).await })
         };
         let mut futs = FuturesUnordered::new();
-        for format in CACHE_FORMATS {
-            if let Some(path) = marimo_cache_path(path, format) {
-                futs.push(self.process_marimo_cache(path));
+        for kind in MarimoCacheKind::ALL {
+            if let Some(path) = kind.path(path) {
+                futs.push(self.process_marimo_cache(kind, path));
             }
         }
         let mut caches = vec![];
@@ -672,13 +654,17 @@ pub async fn process_existing_dirs(
                 continue;
             };
             for cache in caches {
-                let cache_path = match marimo_cache_path(&path, &cache.format) {
+                // A format this build does not know was written by a newer
+                // indexer; leave its object alone rather than guess a path.
+                let cache_path = match MarimoCacheKind::from_format(&cache.format)
+                    .and_then(|kind| kind.path(&path))
+                {
                     Some(path) => path,
                     None => {
-                        tracing::error!(
-                            "Error getting marimo cache path for {}: {}",
-                            path.display(),
-                            cache.format
+                        tracing::warn!(
+                            "Skipping marimo cache of unknown format {} for {}",
+                            cache.format,
+                            path.display()
                         );
                         continue;
                     }
