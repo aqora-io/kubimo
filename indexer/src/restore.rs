@@ -4,11 +4,14 @@ use std::time::SystemTime;
 
 use base64::Engine as _;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use kubimo::{ManifestSecrets, WorkspaceManifest, WorkspaceRestoreSecrets, url::Url};
+use kubimo::{
+    ManifestSecrets, WorkspaceDirFile, WorkspaceManifest, WorkspaceRestoreSecrets, url::Url,
+};
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, sync::Semaphore, task::JoinSet};
 
 use crate::disk;
+use crate::marimo_cache::MarimoCacheKind;
 use crate::s3::{DownloadError, S3Client};
 use crate::secrets;
 
@@ -34,6 +37,13 @@ pub struct RestorePlan {
     /// reach the manifest — so anything here is a legacy archive's, and only a
     /// `Values` restore may write it verbatim.
     pub secret_files: Vec<RestoreFile>,
+    /// The marimo caches recorded against the notebooks in `files`, at the
+    /// paths marimo reads them from. Best-effort: one that fails to come back
+    /// costs a notebook execution (the next cache job), not user data.
+    pub caches: Vec<RestoreFile>,
+    /// Sum of `caches` sizes; the manifest's `total_content_bytes` counts file
+    /// contents only.
+    pub cache_bytes: u64,
 }
 
 #[derive(Debug, Error)]
@@ -112,7 +122,8 @@ fn safe_entry_path(dir: &Path, name: &str) -> Result<PathBuf, PlanError> {
 /// Split a manifest into the filesystem operations needed to restore it. The
 /// manifest is only semi-trusted: paths escaping the target directory are
 /// rejected, and so are content urls escaping `origin` (see [`ArchiveOrigin`]).
-/// Marimo meta/cache urls are ignored — they are derived artifacts.
+/// Marimo caches come back next to their notebook (see [`plan_marimo_caches`]);
+/// `meta_json` does not, it is derived from the source at upload.
 ///
 /// Entries `matcher` marks secret are diverted: files with content to
 /// [`RestorePlan::secret_files`], everything else dropped — a legacy archive's
@@ -145,23 +156,27 @@ pub fn plan_restore(
                     plan.skipped.push(entry_path);
                 }
             } else if let Some(file) = &entry.file {
+                let is_secret = secrets::is_secret(matcher, &entry_path, false);
                 if let Some(content) = &file.content {
                     origin.check(&content.url)?;
-                    let file = RestoreFile {
-                        path: entry_path,
+                    let restore_file = RestoreFile {
+                        path: entry_path.clone(),
                         url: content.url.clone(),
                         crc32: content.crc32,
                         modified: entry.modified.map(Into::into),
                     };
-                    if secrets::is_secret(matcher, &file.path, false) {
-                        plan.secret_files.push(file);
+                    if is_secret {
+                        plan.secret_files.push(restore_file);
                     } else {
-                        plan.files.push(file);
+                        plan.files.push(restore_file);
                     }
-                } else if secrets::is_secret(matcher, &entry_path, false) {
+                } else if is_secret {
                     // Unrestorable in every mode; already warned at upload.
                 } else {
-                    plan.skipped.push(entry_path);
+                    plan.skipped.push(entry_path.clone());
+                }
+                if !is_secret {
+                    plan_marimo_caches(&mut plan, &entry_path, file, origin)?;
                 }
             } else {
                 plan.skipped.push(entry_path);
@@ -169,6 +184,47 @@ pub fn plan_restore(
         }
     }
     Ok(plan)
+}
+
+/// Queue the marimo caches recorded against `notebook`. A cache without a url
+/// (over the upload size limit) or of a format this build does not know is
+/// skipped silently: the upload already warned, and the next cache job
+/// rebuilds it.
+fn plan_marimo_caches(
+    plan: &mut RestorePlan,
+    notebook: &Path,
+    file: &WorkspaceDirFile,
+    origin: &ArchiveOrigin,
+) -> Result<(), PlanError> {
+    let Some(caches) = file
+        .marimo
+        .as_ref()
+        .and_then(|marimo| marimo.caches.as_deref())
+    else {
+        return Ok(());
+    };
+    for cache in caches {
+        let Some(url) = &cache.url else {
+            continue;
+        };
+        let Some(path) =
+            MarimoCacheKind::from_format(&cache.format).and_then(|kind| kind.path(notebook))
+        else {
+            continue;
+        };
+        origin.check(&url.url)?;
+        if let Some(parent) = path.parent() {
+            plan.directories.push(parent.to_path_buf());
+        }
+        plan.cache_bytes += cache.size.unwrap_or(0);
+        plan.caches.push(RestoreFile {
+            path,
+            url: url.url.clone(),
+            crc32: url.crc32,
+            modified: cache.modified.map(Into::into),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -228,9 +284,10 @@ pub async fn restore(args: &RestoreOptions, s3: &S3Client) -> Result<(), Restore
 
     tokio::fs::create_dir_all(&args.directory).await?;
     let usage = disk::disk_usage(&args.directory)?;
-    if usage.available < manifest.total_content_bytes {
+    let needed = manifest.total_content_bytes + plan.cache_bytes;
+    if usage.available < needed {
         return Err(RestoreError::InsufficientSpace {
-            needed: manifest.total_content_bytes,
+            needed,
             available: usage.available,
         });
     }
@@ -248,9 +305,37 @@ pub async fn restore(args: &RestoreOptions, s3: &S3Client) -> Result<(), Restore
     }
 
     let total = plan.files.len();
+    let mut failed = download_all(s3, args, plan.files).await;
+    tracing::info!(
+        "Restored {} of {total} files ({} skipped)",
+        total - failed,
+        plan.skipped.len()
+    );
+    // Not counted: a notebook whose caches did not come back renders again
+    // from the next cache job, whereas failing here would refuse the mount.
+    let cache_total = plan.caches.len();
+    let cache_failed = download_all(s3, args, plan.caches).await;
+    if cache_failed > 0 {
+        tracing::warn!(
+            "Restored {} of {cache_total} marimo caches",
+            cache_total - cache_failed
+        );
+    }
+    let outcome = restore_secrets(args, s3, &manifest, plan.secret_files).await?;
+    failed += outcome.failed;
+    let total = total + outcome.total;
+    if failed > 0 && !args.best_effort {
+        return Err(RestoreError::Failed(failed, total));
+    }
+    Ok(())
+}
+
+/// Download `files` under `args.directory`, at most
+/// `args.max_download_concurrency` at a time; returns how many failed.
+async fn download_all(s3: &S3Client, args: &RestoreOptions, files: Vec<RestoreFile>) -> usize {
     let permits = Arc::new(Semaphore::new(args.max_download_concurrency));
     let mut join_set = JoinSet::new();
-    for file in plan.files {
+    for file in files {
         let s3 = s3.clone();
         let permits = permits.clone();
         let directory = args.directory.clone();
@@ -278,18 +363,7 @@ pub async fn restore(args: &RestoreOptions, s3: &S3Client) -> Result<(), Restore
     while let Some(res) = join_set.join_next().await {
         failed += res.unwrap_or(1);
     }
-    tracing::info!(
-        "Restored {} of {total} files ({} skipped)",
-        total - failed,
-        plan.skipped.len()
-    );
-    let outcome = restore_secrets(args, s3, &manifest, plan.secret_files).await?;
-    failed += outcome.failed;
-    let total = total + outcome.total;
-    if failed > 0 && !args.best_effort {
-        return Err(RestoreError::Failed(failed, total));
-    }
-    Ok(())
+    failed
 }
 
 /// The matcher [`plan_restore`] diverts with. For an archive written by a
@@ -635,7 +709,8 @@ mod tests {
     use super::*;
     use kubimo::{
         ManifestDirectory, ManifestVersion, WorkspaceDirContentUrl, WorkspaceDirDirectory,
-        WorkspaceDirEntry, WorkspaceDirFile, WorkspaceDirSymlink, WorkspaceManifest,
+        WorkspaceDirEntry, WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache,
+        WorkspaceDirSymlink, WorkspaceManifest,
     };
 
     fn manifest(directories: Vec<ManifestDirectory>) -> WorkspaceManifest {
@@ -1049,5 +1124,153 @@ mod tests {
             ),
             Err(PlanError::ForeignContent { .. })
         ));
+    }
+
+    fn cache(format: &str, key: &str, size: u64) -> WorkspaceDirMarimoCache {
+        WorkspaceDirMarimoCache {
+            format: format.to_string(),
+            size: Some(size),
+            modified: Some(chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap()),
+            url: Some(WorkspaceDirContentUrl {
+                url: format!("s3://bucket/{key}").parse().unwrap(),
+                crc32: Some(9),
+                e_tag: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn notebook_entry(name: &str, caches: Vec<WorkspaceDirMarimoCache>) -> WorkspaceDirEntry {
+        let mut entry = file_entry(name, true);
+        entry.file.as_mut().unwrap().marimo = Some(WorkspaceDirMarimo {
+            meta_json: None,
+            caches: Some(caches),
+        });
+        entry
+    }
+
+    fn paths(files: &[RestoreFile]) -> Vec<&Path> {
+        files.iter().map(|f| f.path.as_path()).collect()
+    }
+
+    /// The Render runner serves a published notebook from the session and
+    /// notebook snapshots, and a fresh slot only has what the archive holds.
+    #[test]
+    fn plan_restore_puts_marimo_caches_back_next_to_their_notebook() {
+        let manifest = manifest(vec![
+            ManifestDirectory {
+                path: "".to_string(),
+                entries: vec![notebook_entry(
+                    "readme.py",
+                    vec![
+                        cache("md", "aaaaaaaaaaaaa.md", 10),
+                        cache("session", "bbbbbbbbbbbbb.json", 100),
+                        cache("notebook", "ccccccccccccc.json", 1000),
+                    ],
+                )],
+            },
+            ManifestDirectory {
+                path: "sub".to_string(),
+                entries: vec![notebook_entry(
+                    "nb.py",
+                    vec![cache("html", "ddddddddddddd.html", 5)],
+                )],
+            },
+        ]);
+        let plan = plan(&manifest).unwrap();
+        assert_eq!(
+            paths(&plan.files),
+            vec![Path::new("readme.py"), Path::new("sub/nb.py")]
+        );
+        assert_eq!(
+            paths(&plan.caches),
+            vec![
+                Path::new("__marimo__/readme.md"),
+                Path::new("__marimo__/session/readme.py.json"),
+                Path::new("__marimo__/notebook/readme.py.json"),
+                Path::new("sub/__marimo__/nb.html"),
+            ]
+        );
+        for dir in [
+            "__marimo__",
+            "__marimo__/session",
+            "__marimo__/notebook",
+            "sub/__marimo__",
+        ] {
+            assert!(
+                plan.directories.contains(&PathBuf::from(dir)),
+                "missing directory {dir}"
+            );
+        }
+        assert_eq!(plan.cache_bytes, 1115);
+        // Each cache carries its own checksum and mtime — marimo-ssr keys its
+        // 304s on the session file's mtime.
+        let session = &plan.caches[1];
+        assert_eq!(session.url.as_str(), "s3://bucket/bbbbbbbbbbbbb.json");
+        assert_eq!(session.crc32, Some(9));
+        assert_eq!(
+            session.modified,
+            Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000))
+        );
+        assert!(plan.skipped.is_empty());
+    }
+
+    #[test]
+    fn plan_restore_skips_caches_it_cannot_place() {
+        // Over the upload size limit: recorded, but never uploaded.
+        let mut oversized = cache("html", "eeeeeeeeeeeee.html", 7);
+        oversized.url = None;
+        let manifest = manifest(vec![ManifestDirectory {
+            path: "".to_string(),
+            entries: vec![notebook_entry(
+                "readme.py",
+                vec![
+                    // A format only a newer indexer knows.
+                    cache("pdf", "fffffffffffff.pdf", 3),
+                    oversized,
+                    cache("session", "bbbbbbbbbbbbb.json", 100),
+                ],
+            )],
+        }]);
+        let plan = plan(&manifest).unwrap();
+        assert_eq!(
+            paths(&plan.caches),
+            vec![Path::new("__marimo__/session/readme.py.json")]
+        );
+        assert_eq!(plan.cache_bytes, 100);
+        // Caches are best-effort extras, not files the user would miss.
+        assert!(plan.skipped.is_empty());
+    }
+
+    #[test]
+    fn plan_restore_rejects_a_cache_outside_the_archive() {
+        let mut foreign = cache("session", "x.json", 1);
+        foreign.url.as_mut().unwrap().url = "s3://other/x.json".parse().unwrap();
+        let manifest = manifest(vec![ManifestDirectory {
+            path: "".to_string(),
+            entries: vec![notebook_entry("readme.py", vec![foreign])],
+        }]);
+        assert!(matches!(
+            plan(&manifest),
+            Err(PlanError::ForeignContent { .. })
+        ));
+    }
+
+    #[test]
+    fn plan_restore_leaves_a_secret_notebooks_caches_behind() {
+        let mut builder = GitignoreBuilder::new("");
+        builder.add_line(None, "secret.py").unwrap();
+        let matcher = builder.build().unwrap();
+        let manifest = manifest(vec![ManifestDirectory {
+            path: "".to_string(),
+            entries: vec![notebook_entry(
+                "secret.py",
+                vec![cache("session", "bbbbbbbbbbbbb.json", 100)],
+            )],
+        }]);
+        let plan = plan_restore(&manifest, &origin(), &matcher).unwrap();
+        assert_eq!(paths(&plan.secret_files), vec![Path::new("secret.py")]);
+        assert!(plan.caches.is_empty());
+        assert_eq!(plan.cache_bytes, 0);
     }
 }

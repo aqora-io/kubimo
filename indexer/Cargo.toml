@@ -5,6 +5,7 @@ version.workspace = true
 license.workspace = true
 
 [dev-dependencies]
+chrono = "0.4"
 tempfile = "3"
 http = "1"
 tower = { version = "0.5", features = ["util"] }

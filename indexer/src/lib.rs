@@ -8,6 +8,7 @@
 pub mod disk;
 pub mod fingerprint;
 pub mod keys;
+pub mod marimo_cache;
 pub mod python;
 pub mod restore;
 pub mod s3;
