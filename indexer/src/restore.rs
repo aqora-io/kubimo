@@ -52,6 +52,8 @@ pub enum PlanError {
     UnsafePath(String),
     #[error("manifest entry points outside the archive: {url} is not under {expected}")]
     ForeignContent { url: String, expected: String },
+    #[error("archive sizes in the manifest overflow")]
+    SizeOverflow,
 }
 
 /// Where an archive's objects are allowed to live.
@@ -123,7 +125,9 @@ fn safe_entry_path(dir: &Path, name: &str) -> Result<PathBuf, PlanError> {
 /// manifest is only semi-trusted: paths escaping the target directory are
 /// rejected, and so are content urls escaping `origin` (see [`ArchiveOrigin`]).
 /// Marimo caches come back next to their notebook (see [`plan_marimo_caches`]);
-/// `meta_json` does not, it is derived from the source at upload.
+/// `meta_json` does not, it is derived from the source at upload. A `NamesOnly`
+/// restore withholds the caches as well: they hold rendered cell outputs, which
+/// can embed the very values that mode keeps from the restorer.
 ///
 /// Entries `matcher` marks secret are diverted: files with content to
 /// [`RestorePlan::secret_files`], everything else dropped — a legacy archive's
@@ -133,7 +137,9 @@ pub fn plan_restore(
     manifest: &WorkspaceManifest,
     origin: &ArchiveOrigin,
     matcher: &Gitignore,
+    secrets: &WorkspaceRestoreSecrets,
 ) -> Result<RestorePlan, PlanError> {
+    let withhold_caches = matches!(secrets, WorkspaceRestoreSecrets::NamesOnly);
     let mut plan = RestorePlan::default();
     for directory in &manifest.directories {
         let dir_path = safe_relative_path(&directory.path)?;
@@ -175,7 +181,7 @@ pub fn plan_restore(
                 } else {
                     plan.skipped.push(entry_path.clone());
                 }
-                if !is_secret {
+                if !is_secret && !withhold_caches {
                     plan_marimo_caches(&mut plan, &entry_path, file, origin)?;
                 }
             } else {
@@ -216,7 +222,12 @@ fn plan_marimo_caches(
         if let Some(parent) = path.parent() {
             plan.directories.push(parent.to_path_buf());
         }
-        plan.cache_bytes += cache.size.unwrap_or(0);
+        if let Some(size) = cache.size {
+            plan.cache_bytes = plan
+                .cache_bytes
+                .checked_add(size)
+                .ok_or(PlanError::SizeOverflow)?;
+        }
         plan.caches.push(RestoreFile {
             path,
             url: url.url.clone(),
@@ -280,11 +291,14 @@ pub async fn restore(args: &RestoreOptions, s3: &S3Client) -> Result<(), Restore
         key_prefix: args.key_prefix.clone(),
     };
     let matcher = legacy_matcher(args, s3, &manifest, &origin).await?;
-    let plan = plan_restore(&manifest, &origin, &matcher)?;
+    let plan = plan_restore(&manifest, &origin, &matcher, &args.secrets)?;
 
     tokio::fs::create_dir_all(&args.directory).await?;
     let usage = disk::disk_usage(&args.directory)?;
-    let needed = manifest.total_content_bytes + plan.cache_bytes;
+    let needed = manifest
+        .total_content_bytes
+        .checked_add(plan.cache_bytes)
+        .ok_or(PlanError::SizeOverflow)?;
     if usage.available < needed {
         return Err(RestoreError::InsufficientSpace {
             needed,
@@ -735,7 +749,12 @@ mod tests {
     }
 
     fn plan(manifest: &WorkspaceManifest) -> Result<RestorePlan, PlanError> {
-        plan_restore(manifest, &origin(), &Gitignore::empty())
+        plan_restore(
+            manifest,
+            &origin(),
+            &Gitignore::empty(),
+            &WorkspaceRestoreSecrets::Values,
+        )
     }
 
     fn file_entry(name: &str, with_content: bool) -> WorkspaceDirEntry {
@@ -848,7 +867,12 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    plan_restore(&manifest_pointing_at(url), &origin, &Gitignore::empty()),
+                    plan_restore(
+                        &manifest_pointing_at(url),
+                        &origin,
+                        &Gitignore::empty(),
+                        &WorkspaceRestoreSecrets::Values
+                    ),
                     Err(PlanError::ForeignContent { .. })
                 ),
                 "expected {url} to be rejected"
@@ -867,8 +891,13 @@ mod tests {
             key_prefix: Some("workspace/mine/".to_string()),
         };
         let manifest = manifest_pointing_at("s3://bucket/workspace/mine/seed/readme.py");
-        let plan = plan_restore(&manifest, &origin, &Gitignore::empty())
-            .expect("a nested seed is legitimate");
+        let plan = plan_restore(
+            &manifest,
+            &origin,
+            &Gitignore::empty(),
+            &WorkspaceRestoreSecrets::Values,
+        )
+        .expect("a nested seed is legitimate");
         assert_eq!(plan.files.len(), 1);
     }
 
@@ -986,7 +1015,13 @@ mod tests {
                 },
             ],
         }]);
-        let plan = plan_restore(&manifest, &origin(), &matcher).unwrap();
+        let plan = plan_restore(
+            &manifest,
+            &origin(),
+            &matcher,
+            &WorkspaceRestoreSecrets::Values,
+        )
+        .unwrap();
         assert_eq!(
             plan.files.iter().map(|f| &f.path).collect::<Vec<_>>(),
             vec![&PathBuf::from("notebook.py")]
@@ -1113,6 +1148,7 @@ mod tests {
                 &manifest_pointing_at("s3://bucket/workspace/mine/notebook.py"),
                 &origin,
                 &Gitignore::empty(),
+                &WorkspaceRestoreSecrets::Values,
             )
             .is_ok()
         );
@@ -1121,6 +1157,7 @@ mod tests {
                 &manifest_pointing_at("s3://bucket/workspace/mine-other/secret.py"),
                 &origin,
                 &Gitignore::empty(),
+                &WorkspaceRestoreSecrets::Values,
             ),
             Err(PlanError::ForeignContent { .. })
         ));
@@ -1268,9 +1305,59 @@ mod tests {
                 vec![cache("session", "bbbbbbbbbbbbb.json", 100)],
             )],
         }]);
-        let plan = plan_restore(&manifest, &origin(), &matcher).unwrap();
+        let plan = plan_restore(
+            &manifest,
+            &origin(),
+            &matcher,
+            &WorkspaceRestoreSecrets::Values,
+        )
+        .unwrap();
         assert_eq!(paths(&plan.secret_files), vec![Path::new("secret.py")]);
         assert!(plan.caches.is_empty());
         assert_eq!(plan.cache_bytes, 0);
+    }
+
+    /// A names-only restore withholds the source's secret values; rendered
+    /// outputs can embed those values, so the caches stay behind too.
+    #[test]
+    fn a_names_only_restore_withholds_marimo_caches() {
+        let manifest = manifest(vec![ManifestDirectory {
+            path: "".to_string(),
+            entries: vec![notebook_entry(
+                "readme.py",
+                vec![cache("session", "bbbbbbbbbbbbb.json", 100)],
+            )],
+        }]);
+        let plan = plan_restore(
+            &manifest,
+            &origin(),
+            &Gitignore::empty(),
+            &WorkspaceRestoreSecrets::NamesOnly,
+        )
+        .unwrap();
+        assert_eq!(paths(&plan.files), vec![Path::new("readme.py")]);
+        assert!(plan.caches.is_empty());
+        assert_eq!(plan.cache_bytes, 0);
+        assert!(
+            !plan
+                .directories
+                .iter()
+                .any(|dir| dir.starts_with("__marimo__"))
+        );
+    }
+
+    #[test]
+    fn cache_sizes_that_overflow_are_a_planning_error() {
+        let manifest = manifest(vec![ManifestDirectory {
+            path: "".to_string(),
+            entries: vec![notebook_entry(
+                "readme.py",
+                vec![
+                    cache("session", "bbbbbbbbbbbbb.json", u64::MAX),
+                    cache("notebook", "ccccccccccccc.json", 1),
+                ],
+            )],
+        }]);
+        assert!(matches!(plan(&manifest), Err(PlanError::SizeOverflow)));
     }
 }
