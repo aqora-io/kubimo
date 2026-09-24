@@ -1,8 +1,8 @@
 //! The volume a workspace's files are mounted from.
 //!
-//! Shared by the runner pod and the cache job. They mount the same workspace at
-//! the same path, so a difference between them is never a design choice — it is
-//! a bug.
+//! Shared by the runner pod, the cache job and the import job. They mount the
+//! same workspace at the same path, so a difference between them is never a
+//! design choice — it is a bug.
 
 use std::collections::BTreeMap;
 
@@ -14,6 +14,10 @@ pub(crate) const SLOT_CSI_DRIVER: &str = "kubimo.aqora.io";
 
 /// Where workspace pods mount the slot (the runner image's home directory).
 pub(crate) const MOUNT_DIR: &str = "/home/me";
+
+/// The workspace's files within the mounted slot. Must match the agent's
+/// `hydrate::WORKSPACE_SUBDIR` under [`MOUNT_DIR`].
+pub(crate) const WORKSPACE_DIR: &str = "/home/me/workspace";
 
 /// Where the agent sources a slot's contents.
 #[derive(Debug, Default, Clone)]

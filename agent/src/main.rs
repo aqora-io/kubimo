@@ -143,6 +143,23 @@ enum Command {
         )]
         runner_grace_secs: u64,
     },
+    /// Download S3 objects, with credentials from the environment (`AWS_*`).
+    /// An ImportJob's fetch init containers run this, so the importer — which
+    /// processes the untrusted files — never holds them. Touches nothing under
+    /// `--data-root`.
+    ///
+    /// Repeat `--bucket`, `--key` and `--out` once per object: the nth key is
+    /// fetched from the nth bucket into the nth file.
+    #[command(name = "s3-get")]
+    S3Get {
+        #[arg(long, required = true)]
+        bucket: Vec<String>,
+        /// Object key, verbatim.
+        #[arg(long, required = true)]
+        key: Vec<String>,
+        #[arg(long, required = true)]
+        out: Vec<PathBuf>,
+    },
 }
 
 fn main() {
@@ -190,6 +207,7 @@ fn main() {
             Duration::from_secs(poll_interval_secs),
             runner_grace_secs,
         ),
+        Command::S3Get { bucket, key, out } => s3_get(&bucket, &key, &out),
     };
     if let Err(err) = result {
         tracing::error!("{err}");
@@ -311,6 +329,28 @@ fn drain_node(
             runner_grace_secs,
         ))?;
     Ok(())
+}
+
+fn s3_get(
+    buckets: &[String],
+    keys: &[String],
+    outs: &[PathBuf],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if buckets.len() != keys.len() || keys.len() != outs.len() {
+        return Err("s3-get needs one --bucket and one --out per --key".into());
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let client = indexer::s3::S3Client::from_env();
+            for ((bucket, key), out) in buckets.iter().zip(keys).zip(outs) {
+                let file = tokio::fs::File::create(out).await?;
+                let crc32 = client.download_object(bucket, key, file).await?;
+                tracing::info!(bucket, key, out = %out.display(), crc32 = format!("{crc32:08x}"), "downloaded");
+            }
+            Ok(())
+        })
 }
 
 fn create_slot(
@@ -459,4 +499,47 @@ fn serve(
             })
             .await
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The argv an ImportJob's fetch container is started with. The
+    /// controller always writes `--flag=value`, so a key that starts with `-`
+    /// is still a value, and keeps each object's three flags in order.
+    #[test]
+    fn s3_get_parses_the_controllers_argv() {
+        let args = Args::try_parse_from([
+            "kubimo-agent",
+            "s3-get",
+            "--bucket=imports",
+            "--key=-odd/My Notebook.ipynb",
+            "--out=/input/0.ipynb",
+            "--bucket=data",
+            "--key=a/b.csv",
+            "--out=/input/1",
+        ])
+        .unwrap();
+        let Command::S3Get { bucket, key, out } = args.command else {
+            panic!("parsed as {:?}", args.command);
+        };
+        assert_eq!(bucket, ["imports", "data"]);
+        assert_eq!(key, ["-odd/My Notebook.ipynb", "a/b.csv"]);
+        assert_eq!(
+            out,
+            [PathBuf::from("/input/0.ipynb"), PathBuf::from("/input/1")]
+        );
+    }
+
+    #[test]
+    fn s3_get_refuses_unpaired_flags() {
+        let err = s3_get(
+            &["imports".into()],
+            &["a.ipynb".into(), "b.ipynb".into()],
+            &[PathBuf::from("/input/0.ipynb")],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("one --bucket"), "{err}");
+    }
 }

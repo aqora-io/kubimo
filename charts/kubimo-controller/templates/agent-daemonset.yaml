@@ -127,7 +127,7 @@ spec:
               mountPath: /registration
       containers:
         - name: agent
-          image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Values.agent.image.sourceTag | default .Chart.AppVersion }}"
+          image: {{ include "kubimo-controller.agentImage" . | quote }}
           imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
           args:
             - --data-root=/data

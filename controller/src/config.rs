@@ -12,6 +12,11 @@ fn default_marimo_image() -> String {
 }
 
 #[inline]
+fn default_agent_image() -> String {
+    concat!("ghcr.io/aqora-io/kubimo-agent:", env!("CARGO_PKG_VERSION")).to_string()
+}
+
+#[inline]
 fn default_busybox_image() -> String {
     "busybox:1.36.1".to_string()
 }
@@ -118,6 +123,12 @@ pub struct Config {
     pub manager_name: String,
     #[serde(default = "default_marimo_image")]
     pub marimo_image: String,
+    /// The node agent's image. An ImportJob fetches its files with it, so the
+    /// credentials stay out of the marimo container importing them; the
+    /// chart sets it to the DaemonSet's own image, which every agent node
+    /// already has.
+    #[serde(default = "default_agent_image")]
+    pub agent_image: String,
     #[serde(default = "default_busybox_image")]
     pub busybox_image: String,
     #[serde(default = "default_ingress_class_name")]
@@ -224,6 +235,21 @@ mod tests {
         )])
         .unwrap();
         assert_eq!(config.marimo_image, default_marimo_image());
+    }
+
+    #[test]
+    fn agent_image_defaults_to_the_crate_version_and_can_be_overridden() {
+        let config = load_from(&[]).unwrap();
+        assert_eq!(
+            config.agent_image,
+            concat!("ghcr.io/aqora-io/kubimo-agent:", env!("CARGO_PKG_VERSION"))
+        );
+        let config = load_from(&[(
+            "KUBIMO__AGENT_IMAGE",
+            "ghcr.io/aqora-io/kubimo-agent:src-abc",
+        )])
+        .unwrap();
+        assert_eq!(config.agent_image, "ghcr.io/aqora-io/kubimo-agent:src-abc");
     }
 
     /// Unset means off: no asset URL is minted and pods stay unchanged.

@@ -1,0 +1,1 @@
+self.spec.files.all(f, self.spec.files.exists_one(g, g.output.path == f.output.path))

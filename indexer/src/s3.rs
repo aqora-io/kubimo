@@ -294,6 +294,22 @@ impl S3Client {
         let s3 = self.bucket(&bucket).await?;
         download_from_store(&s3, &key, output, expected_crc32).await
     }
+
+    /// Stream a GET of `bucket`/`key` to `output`, returning the crc32 of the
+    /// downloaded bytes. The key is taken verbatim: the `s3://` URL methods
+    /// above only suit our own keys, since a URL path is percent-encoded — a
+    /// user's `My Notebook.ipynb` would be fetched as `My%20Notebook.ipynb`.
+    #[tracing::instrument(skip(self, output))]
+    pub async fn download_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        output: impl AsyncWrite + Unpin,
+    ) -> Result<u32, DownloadError> {
+        let key = Key::parse(key).map_err(ParseS3UrlError::from)?;
+        let s3 = self.bucket(bucket).await?;
+        download_from_store(&s3, &key, output, None).await
+    }
 }
 
 async fn get_bytes_from_store(
@@ -534,6 +550,23 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, DownloadError::Crc32Mismatch { .. }));
+    }
+
+    /// Why [`S3Client::download_object`] exists: a key parsed verbatim finds
+    /// the object, one taken from an `s3://` URL path does not.
+    #[tokio::test]
+    async fn test_a_verbatim_key_is_not_percent_encoded() {
+        let key = "imports/My Notebook.ipynb";
+        let store = store_with(key, b"{}").await;
+        let mut output = std::io::Cursor::new(Vec::new());
+        download_from_store(&store, &Key::parse(key).unwrap(), &mut output, None)
+            .await
+            .unwrap();
+        assert_eq!(output.into_inner(), b"{}");
+
+        let url = Url::parse(&format!("s3://bucket/{key}")).unwrap();
+        let (_, from_url) = parse_s3_url(&url).unwrap();
+        assert_ne!(from_url, Key::parse(key).unwrap());
     }
 
     #[tokio::test]
