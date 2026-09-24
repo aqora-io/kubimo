@@ -89,3 +89,29 @@ tests:
           content:
             name: KUBIMO__METRICS__BIND_ADDR
             value: "0.0.0.0:9095"
+
+  - it: should point the controller at the agent image the chart deploys
+    set:
+      agent:
+        image:
+          sourceTag: src-abc
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__AGENT_IMAGE
+            value: "ghcr.io/aqora-io/kubimo-agent:src-abc"
+
+  - it: should let agent.image.tag override the agent source tag
+    set:
+      agent:
+        image:
+          repository: example.com/agent
+          sourceTag: src-abc
+          tag: pinned
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__AGENT_IMAGE
+            value: "example.com/agent:pinned"

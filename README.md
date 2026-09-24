@@ -15,14 +15,16 @@ export KUBIMO__RUNNER_STATUS__RESOLUTION__METHOD="Ingress"
 export KUBIMO__RUNNER_STATUS__RESOLUTION__HOST="http://$(minikube ip)"
 export BUILDX_BAKE_FILE="docker-bake.hcl:docker-bake.dev.hcl"
 export KUBIMO__MARIMO_IMAGE="ghcr.io/aqora-io/kubimo-marimo:dev"
+export KUBIMO__AGENT_IMAGE="ghcr.io/aqora-io/kubimo-agent:dev"
 ```
 
 Then setup minikube
 
 ```bash
 sh scripts/setup-minikube-dev.sh # setup minikube
-docker buildx bake marimo # build marimo image
-minikube image load ghcr.io/aqora-io/kubimo-marimo:dev # load image into minikube
+docker buildx bake marimo agent # build marimo and agent images
+minikube image load ghcr.io/aqora-io/kubimo-marimo:dev # load images into minikube
+minikube image load ghcr.io/aqora-io/kubimo-agent:dev
 ```
 
 And finally run the controller

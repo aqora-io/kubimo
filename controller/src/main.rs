@@ -113,6 +113,10 @@ async fn main() -> ExitCode {
                 .await
                 .unwrap()
                 .wait(),
+            controllers::import_job::run(ctx.clone(), shutdown_signal("import_job"))
+                .await
+                .unwrap()
+                .wait(),
             controllers::budget::run(ctx.clone(), shutdown_signal("budget"))
                 .await
                 .unwrap()

@@ -32,12 +32,14 @@ export KUBIMO__RUNNER_STATUS__RESOLUTION__METHOD="Ingress"
 export KUBIMO__RUNNER_STATUS__RESOLUTION__HOST="http://$(minikube ip)"
 export BUILDX_BAKE_FILE="docker-bake.hcl:docker-bake.dev.hcl"
 export KUBIMO__MARIMO_IMAGE="ghcr.io/aqora-io/kubimo-marimo:dev"
+export KUBIMO__AGENT_IMAGE="ghcr.io/aqora-io/kubimo-agent:dev"   # ImportJob fetch step
 ```
 
 ```bash
 sh scripts/setup-minikube-dev                              # minikube + ingress addon + MinIO + node agent
-docker buildx bake marimo                                  # build marimo image (:dev tag via bake.dev file)
+docker buildx bake marimo agent                            # build marimo + agent images (:dev tag via bake.dev file)
 minikube image load ghcr.io/aqora-io/kubimo-marimo:dev
+minikube image load ghcr.io/aqora-io/kubimo-agent:dev
 cargo run -p kubimo --example apply_crds                   # apply CRDs to the cluster
 cargo run                                                  # run controller
 kubectl apply -f examples/basic.yaml                       # create example Workspace + Runners
@@ -48,7 +50,7 @@ CRD schema changes require re-running `apply_crds` against the cluster.
 
 ### Docker images
 
-`docker buildx bake` targets: `controller` (Dockerfile.controller), `marimo` (Dockerfile.marimo) and `agent` (Dockerfile.agent), plus the non-default `marimo-test` (builds the `marimo` image through its `test` stage, which runs the whole `docker/app` suite, `image`-marked tests included, against the real pixi/uv and the fork wheel the image ships; output is `cacheonly`, so nothing is pushed). The marimo image builds marimo from the aqora-io fork — the git ref is pinned in the `MARIMO_GIT` variable in `docker-bake.hcl`; "update marimo" means bumping that pin. To build against a local fork checkout instead, export its tree to a directory and point the `marimo-src` context at it: `docker buildx bake marimo --allow=fs.read=<dir> --set marimo.contexts.marimo-src=<dir>`. `docker/setup/` holds the files baked into the marimo image (start.sh, kubimo-uv, seed-notebook.py, system-requirements.txt); `docker/app/` holds the Python that runs inside it (cache.py, kubimo_migrate.py, kubimo_walk.py, kubimo_prebuild_overlay.py). The workspace template a new workspace is seeded from (readme.py, `.ignore`, `.secrets`) lives in the `aqora-template` crate of the aqora-io/cli repo and is rendered by the platform, not by this repo.
+`docker buildx bake` targets: `controller` (Dockerfile.controller), `marimo` (Dockerfile.marimo) and `agent` (Dockerfile.agent), plus the non-default `marimo-test` (builds the `marimo` image through its `test` stage, which runs the whole `docker/app` suite, `image`-marked tests included, against the real pixi/uv and the fork wheel the image ships; output is `cacheonly`, so nothing is pushed). The marimo image builds marimo from the aqora-io fork — the git ref is pinned in the `MARIMO_GIT` variable in `docker-bake.hcl`; "update marimo" means bumping that pin. To build against a local fork checkout instead, export its tree to a directory and point the `marimo-src` context at it: `docker buildx bake marimo --allow=fs.read=<dir> --set marimo.contexts.marimo-src=<dir>`. `docker/setup/` holds the files baked into the marimo image (start.sh, kubimo-uv, seed-notebook.py, system-requirements.txt); `docker/app/` holds the Python that runs inside it (cache.py, kubimo_import.py, kubimo_migrate.py, kubimo_walk.py, kubimo_prebuild_overlay.py). The workspace template a new workspace is seeded from (readme.py, `.ignore`, `.secrets`) lives in the `aqora-template` crate of the aqora-io/cli repo and is rendered by the platform, not by this repo.
 
 ## Architecture
 
@@ -57,7 +59,7 @@ CRD schema changes require re-running `apply_crds` against the cluster.
 - `api/` (crate name **`kubimo`**) — CRD type definitions plus a typed client wrapper. Features: `client` + `runtime` (default), `ws`. Examples: `apply_crds`, `print_crds`.
 - `controller/` (**`kubimo-controller`**, default member) — the operator binary.
 - `indexer/` — library the agent links against (no binary): watches the workspace directory, parses notebooks with tree-sitter-python, uploads files/metadata + a `manifest.json` (archive manifest) to S3 via `object_store`, writes `WorkspaceDirectory` CRs, and restores tracked files from such an archive (used by `spec.restoreFrom`). Secret paths — the workspace `.env` (always) plus anything matched by a gitignore-syntax `.secrets` file in the workspace root — never become archive entries or `WorkspaceDirectory` listings; they are exported to a separate `secrets.json` object next to the manifest (env keys/values + inline file contents, 1 MiB/file cap), with a names-only section in the manifest, and restored according to `restoreFrom.secrets`.
-- `agent/` — per-node DaemonSet binary: a CSI driver that provisions each workspace an XFS-project-quota'd slot on the node data volume (reflinked from a node template at `/data/template`, staged once per node from the marimo image's `/home/me`, with the kernel overlays of both backends pre-built on the node), hydrates it from S3 on publish, flushes it back on unpublish, and serves warm-pool claims.
+- `agent/` — per-node DaemonSet binary: a CSI driver that provisions each workspace an XFS-project-quota'd slot on the node data volume (reflinked from a node template at `/data/template`, staged once per node from the marimo image's `/home/me`, with the kernel overlays of both backends pre-built on the node), hydrates it from S3 on publish, flushes it back on unpublish, and serves warm-pool claims. Its `s3-get` subcommand is also what an ImportJob's fetch containers run.
 - `notebook_meta/` — serde types for marimo notebook metadata (shared by indexer / written to S3).
 - `json-patch-macros/` — `patch!`/`path!`/`add!`/`put!`… macros for building JSON patches used in reconcilers.
 
@@ -69,19 +71,20 @@ All defined with `#[derive(CustomResource, JsonSchema, ...)]` + `#[kube(...)]`, 
 - **Runner** (`bmor`) — one marimo process (`spec.command`: Edit / Run / Render) in a workspace (`spec.workspace`). Reconciles into Pod + Service + Ingress. Not reconciled until its Workspace is Ready; owned by the Workspace. A Run runner serves every session of a notebook from one marimo app host (marimo's experimental `isolate_apps`, which start.sh writes into the slot's marimo config); `KUBIMO_ISOLATE_APPS=false` in its env opts out. Optional `spec.pool` names a Pool to claim a pre-booted warm pod from (best-effort: any ineligibility falls back to a cold start). A claimed runner serves the pod's pre-minted base-url/token — consumers must read `status.claim.{ingressPath,token}` instead of `spec.ingress.path`/`spec.token`.
 - **Pool** (`bmop`) — a fleet of pre-booted warm runner pods (marimo already serving on an anonymous, template-seeded slot). Claim protocol constants + `PoolClaim` payload live in `api/src/pool.rs`; the claim itself is a `test`-guarded JSON patch flipping the `kubimo.aqora.io/pool-state` label, the agent hydrates, waits for the pod to report its claim-time legacy migration done (`KUBIMO_MIGRATION_MARKER`, so no session plans a notebook before its header exists), then acks via `kubimo.aqora.io/claim-state`. Each warm pod gets its own Service and Ingress (named after it, `service-upstream`) at mint, so ingress-nginx has programmed the route long before a claim; the Service selects only `kubimo.aqora.io/route`, which the runner reconciler adds to the pod at the ack. A pod claimed under an older controller (no `warm-route` annotation) still gets the runner's Ingress instead — never both, ingress-nginx refuses duplicate paths. Pool names are DNS-1035 labels of at most 54 characters (CEL). Edit/Run only (CEL-enforced). `spec.pythonRuntime` (absent = `Uv`, immutable) fixes the backend its warm pods boot with; a runner claims only from a pool of its workspace's runtime and otherwise cold-starts. See `examples/pool.yaml`; only create Pools after the agent DaemonSet and marimo image with pool support are rolled (skew wedges warm pods or skips post-claim dependency sync).
 - **CacheJob** (`bmocj`) — a Job that runs each of a workspace's notebooks in its own sandbox environment, built by the workspace's backend, to write the render caches marimo-ssr serves from; building those environments along the way pre-warms them for the next kernel that opens the notebook.
+- **ImportJob** (`bmoij`) — imports up to 100 files (`spec.files[]`: `input.s3 {bucket, key, secretName}`, `output.path` relative to the workspace root, unique) into a Workspace's slot, so live editors see them and the indexer syncs them. A file is copied as-is, or with `convert: true` converted into a marimo notebook as `marimo convert` does (input key `.ipynb`/`.md`/`.qmd`/`.py`, output `.py`). The Job (`<name>-import`) splits the credentials from the untrusted files: one `fetch-<n>` init container per distinct Secret, on the agent image (`KUBIMO__AGENT_IMAGE`), runs `s3-get` into an emptyDir with `envFrom` that Secret, then an `import` container on the marimo image runs `/app/kubimo_import.py` with no credentials, gVisor-sandboxed and uv offline. All or nothing: every file is converted and its path checked before any is written. Runs once (spec immutable, no retries, 600s deadline); `status.conditions` gets exactly one terminal `Complete`/`Failed` (constants in `api/src/conditions.rs`).
 - **WorkspaceDirectory** (`bmowd`) — directory listing + file metadata. Written by the **indexer**, not the controller (the controller only attaches owner references).
 
 `all_crds()` returns the full set; factory helpers like `Workspace::new_runner()` set owner references.
 
 ### Controller (`controller/src/`)
 
-`main.rs` spawns seven controller loops with graceful shutdown: `workspace`, `workspace_directory`, `runner`, `runner_status`, `cache_job`, `budget`, `pool` (under `controllers/`).
+`main.rs` spawns eight controller loops with graceful shutdown: `workspace`, `workspace_directory`, `runner`, `runner_status`, `cache_job`, `import_job`, `budget`, `pool` (under `controllers/`).
 
 - Reconcilers implement the `Reconciler` trait (`apply`/`cleanup`, `reconciler.rs`) and are wrapped via `ReconcilerExt` in a Tower stack: tracing → backoff → finalizer (`service.rs`). All cleanup goes through finalizers.
 - Each resource's reconcile logic is split into `apply_*.rs` files (e.g. `controllers/runner/apply_pod.rs`); steps for a resource run concurrently with `join_all`.
 - `runner_status` is poll-based, not watch-based: it hits the marimo HTTP API and writes `status.lastActive` / `status.marimoVersion`. Endpoint resolution is configured via `StatusCheckResolution`: `ServiceDns` (default, in-cluster) or `Ingress { host }` (used for local dev, where the controller runs outside the cluster).
 - `workspace_affinity.rs`: all pods of a workspace get pod-affinity to the same node (its slot lives on one node's data volume).
-- Config (`config.rs`) loads env vars with prefix `KUBIMO` and `__` separator, e.g. `KUBIMO__MARIMO_IMAGE`, `KUBIMO__RUNNER_STATUS__RESOLUTION__METHOD`.
+- Config (`config.rs`) loads env vars with prefix `KUBIMO` and `__` separator, e.g. `KUBIMO__MARIMO_IMAGE`, `KUBIMO__AGENT_IMAGE`, `KUBIMO__RUNNER_STATUS__RESOLUTION__METHOD`.
 
 ### API client layer (`api/src/`)
 

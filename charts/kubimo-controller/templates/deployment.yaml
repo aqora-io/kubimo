@@ -67,6 +67,11 @@ spec:
             # stages from `kubimo-controller.marimoImage`.
             - name: KUBIMO__MARIMO_IMAGE
               value: {{ include "kubimo-controller.marimoImage" . | quote }}
+            # Unconditional for the same reason: an ImportJob's fetch containers
+            # must run the agent image this chart actually deploys, not one derived
+            # from the controller's crate version.
+            - name: KUBIMO__AGENT_IMAGE
+              value: {{ include "kubimo-controller.agentImage" . | quote }}
             {{- with .Values.controller }}
             {{- if .rustLog }}
             - name: RUST_LOG
