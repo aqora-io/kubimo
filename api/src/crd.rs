@@ -13,7 +13,9 @@ use url::Url;
 
 use crate::selector::Selector;
 use crate::validation::{
-    budget_selector_not_empty, log_level, pool_command_not_render, pool_immutable_fields,
+    budget_selector_not_empty, import_job_convert_input, import_job_convert_output,
+    import_job_immutable, import_job_input_source, import_job_name_length, import_job_output_path,
+    import_job_unique_output_paths, log_level, pool_command_not_render, pool_immutable_fields,
     pool_max_cpu_greater_than_min, pool_max_memory_greater_than_min, pool_name_is_a_service_name,
     runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
     workspace_immutable_fields, workspace_restore_from_not_indexer_prefix,
@@ -512,6 +514,103 @@ impl Workspace {
     }
 }
 
+/// Where an imported file comes from. Exactly one source is set (CEL
+/// enforced); `s3` is the only one so far.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportJobInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s3: Option<ImportJobS3Input>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportJobS3Input {
+    pub bucket: String,
+    /// Object key, taken verbatim. For a file that is converted, its extension
+    /// picks the input format: `.ipynb`, `.md`, `.qmd` or `.py`.
+    #[schemars(length(min = 1, max = 1024))]
+    pub key: String,
+    /// Secret with the `AWS_*` credentials to fetch the object with, in the
+    /// same shape as the indexer's. Only the fetch step sees it — never the
+    /// importer, which processes the untrusted file.
+    pub secret_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportJobOutput {
+    /// Where the file is written, relative to the workspace root. An existing
+    /// file there is replaced.
+    #[schemars(length(min = 1, max = 1024))]
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportJobFile {
+    pub input: ImportJobInput,
+    pub output: ImportJobOutput,
+    /// Convert the input into a marimo notebook, as `marimo convert` does,
+    /// instead of copying it as-is. The input key must then end with
+    /// `.ipynb`, `.md`, `.qmd` or `.py`, and the output path with `.py`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub convert: Option<bool>,
+}
+
+impl ImportJobFile {
+    pub fn converts(&self) -> bool {
+        self.convert.unwrap_or(false)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportJobStatus {
+    /// Empty while the import is pending or running; then exactly one of
+    /// [`crate::conditions::IMPORT_COMPLETE`] or
+    /// [`crate::conditions::IMPORT_FAILED`], which is terminal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Vec<Condition>>,
+}
+
+/// Import files into a workspace, each copied as-is or converted into a marimo
+/// notebook. All or nothing: a file that fails fails the whole import. Runs
+/// once: the spec is immutable and a finished import is never retried.
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
+#[kube(
+    group = "kubimo.aqora.io",
+    version = "v1",
+    kind = "ImportJob",
+    shortname = "bmoij",
+    selectable = ".spec.workspace",
+    namespaced,
+    status = "ImportJobStatus",
+    validation = import_job_name_length(),
+    validation = import_job_input_source(),
+    validation = import_job_output_path(),
+    validation = import_job_unique_output_paths(),
+    validation = import_job_convert_input(),
+    validation = import_job_convert_output(),
+    validation = import_job_immutable(),
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportJobSpec {
+    pub workspace: String,
+    #[schemars(length(min = 1, max = 100))]
+    pub files: Vec<ImportJobFile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<Requirement<StorageQuantity>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<Requirement<CpuQuantity>>,
+}
+
+impl ResourceFactory for ImportJob {
+    fn new(name: &str, spec: Self::Spec) -> Self {
+        Self::new(name, spec)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BudgetResourceStatus {
@@ -775,6 +874,7 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         Workspace::crd(),
         Runner::crd(),
         CacheJob::crd(),
+        ImportJob::crd(),
         WorkspaceDir::crd(),
         Budget::crd(),
         Pool::crd(),
@@ -910,6 +1010,58 @@ mod tests {
         let json = serde_json::to_string(&cpu).unwrap();
         assert!(!json.contains("null"), "requirement had a null: {json}");
         assert!(json.contains("500m"));
+    }
+
+    /// See [`a_partial_spec_serializes_no_nulls`]; the platform builds this
+    /// spec the same way.
+    #[test]
+    fn a_partial_import_job_serializes_no_nulls() {
+        let spec = ImportJobSpec {
+            workspace: "bmow-x".to_string(),
+            files: vec![ImportJobFile {
+                input: ImportJobInput {
+                    s3: Some(ImportJobS3Input {
+                        bucket: "imports".to_string(),
+                        key: "a/b.ipynb".to_string(),
+                        secret_name: "s3".to_string(),
+                    }),
+                },
+                output: ImportJobOutput {
+                    path: "b.py".to_string(),
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("null"), "spec apply had a null: {json}");
+        assert!(json.contains("secretName"));
+        let status = serde_json::to_string(&ImportJobStatus::default()).unwrap();
+        assert_eq!(status, "{}");
+    }
+
+    #[test]
+    fn import_job_crd_carries_its_rules() {
+        let crd = serde_json::to_string(&ImportJob::crd()).unwrap();
+        assert!(crd.contains("bmoij"));
+        assert!(crd.contains("import job name must be at most 56 characters"));
+        assert!(crd.contains("import job file input must set exactly one source"));
+        assert!(crd.contains("import job output path must be a relative file path"));
+        assert!(crd.contains("import job output paths must be unique"));
+        assert!(crd.contains("import job file to convert must have an input key ending with"));
+        assert!(
+            crd.contains("import job file to convert must have an output path ending with .py")
+        );
+        assert!(crd.contains("import job spec is immutable"));
+        // Bounded strings and lists keep the CEL cost estimate within the
+        // apiserver's limit; unbounded ones are costed as the whole request size.
+        assert!(crd.contains("\"maxLength\":1024"));
+        assert!(crd.contains("\"maxItems\":100"));
+        assert!(crd.contains("\"minItems\":1"));
+        assert!(
+            crd.contains("\"status\":{}"),
+            "no status subresource: {crd}"
+        );
     }
 
     #[test]

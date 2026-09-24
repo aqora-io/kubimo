@@ -94,6 +94,18 @@ optional in values.yaml, hence the dict guards.
 {{- end }}
 
 {{/*
+The node agent's image. The DaemonSet runs it, and the controller starts an
+ImportJob's fetch containers with it, so both resolve through here.
+*/}}
+{{- define "kubimo-controller.agentImage" -}}
+{{- $agent := .Values.agent | default dict -}}
+{{- $image := $agent.image | default dict -}}
+{{- $repo := $image.repository | default "ghcr.io/aqora-io/kubimo-agent" -}}
+{{- $tag := $image.tag | default $image.sourceTag | default .Chart.AppVersion -}}
+{{- printf "%s:%s" $repo $tag -}}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "kubimo-controller.serviceAccountName" -}}

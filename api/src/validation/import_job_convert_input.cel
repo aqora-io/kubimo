@@ -1,0 +1,7 @@
+self.spec.files.all(f,
+  !has(f.convert) || f.convert != true || !has(f.input.s3) ||
+  f.input.s3.key.endsWith(".ipynb") ||
+  f.input.s3.key.endsWith(".md") ||
+  f.input.s3.key.endsWith(".qmd") ||
+  f.input.s3.key.endsWith(".py")
+)

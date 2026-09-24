@@ -38,14 +38,15 @@ pub use api::{Api, ApiListStream};
 pub use client::{Client, ClientBuilder};
 pub use crd::{
     Budget, BudgetResourceStatus, BudgetSpec, BudgetStatus, CacheJob, CacheJobField, CacheJobSpec,
-    LogLevel, Pool, PoolSpec, PoolStatus, Requirement, Runner, RunnerClaim, RunnerCommand,
-    RunnerField, RunnerIngress, RunnerLifecycle, RunnerSpec, RunnerStatus, RunnerTls, RunnerToken,
-    StorageRequirement, Workspace, WorkspaceArchiveStatus, WorkspaceDir, WorkspaceDirContentUrl,
-    WorkspaceDirDirectory, WorkspaceDirEntry, WorkspaceDirField, WorkspaceDirFile,
-    WorkspaceDirMarimo, WorkspaceDirMarimoCache, WorkspaceDirSpec, WorkspaceDirSymlink,
-    WorkspaceField, WorkspaceIndexer, WorkspaceIndexerPod, WorkspacePythonRuntime,
-    WorkspaceRestoreFrom, WorkspaceRestoreSecrets, WorkspaceSlotStatus, WorkspaceSpec,
-    WorkspaceStatus, WorkspaceStorageStatus, all_crds,
+    ImportJob, ImportJobFile, ImportJobInput, ImportJobOutput, ImportJobS3Input, ImportJobSpec,
+    ImportJobStatus, LogLevel, Pool, PoolSpec, PoolStatus, Requirement, Runner, RunnerClaim,
+    RunnerCommand, RunnerField, RunnerIngress, RunnerLifecycle, RunnerSpec, RunnerStatus,
+    RunnerTls, RunnerToken, StorageRequirement, Workspace, WorkspaceArchiveStatus, WorkspaceDir,
+    WorkspaceDirContentUrl, WorkspaceDirDirectory, WorkspaceDirEntry, WorkspaceDirField,
+    WorkspaceDirFile, WorkspaceDirMarimo, WorkspaceDirMarimoCache, WorkspaceDirSpec,
+    WorkspaceDirSymlink, WorkspaceField, WorkspaceIndexer, WorkspaceIndexerPod,
+    WorkspacePythonRuntime, WorkspaceRestoreFrom, WorkspaceRestoreSecrets, WorkspaceSlotStatus,
+    WorkspaceSpec, WorkspaceStatus, WorkspaceStorageStatus, all_crds,
 };
 #[cfg(feature = "client")]
 pub use error::ClientBuildError;

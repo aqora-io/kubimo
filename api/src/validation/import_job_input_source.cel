@@ -1,0 +1,1 @@
+self.spec.files.all(f, has(f.input.s3))

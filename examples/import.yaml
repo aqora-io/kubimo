@@ -1,0 +1,44 @@
+# Imports files from S3 into a workspace (see examples/basic.yaml for the
+# workspace and its `workspace-s3` Secret). Each file is copied as-is, or, with
+# `convert: true`, converted into a marimo notebook as `marimo convert` does:
+# the input key's extension picks the format (.ipynb, .md, .qmd, or .py, plain
+# or py:percent) and the output path must end with .py. The files land in the
+# workspace's slot, so a live editor sees them straight away and the indexer
+# syncs them to the workspace's archive.
+#
+# Upload the inputs to the MinIO from scripts/setup-minikube-minio first:
+#
+#   POD=$(kubectl -n minio-tenant get pods -l v1.min.io/tenant=minio-tenant -o name | head -1)
+#   kubectl -n minio-tenant exec -i "$POD" -- mc pipe local/bucket/imports/sample.ipynb < sample.ipynb
+#   kubectl -n minio-tenant exec -i "$POD" -- mc pipe local/bucket/imports/data.csv < data.csv
+#
+# Then wait for it to finish:
+#
+#   kubectl wait importjob/import-sample --for=condition=Complete
+#
+# It runs once: the spec is immutable, and a Complete or Failed condition is
+# final. All or nothing: if one file fails, none is written. A `secretName` is
+# only handed to the step that fetches its files, never to the one importing
+# them.
+apiVersion: kubimo.aqora.io/v1
+kind: ImportJob
+metadata:
+  name: "import-sample"
+spec:
+  workspace: "workspace"
+  files:
+    - input:
+        s3:
+          bucket: "bucket"
+          key: "imports/sample.ipynb"
+          secretName: "workspace-s3"
+      output:
+        path: "imports/sample.py"
+      convert: true
+    - input:
+        s3:
+          bucket: "bucket"
+          key: "imports/data.csv"
+          secretName: "workspace-s3"
+      output:
+        path: "imports/data.csv"

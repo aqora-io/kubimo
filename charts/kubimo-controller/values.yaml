@@ -138,6 +138,8 @@ affinity: {}
 # pods through a CSI node plugin.
 agent:
   enabled: false
+  # Also what an ImportJob's fetch containers run, whether or not the DaemonSet is
+  # enabled here.
   image:
     repository: ghcr.io/aqora-io/kubimo-agent
     pullPolicy: IfNotPresent

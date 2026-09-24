@@ -1,0 +1,6 @@
+self.spec.files.all(f,
+  !f.output.path.startsWith("/") &&
+  !f.output.path.endsWith("/") &&
+  !f.output.path.contains("//") &&
+  !f.output.path.matches("(^|/)[.][.]?(/|$)")
+)

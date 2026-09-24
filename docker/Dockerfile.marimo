@@ -110,6 +110,9 @@ marimo_whl=`find /opt/marimo/dist -name 'marimo-*.whl'`
 # The extra requirements serve the server and its terminal (the aqora CLI,
 # formatters, the file watcher, exports); kubimo_migrate.py reads the same file
 # when it declares what legacy kernels imported from here.
+#
+# jupytext is what marimo converts py:percent scripts with (an ImportJob,
+# /app/kubimo_import.py); without it they silently collapse into a single cell.
 uv pip install --system \
   "marimo[recommended,lsp] @ file://${marimo_whl}" \
   -r /mnt/system-requirements.txt

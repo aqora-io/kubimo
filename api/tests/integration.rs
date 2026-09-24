@@ -620,3 +620,165 @@ async fn test_runner_pool_is_immutable() {
     })
     .await;
 }
+
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_import_job_admission_rules() {
+    with_namespace("test-import-admission", |client, ns| async move {
+        let import_jobs = client.api_namespaced::<kubimo::ImportJob>(&ns);
+        let file = |key: &str, path: &str, convert: Option<bool>| kubimo::ImportJobFile {
+            input: kubimo::ImportJobInput {
+                s3: Some(kubimo::ImportJobS3Input {
+                    bucket: "imports".to_string(),
+                    key: key.to_string(),
+                    secret_name: "import-s3".to_string(),
+                }),
+            },
+            output: kubimo::ImportJobOutput {
+                path: path.to_string(),
+            },
+            convert,
+        };
+        let import_job = |name: &str, files: Vec<kubimo::ImportJobFile>| {
+            let mut import_job = kubimo::ImportJob::new(
+                name,
+                kubimo::ImportJobSpec {
+                    workspace: TEST_WORKSPACE.to_string(),
+                    files,
+                    ..Default::default()
+                },
+            );
+            import_job.metadata.namespace = Some(ns.clone());
+            import_job
+        };
+        // Refused by the rule named, not by anything else about the object.
+        let refused = |result: kubimo::Result<kubimo::ImportJob>, message: &str| {
+            let err = result.expect_err(message).to_string();
+            assert!(err.contains(message), "expected {message:?}, got {err}");
+        };
+
+        for (name, key) in [
+            ("ipynb", "in/a.ipynb"),
+            ("md", "in/a.md"),
+            ("qmd", "in/a.qmd"),
+            ("py", "in/My Script.py"),
+        ] {
+            import_jobs
+                .patch(&import_job(name, vec![file(key, "out/a.py", Some(true))]))
+                .await
+                .unwrap_or_else(|err| panic!("a {key} input must convert: {err}"));
+        }
+        import_jobs
+            .patch(&import_job(
+                "mixed",
+                vec![
+                    file("in/a.ipynb", "out/a.py", Some(true)),
+                    file("in/a.ipynb", "out/a.ipynb", None),
+                    file("in/data.csv", "data/My Data.csv", Some(false)),
+                ],
+            ))
+            .await
+            .expect("copied files may have any extension");
+
+        refused(
+            import_jobs
+                .patch(&import_job(
+                    "txt",
+                    vec![file("in/a.txt", "out/a.py", Some(true))],
+                ))
+                .await,
+            "file to convert must have an input key ending with",
+        );
+        refused(
+            import_jobs
+                .patch(&import_job(
+                    "to-ipynb",
+                    vec![file("in/a.ipynb", "out/a.ipynb", Some(true))],
+                ))
+                .await,
+            "file to convert must have an output path ending with .py",
+        );
+
+        for path in [
+            "/abs.py",
+            "../a.py",
+            "a/../b.py",
+            "a/./b.py",
+            "a//b.py",
+            "./a.py",
+            "a/",
+        ] {
+            refused(
+                import_jobs
+                    .patch(&import_job(
+                        "bad-output",
+                        vec![
+                            file("in/a.csv", "ok.csv", None),
+                            file("in/a.csv", path, None),
+                        ],
+                    ))
+                    .await,
+                "output path must be a relative file path",
+            );
+        }
+
+        refused(
+            import_jobs
+                .patch(&import_job(
+                    "duplicate",
+                    vec![
+                        file("in/a.ipynb", "out/a.py", Some(true)),
+                        file("in/b.py", "out/a.py", None),
+                    ],
+                ))
+                .await,
+            "output paths must be unique",
+        );
+
+        let mut no_source = file("in/a.ipynb", "out/a.py", Some(true));
+        no_source.input.s3 = None;
+        refused(
+            import_jobs
+                .patch(&import_job("no-source", vec![no_source]))
+                .await,
+            "file input must set exactly one source",
+        );
+
+        assert!(
+            import_jobs
+                .patch(&import_job("no-files", vec![]))
+                .await
+                .is_err(),
+            "an import needs at least one file"
+        );
+
+        refused(
+            import_jobs
+                .patch(&import_job(
+                    &"x".repeat(57),
+                    vec![file("in/a.ipynb", "out/a.py", Some(true))],
+                ))
+                .await,
+            "name must be at most 56 characters",
+        );
+        import_jobs
+            .patch(&import_job(
+                &"x".repeat(56),
+                vec![file("in/a.ipynb", "out/a.py", Some(true))],
+            ))
+            .await
+            .expect("a 56-character name leaves room for the Job's suffix");
+
+        // It runs once; a spec edit would describe an import that never happens.
+        refused(
+            import_jobs
+                .patch(&import_job(
+                    "ipynb",
+                    vec![file("in/a.ipynb", "out/b.py", Some(true))],
+                ))
+                .await,
+            "spec is immutable",
+        );
+    })
+    .await;
+}
