@@ -91,6 +91,6 @@ jobs:
       - name: Install dependencies
         # Upstream release the MARIMO_GIT fork pin in docker-bake.hcl is based
         # on; bump this together with that pin.
-        run: pip install 'marimo==0.24.0' pytest
+        run: pip install 'marimo==0.25.0' pytest
       - name: Test cache.py
         run: pytest docker/app/test_cache.py -v
