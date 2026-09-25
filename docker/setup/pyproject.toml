@@ -30,10 +30,9 @@ build-backend = "pdm.backend"
 path = "/home/me/venv"
 # false, because marimo is already importable here via system-site-packages.
 # When true, marimo runs `uv pip install marimo==<server version> pyzmq==<ver>`
-# into this venv on *every* kernel start — synchronously, on the server's event
-# loop, which also serialises concurrent notebook opens. It does not gate
-# package installs: `uv add` and the Install-packages banner write here either
-# way.
+# into this venv on *every* kernel start, which would also put a PyPI marimo in
+# front of the system one. It does not gate package installs: `uv add` and the
+# Install-packages banner write here either way.
 writable = false
 
 [tool.marimo.package_management]
