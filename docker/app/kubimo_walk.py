@@ -193,12 +193,19 @@ def find_files(
 
     files = []
 
+    # Directory symlinks are never followed, like the indexer's walk: a
+    # workspace's links come back from S3 as they were archived, and a loop
+    # would end the walk with ELOOP while a link to an ancestor would walk the
+    # tree (caches included) again at every level.
+    def is_real_dir(item: Path) -> bool:
+        return item.is_dir() and not item.is_symlink()
+
     if git_root:
         # Walk directories manually to skip gitignored directories
         def walk_dir_git(path: Path):
             try:
                 for item in path.iterdir():
-                    if item.is_dir():
+                    if is_real_dir(item):
                         # Check if directory is gitignored, skip if it is
                         if not _is_gitignored(item, git_root):
                             walk_dir_git(item)
@@ -206,8 +213,8 @@ def find_files(
                         # Only check file if we got here (parent dirs not ignored)
                         if not _is_gitignored(item, git_root):
                             files.append(item)
-            except PermissionError:
-                logger.warning(f"Permission denied: {path}")
+            except OSError as error:
+                logger.warning(f"Skipping {path}: {error}")
 
         walk_dir_git(directory_path)
         logger.info(f"Found {len(files)} non-gitignored {'/'.join(suffixes)} files")
@@ -217,19 +224,20 @@ def find_files(
             local_rules = rules + _load_gitignore_rules(path)
             try:
                 for item in path.iterdir():
-                    if item.is_dir():
+                    if is_real_dir(item):
                         if not _is_ignored_by_rules(item, local_rules, is_dir=True):
                             walk_dir_rules(item, local_rules)
                     elif item.is_file() and item.suffix in suffixes:
                         if not _is_ignored_by_rules(item, local_rules, is_dir=False):
                             files.append(item)
-            except PermissionError:
-                logger.warning(f"Permission denied: {path}")
+            except OSError as error:
+                logger.warning(f"Skipping {path}: {error}")
 
         walk_dir_rules(directory_path, [])
         logger.info(f"Found {len(files)} non-gitignored {'/'.join(suffixes)} files")
     else:
-        # If not in git repo, use simple rglob
+        # If not in git repo, use simple rglob (which does not follow
+        # directory symlinks either)
         files = [
             path for suffix in suffixes for path in directory_path.rglob(f"*{suffix}")
         ]
