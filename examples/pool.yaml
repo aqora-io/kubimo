@@ -6,7 +6,7 @@
 # of cold-starting — the agent links the slot to the workspace, hydrates it
 # from S3 and acks, and only then does the controller create the Service and
 # Ingress. Anything that makes the runner ineligible (different command,
-# runtime, resources, env, sidecars, or S3 secret; or the pool being empty)
+# resources, env, sidecars, or S3 secret; or the pool being empty)
 # silently falls back to a cold start.
 #
 # IMPORTANT — consumers must read the effective URL from the Runner *status*:
@@ -15,8 +15,7 @@
 #
 # Version skew: create Pools only once both the agent DaemonSet and the marimo
 # image carry warm-pool support. An older agent rejects the `pooled` volume and
-# warm pods wedge in ContainerCreating; an older marimo image pre-boots but
-# never re-syncs dependencies after the claim.
+# warm pods wedge in ContainerCreating.
 apiVersion: kubimo.aqora.io/v1
 kind: Pool
 metadata:
@@ -24,7 +23,6 @@ metadata:
 spec:
   replicas: 2
   command: "Edit" # Edit or Run; Render cannot be pooled (read-only slots)
-  # pythonRuntime: "Uv"        # the default; Conda cannot be pooled yet
   # cpu: { min: "250m", max: "2" }     # a claiming runner's resources must match
   # memory: { min: "512Mi", max: "2Gi" }
   # env: []                    # baseline env; a claiming runner's env must be a subset

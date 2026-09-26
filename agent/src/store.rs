@@ -941,7 +941,7 @@ impl SlotStore {
 
     /// Discard a pool pod's anonymous slot: directory, project id, and link.
     ///
-    /// Nothing to flush — an anonymous slot holds only the venv template. The
+    /// Nothing to flush — an anonymous slot holds only the node template. The
     /// flush marker is removed defensively so a recycled slot id can never
     /// bequeath one.
     pub fn remove_pool_slot(&self, namespace: &str, pod: &str) -> Result<bool, StoreError> {

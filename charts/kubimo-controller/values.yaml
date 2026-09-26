@@ -10,7 +10,7 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
 
-# The marimo image: what runners are started with, and what the agent stages its venv
+# The marimo image: what runners are started with, and what the agent stages its node
 # template from. Both resolve through one helper so they cannot drift apart — see
 # `kubimo-controller.marimoImage` in templates/_helpers.tpl.
 marimo:
@@ -168,10 +168,10 @@ agent:
     timeoutSeconds: 120
     runnerGracePeriodSeconds: 10
     terminationGracePeriodSeconds: 150
-  # Source of the staged venv template. Leave empty to follow
+  # Source of the staged node template. Leave empty to follow
   # `controller.marimoImage`, which is what runners are started with — the two
-  # must match, or slots reflink a venv built for a different interpreter than
-  # the runner runs. Only set this to pin them apart deliberately.
+  # must match, or slots reflink a template built for a different interpreter
+  # than the runner runs. Only set this to pin them apart deliberately.
   marimoImage: ""
   # Minimum kernel release required to serve slots. A shared node volume makes
   # kernel filesystem bugs cross-tenant; see CVE-2026-64600 (RefluXFS). The
