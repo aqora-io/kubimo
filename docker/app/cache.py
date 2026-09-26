@@ -1,13 +1,25 @@
-import logging
-from pathlib import Path
-import importlib.util
-import asyncio
-from concurrent.futures import ProcessPoolExecutor
-import itertools
-import json
+"""Cache a workspace's marimo notebooks for marimo-ssr to render.
 
-import marimo
+Notebooks are found statically, never imported. Each one is exported by a
+worker, this script with --one, launched inside the notebook's own pixi
+environment, or on this interpreter for a notebook without a PEP 723 header,
+like marimo run. A few run at once, and notebooks are never edited.
+"""
+
+import argparse
+import asyncio
+import collections
+import json
+import logging
+import os
+import random
+from pathlib import Path
+
+from kubimo_walk import find_files
 from marimo._convert import MarimoConvert
+from marimo._environments import backends, process, script_metadata
+from marimo._environments.errors import EnvironmentManagerError
+from marimo._environments.overlay import runtime_overlay
 from marimo._export.file import export_html, export_markdown
 from marimo._export.requests import (
     HTMLFileExportRequest,
@@ -15,14 +27,15 @@ from marimo._export.requests import (
     NotebookExecutionOptions,
 )
 from marimo._schemas.export_options import HTMLExportOptions, MarkdownExportOptions
-from marimo._utils.paths import notebook_output_dir
+from marimo._server.files.directory_scanner import is_marimo_app
 from marimo._utils.marimo_path import MarimoPath
+from marimo._utils.paths import notebook_output_dir
 
-from kubimo_walk import find_files as _get_python_files
-
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-_LOG_LEVEL_CHOICES = ["debug", "info", "warning", "error", "critical"]
+_LOG_LEVEL_CHOICES = ["debug", "info", "warn", "warning", "error", "critical"]
+# Seconds before the one retry of a failed environment sync, picked at random:
+# a runner pod may be syncing the same environment.
+_RETRY_DELAY = (1, 5)
 
 
 def _write_export(export_dir: Path, result):
@@ -33,7 +46,6 @@ def _write_export(export_dir: Path, result):
 
 
 async def _cache_app(path: Path, *, include_code: bool):
-    logger.info(f"Caching {path}")
     marimo_path = MarimoPath(path)
     html_result = await export_html(
         HTMLFileExportRequest(
@@ -59,61 +71,109 @@ async def _cache_app(path: Path, *, include_code: bool):
     _write_export(export_dir, md_result)
 
 
-def _is_app(path: Path):
-    logger.info(f"Checking {path}")
-    spec = importlib.util.spec_from_file_location(str(path), path)
-    if spec is None or spec.loader is None:
-        return False
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return hasattr(module, "app") and isinstance(getattr(module, "app"), marimo.App)
-
-
-def _cache_app_sync(path: Path, include_code: bool, log_level: str):
-    logging.getLogger().setLevel(log_level.upper())
+async def _launch_plan(path: Path, args: list[str]):
+    """Plan `python <args>` in the notebook's pixi environment, or on this
+    interpreter for a notebook without a header, like marimo run."""
+    if script_metadata.loads(path.read_text(encoding="utf-8")) is None:
+        return backends.launch_fallback(args)
     try:
-        if _is_app(path):
-            asyncio.run(_cache_app(path, include_code=include_code))
-            logger.info(f"Cached {path}")
-            return True
-        else:
-            logger.warning(f"Skipping {path}")
-            return False
-    except Exception as e:
-        logger.error(f"Failed to cache {path}: {e}", exc_info=True)
+        environment = await backends.sync_notebook_async(str(path), backend="pixi")
+    # pixi's `install --help` probe gives up with a TimeoutError of its own.
+    except (EnvironmentManagerError, TimeoutError) as error:
+        delay = random.uniform(*_RETRY_DELAY)
+        logger.warning(
+            f"Syncing the environment of {path} failed, retrying in {delay:.1f}s: "
+            f"{_tail(str(error)) or 'timed out'}"
+        )
+        await asyncio.sleep(delay)
+        environment = await backends.sync_notebook_async(str(path), backend="pixi")
+    return backends.launch(environment, args, backend="pixi", overlay=runtime_overlay())
+
+
+async def _cache_in_worker(
+    path: Path, args: list[str], *, root: Path, timeout: float
+) -> bool:
+    """Cache the notebook at `path` by running the worker `args` in its
+    environment from the workspace `root`, all within `timeout` seconds;
+    whether that worked."""
+    logger.info(f"Caching {path}")
+    plan = None
+    # The worker's last lines, streamed: a timed-out command's output is lost.
+    stderr = collections.deque(maxlen=20)
+    try:
+        async with asyncio.timeout(timeout):
+            plan = await _launch_plan(path, args)
+            # From the workspace root, like the runner's kernels: relative
+            # paths resolve as they do in the live notebook.
+            completed = await process.run_command(
+                plan.argv, env=plan.env, cwd=str(root), on_stderr=stderr.append
+            )
+    except EnvironmentManagerError as error:
+        logger.error(f"Failed to cache {path}: {_tail(str(error))}")
         return False
+    except TimeoutError:
+        if plan is None:
+            logger.error(f"Failed to cache {path}: syncing its environment timed out")
+        else:
+            logger.error(
+                f"Failed to cache {path}: its worker timed out\n"
+                f"{_tail(''.join(stderr))}"
+            )
+        return False
+    except Exception:
+        logger.exception(f"Failed to cache {path}")
+        return False
+    if completed.returncode != 0:
+        logger.error(
+            f"Failed to cache {path}: exit code {completed.returncode}\n"
+            f"{_tail(completed.stderr)}"
+        )
+        return False
+    logger.info(f"Cached {path}")
+    return True
 
 
-def _cache_all_apps(
+def _tail(text: str) -> str:
+    """The last lines of a failure's output, where it says what went wrong."""
+    return "\n".join(text.strip().splitlines()[-20:])
+
+
+async def _cache_all_apps(
     directory: str,
     *,
-    include_gitignored: bool = False,
-    include_code: bool = False,
-    log_level: str = "info",
+    include_gitignored: bool,
+    include_code: bool,
+    log_level: str,
+    jobs: int,
+    timeout: float,
 ):
-    files = _get_python_files(directory, include_gitignored=include_gitignored)
+    root = Path(directory).resolve()
+    files = find_files(root, include_gitignored=include_gitignored)
+    notebooks = []
+    for path in files:
+        if is_marimo_app(str(path)):
+            notebooks.append(path)
+        else:
+            logger.warning(f"Skipping {path}")
 
-    # Run _cache_app in parallel with process workers
-    with ProcessPoolExecutor() as executor:
-        results = list(
-            executor.map(
-                _cache_app_sync,
-                files,
-                itertools.repeat(include_code),
-                itertools.repeat(log_level),
-            )
-        )
+    flags = ["--include-code"] if include_code else []
+    flags += ["--log-level", log_level]
+    semaphore = asyncio.Semaphore(jobs)
 
+    async def cache_in_turn(path: Path) -> bool:
+        args = [os.path.abspath(__file__), "--one", str(path), *flags]
+        async with semaphore:
+            return await _cache_in_worker(path, args, root=root, timeout=timeout)
+
+    results = await asyncio.gather(*(cache_in_turn(path) for path in notebooks))
     successful = sum(results)
-    failed = len(results) - successful
+    failed = len(files) - successful
     logger.info(
         f"Caching complete: {successful} apps cached successfully, {failed} failed or skipped"
     )
 
 
-if __name__ == "__main__":
-    import argparse
-
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--include-gitignored", help="Include gitignored files", action="store_true"
@@ -129,12 +189,41 @@ if __name__ == "__main__":
         choices=_LOG_LEVEL_CHOICES,
         help="Log level.",
     )
-    parser.add_argument("directory", nargs="?", default=".", help="Directory to cache")
-    args = parser.parse_args()
-    logging.getLogger().setLevel(args.log_level.upper())
-    _cache_all_apps(
-        args.directory,
-        include_gitignored=args.include_gitignored,
-        include_code=args.include_code,
-        log_level=args.log_level,
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=min(4, os.cpu_count() or 1),
+        help="Notebooks cached at once.",
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=1800,
+        help="Seconds a notebook may take to cache, its environment sync included.",
+    )
+    parser.add_argument(
+        "--one",
+        type=Path,
+        metavar="NOTEBOOK",
+        help="Cache only this notebook, in this process (the worker).",
+    )
+    parser.add_argument("directory", nargs="?", default=".", help="Directory to cache")
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=args.log_level.upper())
+    if args.one is not None:
+        asyncio.run(_cache_app(args.one, include_code=args.include_code))
+    else:
+        asyncio.run(
+            _cache_all_apps(
+                args.directory,
+                include_gitignored=args.include_gitignored,
+                include_code=args.include_code,
+                log_level=args.log_level,
+                jobs=args.jobs,
+                timeout=args.timeout,
+            )
+        )
+
+
+if __name__ == "__main__":
+    main()

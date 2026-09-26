@@ -1285,6 +1285,21 @@ def test_requires_python_follows_marimos_default(tmp_path, monkeypatch):
     assert header(workspace / "readme.py")["requires-python"] == ">=3.13"
 
 
+def test_a_symlink_loop_does_not_cost_the_workspace_its_migration(tmp_path):
+    # The migration runs once: failing to plan still drops the legacy tables,
+    # so a walk that trips over a loop would leave the notebooks header-less
+    # for good.
+    workspace = write(
+        tmp_path, {"pyproject.toml": TEMPLATE_PYPROJECT, "readme.py": TEMPLATE_README}
+    )
+    (workspace / "sub").mkdir()
+    (workspace / "sub" / "a").symlink_to("..")
+    (workspace / "sub" / "b").symlink_to("..")
+
+    assert migrate(workspace) == 0
+    assert (workspace / "readme.py").read_text().startswith(SEED_HEADER)
+
+
 def test_wait_for_migrates_once_the_marker_appears(tmp_path):
     workspace = write(
         tmp_path / "workspace",
