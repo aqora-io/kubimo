@@ -12,12 +12,15 @@ use super::RunnerReconciler;
 
 /// What an apply did to the live pod.
 ///
-/// `Replaced` is the one outcome the caller has to act on: the drifted pod has
-/// been deleted and nothing has recreated it yet, so the reconcile has to come
-/// back rather than wait for a change.
+/// `Replaced` and `AwaitingTermination` are both outcomes the caller has to
+/// act on rather than wait for a change: a drifted pod has either just been
+/// deleted, or was already deleted by an earlier reconcile and hasn't finished
+/// terminating yet. Either way nothing has recreated it, so the reconcile has
+/// to come back.
 pub(crate) enum PodApply {
     Applied,
     Replaced,
+    AwaitingTermination,
 }
 
 impl RunnerReconciler {
@@ -93,11 +96,26 @@ impl RunnerReconciler {
                     .api_namespaced::<Pod>(namespace)
                     .get_opt(runner.name()?)
                     .await;
-                if matches!(&live, Ok(Some(live)) if runtime_class_drifted(live, &pod) || retired_slot_attribute_drifted(live, &pod) || asset_env_drifted(live, &pod) || sandbox_env_drifted(live, &pod))
+                if let Ok(Some(live)) = &live
+                    && (runtime_class_drifted(live, &pod)
+                        || retired_slot_attribute_drifted(live, &pod)
+                        || asset_env_drifted(live, &pod)
+                        || sandbox_env_drifted(live, &pod))
                 {
+                    if is_terminating(live) {
+                        // An earlier reconcile already deleted this pod for
+                        // this same drift; it just hasn't gone yet. Deleting
+                        // it again would be a no-op, and logging a fresh
+                        // replacement would be wrong: nothing new happened.
+                        return Ok(PodApply::AwaitingTermination);
+                    }
                     ctx.api_namespaced::<Pod>(namespace)
                         .delete_opt(runner.name()?)
                         .await?;
+                    tracing::info!(
+                        runner = runner.name()?,
+                        "replaced a drifted pod; requeuing to recreate it"
+                    );
                     return Ok(PodApply::Replaced);
                 }
                 Err(err)
@@ -177,6 +195,13 @@ fn runner_env<'a>(pod: &'a Pod, name: &str) -> Option<&'a str> {
         .find(|var| var.name == name)?
         .value
         .as_deref()
+}
+
+/// Whether the live pod has already been asked to terminate — i.e. an
+/// earlier reconcile already deleted it for one of the drifts above, and it
+/// just hasn't finished going away yet.
+fn is_terminating(pod: &Pod) -> bool {
+    pod.metadata.deletion_timestamp.is_some()
 }
 
 pub(crate) fn runner_port(runner: &Runner) -> i32 {
@@ -390,5 +415,23 @@ mod tests {
             &pod_with_runtime_class(Some("gvisor")),
             &desired
         ));
+    }
+
+    /// A pod an earlier reconcile already deleted for a retired attribute is
+    /// still Terminating, not gone; it must read as such so a second reconcile
+    /// waits instead of deleting (a no-op) and logging the replacement again.
+    #[test]
+    fn is_terminating_reflects_the_live_pods_deletion_timestamp() {
+        use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        use kubimo::k8s_openapi::jiff::Timestamp;
+        let deleting = Pod {
+            metadata: kubimo::kube::api::ObjectMeta {
+                deletion_timestamp: Some(Time(Timestamp::UNIX_EPOCH)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(is_terminating(&deleting));
+        assert!(!is_terminating(&Pod::default()));
     }
 }

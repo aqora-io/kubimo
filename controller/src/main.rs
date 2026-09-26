@@ -9,21 +9,47 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt};
 
 use kubimo_controller::{Config, Context, ControllerStreamExt, controllers};
 
-async fn ctrl_c() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("Failed to listen for shutdown signal");
+/// Resolves when the process is asked to stop: SIGTERM as well as Ctrl+c
+/// (SIGINT).
+///
+/// Kubernetes sends SIGTERM on a rollout. Reacting to Ctrl+c alone meant the
+/// controller ran out its full terminationGracePeriodSeconds and was
+/// SIGKILLed, during which an old and a new controller both reconciled and
+/// fought over retired pod slot-volume attributes and warm-pool template
+/// hashes (the chart's `strategy: Recreate` closes the other half of that
+/// gap, by never running the new pod until the old one is gone).
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(err) => {
+                tracing::error!(%err, "cannot listen for SIGTERM; falling back to SIGINT only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 async fn shutdown_signal(service: &'static str) {
-    ctrl_c().await;
+    wait_for_shutdown_signal().await;
     tracing::info!("Shutting down {service} controller...");
 }
 
 async fn shutdown_timeout(timeout: Duration) -> Result<ExitCode, BoxError> {
-    ctrl_c().await;
+    wait_for_shutdown_signal().await;
     tracing::info!("Shutting down gracefully... (Ctrl+c to force)");
-    match tokio::time::timeout(timeout, ctrl_c()).await {
+    match tokio::time::timeout(timeout, wait_for_shutdown_signal()).await {
         Ok(_) => {
             tracing::warn!("Ctrl+c signal received, shutting down forcefully");
             Ok(ExitCode::from(2))
