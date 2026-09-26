@@ -65,15 +65,23 @@ pub(crate) fn claim_secret(pod: &Pod) -> kubimo::Result<Secret> {
     })
 }
 
+/// Bumped whenever this controller changes how it builds a warm pod beyond
+/// what [`template_hash`] fingerprints from the pool, so pods minted by an
+/// older build are retired rather than claimed.
+const WARM_POD_SHAPE: u32 = 1;
+
 /// Everything that decides what a warm pod *is*, hashed so drift can be
 /// detected without diffing pod specs. Deliberately excludes the minted
 /// name/token/base-url (random per pod) and `replicas` (a sizing knob, not a
 /// shape).
 pub(crate) fn template_hash(config: &Config, pool: &Pool) -> String {
-    let image = config.marimo_image(pool.spec.python_runtime.unwrap_or_default());
+    let image = &config.marimo_image;
     let mut fingerprint = serde_json::json!({
+        "shape": WARM_POD_SHAPE,
         "image": image,
         "command": pool.spec.command,
+        // Resolved, not as written: absent meant pixi before the runtime chose
+        // the backend, so a pod minted then must not match a `Uv` pool now.
         "pythonRuntime": pool.spec.python_runtime.unwrap_or_default(),
         "logLevel": pool.spec.log_level,
         "cpu": pool.spec.cpu,
@@ -100,8 +108,7 @@ pub(crate) fn build_warm_pod(
     identity: &WarmPodIdentity,
 ) -> kubimo::Result<Pod> {
     let pool_name = pool.name()?;
-    let python_runtime = pool.spec.python_runtime.unwrap_or_default();
-    let image = config.marimo_image(python_runtime).to_string();
+    let image = config.marimo_image.clone();
     let mut env = pool.spec.env.clone().unwrap_or_default();
     env.push(EnvVar {
         name: CLAIM_MARKER_ENV.to_string(),
@@ -144,7 +151,7 @@ pub(crate) fn build_warm_pod(
             .first()
             .map(|host| format!("https://{host}")),
         command: pool.spec.command,
-        python_runtime,
+        python_runtime: pool.spec.python_runtime.unwrap_or_default(),
         cpu: pool.spec.cpu.clone(),
         memory: pool.spec.memory.clone(),
         env,
@@ -155,7 +162,6 @@ pub(crate) fn build_warm_pod(
                 .storage
                 .as_ref()
                 .and_then(|storage| storage.to_bytes()),
-            python_runtime,
             pool.spec.s3_secret_name.clone(),
         ),
         extra_volumes: vec![Volume {
@@ -192,6 +198,59 @@ mod tests {
         let identity = mint_identity("editors");
         let pod = build_warm_pod(&config(), &pool, &identity).unwrap();
         (pod, identity)
+    }
+
+    fn sandbox_env(pod: &Pod) -> Vec<Option<String>> {
+        pod.spec.as_ref().unwrap().containers[0]
+            .env
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|var| var.name == crate::controllers::runner_pod::SANDBOX_ENV)
+            .map(|var| var.value.clone())
+            .collect()
+    }
+
+    /// marimo boots with the pool's backend before any workspace claims the
+    /// pod; the pool's own env cannot override it.
+    #[test]
+    fn a_warm_pod_boots_its_pools_sandbox_backend() {
+        use kubimo::WorkspacePythonRuntime::{Conda, Uv};
+        use kubimo::k8s_openapi::api::core::v1::EnvVar;
+        for (python_runtime, backend) in [(None, "uv"), (Some(Uv), "uv"), (Some(Conda), "pixi")] {
+            let (pod, _) = warm_pod(PoolSpec {
+                python_runtime,
+                env: Some(vec![EnvVar {
+                    name: crate::controllers::runner_pod::SANDBOX_ENV.into(),
+                    value: Some("bogus".into()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            });
+            assert_eq!(
+                sandbox_env(&pod),
+                vec![Some(backend.to_string())],
+                "{python_runtime:?}"
+            );
+        }
+    }
+
+    /// A pool recreated under the same name with the other runtime must not
+    /// claim the pods minted for the first; naming the default changes nothing.
+    #[test]
+    fn the_template_hash_follows_the_resolved_runtime() {
+        use kubimo::WorkspacePythonRuntime::{Conda, Uv};
+        let hash = |python_runtime| {
+            template_hash(
+                &config(),
+                &pool(PoolSpec {
+                    python_runtime,
+                    ..Default::default()
+                }),
+            )
+        };
+        assert_eq!(hash(None), hash(Some(Uv)));
+        assert_ne!(hash(None), hash(Some(Conda)));
     }
 
     /// A warm pod belongs to no workspace: no affinity to attract siblings, no
@@ -309,10 +368,7 @@ mod tests {
         on.runner_asset_base_path = Some("/marimo-assets".into());
         let pod =
             build_warm_pod(&on, &pool(PoolSpec::default()), &mint_identity("editors")).unwrap();
-        assert_eq!(
-            asset_env(&pod),
-            on.runner_asset_url(on.marimo_image(Default::default())),
-        );
+        assert_eq!(asset_env(&pod), on.runner_asset_url(&on.marimo_image));
 
         let base = pool(PoolSpec::default());
         assert_ne!(template_hash(&off, &base), template_hash(&on, &base));

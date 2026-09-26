@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use kubimo::k8s_openapi::api::core::v1::{CSIVolumeSource, LocalObjectReference, Volume};
-use kubimo::{Workspace, WorkspacePythonRuntime, WorkspaceRestoreSecrets};
+use kubimo::{Workspace, WorkspaceRestoreSecrets};
 
 /// Must match the `CSIDriver` object the agent registers under.
 pub(crate) const SLOT_CSI_DRIVER: &str = "kubimo.aqora.io";
@@ -94,7 +94,6 @@ pub(crate) fn workspace_volume(
     workspace_name: &str,
     read_only: bool,
     sources: SlotSources,
-    python_runtime: WorkspacePythonRuntime,
 ) -> Volume {
     Volume {
         name: workspace_name.to_string(),
@@ -109,22 +108,15 @@ pub(crate) fn workspace_volume(
                 .credentials_secret
                 .clone()
                 .map(|name| LocalObjectReference { name }),
-            volume_attributes: Some(slot_attributes(workspace_name, sources, python_runtime)),
+            volume_attributes: Some(slot_attributes(workspace_name, sources)),
             ..Default::default()
         }),
         ..Default::default()
     }
 }
 
-fn slot_attributes(
-    workspace_name: &str,
-    sources: SlotSources,
-    python_runtime: WorkspacePythonRuntime,
-) -> BTreeMap<String, String> {
-    let mut attributes = BTreeMap::from([
-        ("workspace".to_string(), workspace_name.to_string()),
-        ("python_runtime".to_string(), python_runtime.to_string()),
-    ]);
+fn slot_attributes(workspace_name: &str, sources: SlotSources) -> BTreeMap<String, String> {
+    let mut attributes = BTreeMap::from([("workspace".to_string(), workspace_name.to_string())]);
     if let Some(limit) = sources.limit_bytes {
         attributes.insert("limitBytes".to_string(), limit.to_string());
     }
@@ -161,21 +153,17 @@ pub(crate) const WARM_SLOT_VOLUME_NAME: &str = "slot";
 
 /// An anonymous, template-seeded slot for a warm pool pod: no workspace, no
 /// archive, nothing to hydrate or flush. The agent links it to a workspace at
-/// claim time, which is also when it learns the archive location — so the only
-/// attributes here are the ones needed to *provision*: the runtime picking the
-/// venv template and the interim quota.
+/// claim time, which is also when it learns the archive location — so besides
+/// the pooled marker, the only attribute here is the one needed to
+/// *provision*: the interim quota.
 pub(crate) fn warm_slot_volume(
     limit_bytes: Option<u64>,
-    python_runtime: WorkspacePythonRuntime,
     credentials_secret: Option<String>,
 ) -> Volume {
-    let mut attributes = BTreeMap::from([
-        (
-            kubimo::pool::POOLED_VOLUME_ATTRIBUTE.to_string(),
-            "true".to_string(),
-        ),
-        ("python_runtime".to_string(), python_runtime.to_string()),
-    ]);
+    let mut attributes = BTreeMap::from([(
+        kubimo::pool::POOLED_VOLUME_ATTRIBUTE.to_string(),
+        "true".to_string(),
+    )]);
     if let Some(limit) = limit_bytes {
         attributes.insert("limitBytes".to_string(), limit.to_string());
     }
@@ -215,7 +203,7 @@ mod tests {
 
     #[test]
     fn workspace_volume_passes_the_slot_sources_through() {
-        let volume = workspace_volume("bmow-test", false, sources(), Default::default());
+        let volume = workspace_volume("bmow-test", false, sources());
         assert!(volume.persistent_volume_claim.is_none());
         let csi = volume.csi.unwrap();
         assert_eq!(csi.driver, SLOT_CSI_DRIVER);
@@ -246,7 +234,6 @@ mod tests {
                 seed: Some(("bucket".into(), None, WorkspaceRestoreSecrets::default())),
                 ..Default::default()
             },
-            Default::default(),
         );
         let attrs = volume.csi.unwrap().volume_attributes.unwrap();
         assert_eq!(attrs.get("seedSecrets").unwrap(), "names-only");
@@ -257,7 +244,7 @@ mod tests {
     /// workspace's own, resolved from this ref in the *pod's* namespace.
     #[test]
     fn workspace_volume_names_the_workspace_credentials_secret() {
-        let volume = workspace_volume("bmow-test", false, sources(), Default::default());
+        let volume = workspace_volume("bmow-test", false, sources());
         assert_eq!(
             volume.csi.unwrap().node_publish_secret_ref.unwrap().name,
             "s3-credentials"
@@ -268,7 +255,7 @@ mod tests {
     /// read Pods. Credentials must only ever travel via the secret ref.
     #[test]
     fn credentials_never_appear_in_volume_attributes() {
-        let volume = workspace_volume("bmow-test", false, sources(), Default::default());
+        let volume = workspace_volume("bmow-test", false, sources());
         let attrs = volume.csi.unwrap().volume_attributes.unwrap();
         for (key, value) in &attrs {
             if key == "seedSecrets" {
@@ -312,12 +299,7 @@ mod tests {
     /// archive: the agent keys off `bucket` being absent to start empty.
     #[test]
     fn workspace_volume_omits_archive_attributes_when_unconfigured() {
-        let volume = workspace_volume(
-            "bmow-test",
-            false,
-            SlotSources::default(),
-            Default::default(),
-        );
+        let volume = workspace_volume("bmow-test", false, SlotSources::default());
         let attrs = volume.csi.unwrap().volume_attributes.unwrap();
         assert!(!attrs.contains_key("bucket"));
         assert!(!attrs.contains_key("keyPrefix"));
@@ -332,18 +314,13 @@ mod tests {
     /// refuse, so the builder can never produce that combination.
     #[test]
     fn warm_slot_is_anonymous() {
-        let volume = warm_slot_volume(
-            Some(2_147_483_648),
-            WorkspacePythonRuntime::Uv,
-            Some("s3-credentials".into()),
-        );
+        let volume = warm_slot_volume(Some(2_147_483_648), Some("s3-credentials".into()));
         assert_eq!(volume.name, WARM_SLOT_VOLUME_NAME);
         let csi = volume.csi.unwrap();
         assert_eq!(csi.driver, SLOT_CSI_DRIVER);
         assert_eq!(csi.read_only, Some(false));
         let attrs = csi.volume_attributes.unwrap();
         assert_eq!(attrs.get("pooled").unwrap(), "true");
-        assert_eq!(attrs.get("python_runtime").unwrap(), "Uv");
         assert_eq!(attrs.get("limitBytes").unwrap(), "2147483648");
         assert!(!attrs.contains_key("workspace"));
         assert!(!attrs.contains_key("bucket"));
@@ -352,11 +329,24 @@ mod tests {
         assert!(!attrs.contains_key("seedSecrets"));
     }
 
+    /// Kernels build their own per-notebook environments, so the agent has no
+    /// runtime to pick a template for. `apply_pod` replaces any live pod whose
+    /// slot volume still carries the attribute.
+    #[test]
+    fn slot_volumes_carry_no_python_runtime() {
+        let workspace = workspace_volume("bmow-test", false, sources());
+        let warm = warm_slot_volume(None, None);
+        for volume in [workspace, warm] {
+            let attrs = volume.csi.unwrap().volume_attributes.unwrap();
+            assert!(!attrs.contains_key("python_runtime"), "{attrs:?}");
+        }
+    }
+
     /// Same rule as the workspace volume: credentials only ever travel via the
     /// secret ref, never in attributes readable off the Pod object.
     #[test]
     fn warm_slot_credentials_only_in_the_secret_ref() {
-        let volume = warm_slot_volume(None, Default::default(), Some("s3-credentials".into()));
+        let volume = warm_slot_volume(None, Some("s3-credentials".into()));
         let csi = volume.csi.unwrap();
         assert_eq!(csi.node_publish_secret_ref.unwrap().name, "s3-credentials");
         for (key, value) in csi.volume_attributes.unwrap().iter() {

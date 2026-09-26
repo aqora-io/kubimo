@@ -43,8 +43,7 @@ impl WorkspaceReconciler {
         // until their workspace is Ready, and a brand-new workspace has no
         // archive by definition, so gating on one would stop it ever starting
         // its first runner.
-        let mut status = build_workspace_status(workspace);
-        status.python_runtime = Some(workspace.spec.python_runtime.unwrap_or_default());
+        let status = build_workspace_status(workspace);
         let mut workspace = workspace.clone();
         workspace.status = Some(status);
         ctx.api_namespaced::<Workspace>(namespace)
@@ -86,6 +85,7 @@ fn build_workspace_status(workspace: &Workspace) -> WorkspaceStatus {
     // leaves the agent's value untouched on the server.
     WorkspaceStatus {
         conditions: Some(conditions),
+        python_runtime: Some(workspace.spec.python_runtime.unwrap_or_default()),
         ..Default::default()
     }
 }
@@ -93,6 +93,25 @@ fn build_workspace_status(workspace: &Workspace) -> WorkspaceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_carries_the_resolved_runtime() {
+        use kubimo::WorkspacePythonRuntime::{Conda, Uv};
+        use kubimo::WorkspaceSpec;
+        for (python_runtime, resolved) in [(None, Uv), (Some(Uv), Uv), (Some(Conda), Conda)] {
+            let workspace = Workspace::new(
+                "test",
+                WorkspaceSpec {
+                    python_runtime,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                build_workspace_status(&workspace).python_runtime,
+                Some(resolved)
+            );
+        }
+    }
 
     /// A spec edit bumps `metadata.generation` but leaves Ready's status and
     /// reason untouched, which is exactly the case `upsert_condition` treats

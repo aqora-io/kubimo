@@ -71,12 +71,7 @@ impl Reconciler for RunnerReconciler {
             Some(workspace) => workspace,
         };
 
-        let python_runtime = workspace.spec.python_runtime.unwrap_or_default();
-
-        match self
-            .apply_claim(ctx, runner, &workspace, python_runtime)
-            .await?
-        {
+        match self.apply_claim(ctx, runner, &workspace).await? {
             apply_claim::ClaimOutcome::Claimed { acked: false } => {
                 // The agent is still hydrating the claimed slot. Service and
                 // Ingress are withheld until its ack so no user reaches an
@@ -115,7 +110,7 @@ impl Reconciler for RunnerReconciler {
             self.apply_owner_reference(ctx, runner)
                 .map_ok(|_| false)
                 .boxed(),
-            self.apply_pod(ctx, runner, &workspace, python_runtime)
+            self.apply_pod(ctx, runner, &workspace)
                 .map_ok(|applied| matches!(applied, apply_pod::PodApply::Replaced))
                 .boxed(),
             self.apply_service(ctx, runner).map_ok(|_| false).boxed(),

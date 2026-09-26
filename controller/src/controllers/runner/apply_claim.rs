@@ -13,14 +13,15 @@ use kubimo::k8s_openapi::ByteString;
 use kubimo::k8s_openapi::api::core::v1::{Container, Pod, Secret};
 use kubimo::pool::{
     CLAIM_ANNOTATION, CLAIM_STATE_ANNOTATION, CLAIM_STATE_BOUND, CLAIM_STATE_FAILED, POOL_LABEL,
-    POOL_STATE_CLAIMED, POOL_STATE_LABEL, POOL_STATE_WARM, PoolClaim, WARM_BASE_URL_ANNOTATION,
-    WARM_TOKEN_ANNOTATION,
+    POOL_STATE_CLAIMED, POOL_STATE_LABEL, POOL_STATE_WARM, POOL_TEMPLATE_HASH_ANNOTATION,
+    PoolClaim, WARM_BASE_URL_ANNOTATION, WARM_TOKEN_ANNOTATION,
 };
 use kubimo::{
     CpuQuantity, CpuUnit, FilterParams, KubimoLabel, Pool, Requirement, Runner, RunnerClaim,
-    StorageQuantity, Workspace, WorkspacePythonRuntime, json_patch_macros::*, prelude::*,
+    StorageQuantity, Workspace, json_patch_macros::*, prelude::*,
 };
 
+use crate::Config;
 use crate::context::Context;
 use crate::controllers::slot_volume::SlotSources;
 use crate::controllers::workspace_affinity;
@@ -43,7 +44,6 @@ impl RunnerReconciler {
         ctx: &Context,
         runner: &Runner,
         workspace: &Workspace,
-        python_runtime: WorkspacePythonRuntime,
     ) -> Result<ClaimOutcome, kubimo::Error> {
         let Some(pool_name) = runner.spec.pool.as_deref() else {
             return Ok(ClaimOutcome::ColdPath);
@@ -84,7 +84,7 @@ impl RunnerReconciler {
         else {
             return cold(runner_name, pool_name, "pool does not exist");
         };
-        if let Err(reason) = eligible(ctx, runner, workspace, &pool, python_runtime) {
+        if let Err(reason) = eligible(&ctx.config, runner, workspace, &pool) {
             return cold(runner_name, pool_name, reason);
         }
         // One workspace, one slot: any live pod of this workspace (even one
@@ -122,6 +122,11 @@ impl RunnerReconciler {
         )
         .await?;
         warm.retain(|pod| pod.metadata.deletion_timestamp.is_none());
+        // The pool controller retires drifted warm pods only on its next pass;
+        // until then one minted from an old template (the previous image, say)
+        // still reads as warm, and claiming it would serve the old pod.
+        let template_hash = crate::controllers::pool::warm_pod::template_hash(&ctx.config, &pool);
+        warm.retain(|pod| minted_from_template(pod, &template_hash));
         // Oldest first: most likely to be fully booted.
         warm.sort_by_key(|pod| pod.metadata.creation_timestamp.clone());
 
@@ -386,6 +391,16 @@ fn may_hold_a_slot(pod: &Pod) -> bool {
     )
 }
 
+/// Whether a warm pod was minted from the pool template hashing to
+/// `template_hash`; a pod without the annotation never is.
+fn minted_from_template(pod: &Pod, template_hash: &str) -> bool {
+    pod.metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(POOL_TEMPLATE_HASH_ANNOTATION))
+        .is_some_and(|hash| hash == template_hash)
+}
+
 /// The one claimed pod of a workspace every observer agrees should survive a
 /// double-claim: the oldest, by name on a timestamp tie. Racers may see
 /// different subsets for a moment, but any pod whose owner observes a rival
@@ -435,16 +450,18 @@ fn pool_claim(runner: &Runner, workspace: &Workspace) -> PoolClaim {
 /// immutable on a running pod — the claim can change labels and annotations,
 /// nothing else.
 fn eligible(
-    ctx: &Context,
+    config: &Config,
     runner: &Runner,
     workspace: &Workspace,
     pool: &Pool,
-    python_runtime: WorkspacePythonRuntime,
 ) -> Result<(), &'static str> {
     if pool.spec.command != runner.spec.command {
         return Err("command differs from the pool's");
     }
-    if pool.spec.python_runtime.unwrap_or_default() != python_runtime {
+    // marimo was booted with the pool's sandbox backend, for good.
+    if pool.spec.python_runtime.unwrap_or_default()
+        != workspace.spec.python_runtime.unwrap_or_default()
+    {
         return Err("python runtime differs from the pool's");
     }
     let sources = SlotSources::from_workspace(Some(workspace));
@@ -462,7 +479,7 @@ fn eligible(
         return Err("cpu requirements differ from the pool's");
     }
     // The slot is re-quota'd to the workspace's max at claim time; a max below
-    // the pool's interim quota could already be exceeded by the venv template
+    // the pool's interim quota could already be exceeded by the node template
     // and would fail hydration in a loop.
     let pool_quota = pool
         .spec
@@ -516,7 +533,7 @@ fn eligible(
         .and_then(|tls| tls.hosts.as_ref())
         .and_then(|hosts| hosts.first());
     if let Some(host) = spec_host
-        && ctx.config.runner_hosts.first() != Some(host)
+        && config.runner_hosts.first() != Some(host)
     {
         return Err("ingress host differs from the configured runner host");
     }
@@ -737,6 +754,102 @@ mod tests {
         assert!(may_hold_a_slot(&pod_in_phase(Some("Pending"))));
         // No status at all: assume the worst.
         assert!(may_hold_a_slot(&Pod::default()));
+    }
+
+    /// A warm pod minted before an upgrade still reads as warm until the pool
+    /// controller retires it; claiming it would serve the runner the old
+    /// image. Checked against a real warm pod, so the annotation written at
+    /// mint time and the hash computed at claim time must agree.
+    #[test]
+    fn only_warm_pods_minted_from_the_current_template_are_claimable() {
+        use crate::controllers::pool::warm_pod::{build_warm_pod, mint_identity, template_hash};
+        let config = crate::Config::test_default();
+        let mut pool = Pool::new("editors", Default::default());
+        pool.metadata.namespace = Some("default".into());
+        pool.metadata.uid = Some("11111111-2222-3333-4444-555555555555".into());
+        let pod = build_warm_pod(&config, &pool, &mint_identity("editors")).unwrap();
+        assert!(minted_from_template(&pod, &template_hash(&config, &pool)));
+
+        let mut upgraded = config.clone();
+        upgraded.marimo_image = "ghcr.io/aqora-io/kubimo-marimo:next".into();
+        assert!(!minted_from_template(
+            &pod,
+            &template_hash(&upgraded, &pool)
+        ));
+
+        assert!(!minted_from_template(
+            &Pod::default(),
+            &template_hash(&config, &pool)
+        ));
+
+        // Recreated under the same name with the other runtime.
+        let mut conda = pool.clone();
+        conda.spec.python_runtime = Some(kubimo::WorkspacePythonRuntime::Conda);
+        assert!(!minted_from_template(&pod, &template_hash(&config, &conda)));
+    }
+
+    /// marimo was booted with the pool's backend, so a workspace of the other
+    /// runtime cold-starts rather than claim; absent is `Uv` on both sides.
+    #[test]
+    fn only_workspaces_of_the_pools_runtime_are_eligible() {
+        use kubimo::WorkspacePythonRuntime::{Conda, Uv};
+        use kubimo::{PoolSpec, RunnerCommand, RunnerSpec, WorkspaceSpec};
+        let config = crate::Config::test_default();
+        let runner = Runner::new(
+            "bmor-x",
+            RunnerSpec {
+                workspace: "bmow-x".into(),
+                command: RunnerCommand::Edit,
+                ..Default::default()
+            },
+        );
+        let workspace = |python_runtime| {
+            Workspace::new(
+                "bmow-x",
+                WorkspaceSpec {
+                    python_runtime,
+                    ..Default::default()
+                },
+            )
+        };
+        let pool = |python_runtime| {
+            Pool::new(
+                "editors",
+                PoolSpec {
+                    command: RunnerCommand::Edit,
+                    python_runtime,
+                    ..Default::default()
+                },
+            )
+        };
+        for (pool_runtime, workspace_runtime) in [
+            (None, None),
+            (None, Some(Uv)),
+            (Some(Uv), None),
+            (Some(Conda), Some(Conda)),
+        ] {
+            assert_eq!(
+                eligible(
+                    &config,
+                    &runner,
+                    &workspace(workspace_runtime),
+                    &pool(pool_runtime)
+                ),
+                Ok(()),
+                "pool {pool_runtime:?}, workspace {workspace_runtime:?}"
+            );
+        }
+        for (pool_runtime, workspace_runtime) in [(None, Some(Conda)), (Some(Conda), None)] {
+            assert_eq!(
+                eligible(
+                    &config,
+                    &runner,
+                    &workspace(workspace_runtime),
+                    &pool(pool_runtime)
+                ),
+                Err("python runtime differs from the pool's"),
+            );
+        }
     }
 
     /// Every observer of a double-claim must elect the same survivor, whatever

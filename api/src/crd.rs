@@ -14,8 +14,8 @@ use url::Url;
 use crate::selector::Selector;
 use crate::validation::{
     budget_selector_not_empty, log_level, pool_command_not_render, pool_immutable_fields,
-    pool_max_cpu_greater_than_min, pool_max_memory_greater_than_min, pool_python_runtime_uv,
-    runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
+    pool_max_cpu_greater_than_min, pool_max_memory_greater_than_min, runner_immutable_fields,
+    runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
     workspace_immutable_fields, workspace_restore_from_not_indexer_prefix,
 };
 
@@ -140,6 +140,8 @@ pub struct WorkspaceStatus {
     pub slot: Option<WorkspaceSlotStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive: Option<WorkspaceArchiveStatus>,
+    /// The runtime the workspace's runners run, `spec.pythonRuntime` with its
+    /// default resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub python_runtime: Option<WorkspacePythonRuntime>,
 }
@@ -211,21 +213,25 @@ pub struct WorkspaceRestoreFrom {
     pub secrets: Option<WorkspaceRestoreSecrets>,
 }
 
-/// Determines how a workspace environment is installed.
+/// Which marimo sandbox backend builds each notebook's environment from its
+/// PEP 723 header.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, Default, Eq, PartialEq)]
 pub enum WorkspacePythonRuntime {
-    /// Environment is installed by `uv`.
+    /// `marimo --sandbox=uv`: PyPI packages only, and the fastest to create
+    /// environments.
     #[default]
     Uv,
-    /// Environment is installed by `micromamba`.
+    /// `marimo --sandbox=pixi`: conda packages, declared under
+    /// `[tool.pixi.dependencies]`, as well as PyPI ones.
     Conda,
 }
 
-impl std::fmt::Display for WorkspacePythonRuntime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl WorkspacePythonRuntime {
+    /// The backend marimo's `--sandbox` runs this runtime's notebooks with.
+    pub fn sandbox_backend(self) -> &'static str {
         match self {
-            Self::Uv => f.write_str("Uv"),
-            Self::Conda => f.write_str("Conda"),
+            Self::Uv => "uv",
+            Self::Conda => "pixi",
         }
     }
 }
@@ -263,6 +269,9 @@ pub struct WorkspaceSpec {
     pub indexer: Option<WorkspaceIndexer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restore_from: Option<WorkspaceRestoreFrom>,
+    /// The runtime every runner and cache job of this workspace runs; see
+    /// [`WorkspacePythonRuntime`]. Absent means `Uv`. Immutable: pods, pool
+    /// claims and notebook environments are all built for one backend.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub python_runtime: Option<WorkspacePythonRuntime>,
 }
@@ -385,8 +394,9 @@ pub struct RunnerSpec {
     pub sidecars: Option<Vec<Container>>,
     /// Name of a [`Pool`] to claim a pre-booted warm pod from. Best effort: if
     /// the pool is absent, empty, or the runner is not eligible (command,
-    /// runtime, resources, sidecars or secrets differ from the pool template),
-    /// the runner cold-starts exactly as if the field were unset. Immutable —
+    /// runtime, resources, sidecars or secrets differ from the pool
+    /// template), the
+    /// runner cold-starts exactly as if the field were unset. Immutable —
     /// once a runner has a cold pod, a claim would strand it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
@@ -581,9 +591,9 @@ pub struct PoolStatus {
 /// claims one instead of cold-starting, and the pool mints a replacement.
 ///
 /// Every field here is a *template*: a runner is only eligible to claim when
-/// its own spec is compatible (same command, runtime, resources; env a subset;
-/// sidecars matching), because nothing about a running pod can be changed
-/// after the fact except its metadata.
+/// its own spec is compatible (same command, runtime and resources; env a
+/// subset; sidecars matching), because nothing about a running pod can be
+/// changed after the fact except its metadata.
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
     group = "kubimo.aqora.io",
@@ -593,7 +603,6 @@ pub struct PoolStatus {
     namespaced,
     status = "PoolStatus",
     validation = pool_command_not_render(),
-    validation = pool_python_runtime_uv(),
     validation = pool_immutable_fields(),
     validation = pool_max_memory_greater_than_min(),
     validation = pool_max_cpu_greater_than_min(),
@@ -607,9 +616,9 @@ pub struct PoolSpec {
     /// refused: a renderer's slot is bound read-only at publish time, which an
     /// already-published anonymous slot cannot honour.
     pub command: RunnerCommand,
-    /// Runtime whose venv template seeds the anonymous slots. Absent means
-    /// `Uv`; `Conda` is refused for now (its dependency sync cannot run before
-    /// marimo boots on a pool pod). Immutable.
+    /// The runtime of the workspaces this pool serves: warm pods boot marimo
+    /// with its sandbox backend, which a claim cannot change. Absent means
+    /// `Uv`, as on a Workspace. Immutable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub python_runtime: Option<WorkspacePythonRuntime>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -635,7 +644,7 @@ pub struct PoolSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_secret_name: Option<String>,
     /// XFS quota for the anonymous slot. The agent re-quotas to the claiming
-    /// workspace's `storage.max`, so this only needs to fit the venv template.
+    /// workspace's `storage.max`, so this only needs to fit the node template.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageQuantity>,
 }
@@ -968,21 +977,64 @@ mod tests {
         assert!(json.get("pool").is_none(), "spec had a null pool: {json}");
     }
 
-    /// The shapes of the pool rules are the contract: Render refused, Conda
-    /// refused (for now), command and runtime pinned once created.
+    /// The shapes of the pool rules are the contract: Render refused, command
+    /// and runtime pinned once created.
     #[test]
-    fn pool_crd_refuses_render_conda_and_mutation() {
+    fn pool_crd_refuses_render_and_command_or_runtime_changes() {
         let crd = serde_json::to_string(&Pool::crd()).unwrap();
         assert!(crd.contains("pool command must be Edit or Run"));
-        assert!(crd.contains("pools only support the Uv python runtime"));
         assert!(crd.contains("pool command and pythonRuntime are immutable"));
 
         let command = include_str!("./validation/pool_command_not_render.cel");
         assert!(command.contains("in [\"Edit\", \"Run\"]"));
-        let runtime = include_str!("./validation/pool_python_runtime_uv.cel");
-        // Absent must pass — it resolves to the Uv default.
-        assert!(runtime.contains("!has(self.spec.pythonRuntime)"));
-        assert!(runtime.contains("== \"Uv\""));
+        let immutable = include_str!("./validation/pool_immutable_fields.cel");
+        assert!(immutable.contains("self.spec.command == oldSelf.spec.command"));
+        assert!(immutable.contains(RESOLVED_RUNTIME));
+    }
+
+    /// Absent is `Uv` on both sides of the comparison, so a client that starts
+    /// or stops sending the default is not refused under server-side apply.
+    const RESOLVED_RUNTIME: &str =
+        r#"(has(oldSelf.spec.pythonRuntime) ? oldSelf.spec.pythonRuntime : "Uv")"#;
+
+    fn runtime_enum(crd: &serde_json::Value, part: &str) -> serde_json::Value {
+        crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"][part]["properties"]
+            ["pythonRuntime"]["enum"]
+            .clone()
+    }
+
+    #[test]
+    fn pools_and_workspaces_declare_the_runtime() {
+        let runtimes = serde_json::json!(["Uv", "Conda"]);
+        let pool = serde_json::to_value(Pool::crd()).unwrap();
+        assert_eq!(runtime_enum(&pool, "spec"), runtimes);
+        let workspace = serde_json::to_value(Workspace::crd()).unwrap();
+        for part in ["spec", "status"] {
+            assert_eq!(runtime_enum(&workspace, part), runtimes, "{part}");
+        }
+    }
+
+    #[test]
+    fn a_workspace_runtime_is_pinned_once_created() {
+        let crd = serde_json::to_string(&Workspace::crd()).unwrap();
+        assert!(crd.contains("workspace pythonRuntime is immutable"));
+        let rule = include_str!("./validation/workspace_immutable_fields.cel");
+        assert!(rule.contains(RESOLVED_RUNTIME));
+    }
+
+    #[test]
+    fn runtimes_map_to_marimo_sandbox_backends() {
+        assert_eq!(WorkspacePythonRuntime::default().sandbox_backend(), "uv");
+        assert_eq!(WorkspacePythonRuntime::Uv.sandbox_backend(), "uv");
+        assert_eq!(WorkspacePythonRuntime::Conda.sandbox_backend(), "pixi");
+    }
+
+    /// Live Workspaces carry `pythonRuntime: Conda`; if the enum lost that
+    /// value the controller could not read them at all.
+    #[test]
+    fn a_workspace_spec_with_python_runtime_deserializes() {
+        let spec: WorkspaceSpec = serde_json::from_str(r#"{"pythonRuntime":"Conda"}"#).unwrap();
+        assert_eq!(spec.python_runtime, Some(WorkspacePythonRuntime::Conda));
     }
 
     /// `spec.pool` is claim-once: a runner that already cold-started must not

@@ -1,5 +1,5 @@
 use kubimo::k8s_openapi::api::core::v1::Pod;
-use kubimo::{Runner, RunnerCommand, RunnerToken, Workspace, WorkspacePythonRuntime, prelude::*};
+use kubimo::{Runner, RunnerCommand, RunnerToken, Workspace, prelude::*};
 
 use crate::Config;
 use crate::context::Context;
@@ -29,7 +29,6 @@ impl RunnerReconciler {
         // fetched again: the caller has already read it to gate on Ready, and a
         // second GET could see a different generation than the gate did.
         workspace: &Workspace,
-        python_runtime: WorkspacePythonRuntime,
     ) -> Result<PodApply, kubimo::Error> {
         let namespace = runner.require_namespace()?;
         let sources = slot_volume::SlotSources::from_workspace(Some(workspace));
@@ -43,7 +42,7 @@ impl RunnerReconciler {
             }) => TokenSource::SecretEnv(secret_ref),
             _ => TokenSource::None,
         };
-        let image = ctx.config.marimo_image(python_runtime).to_string();
+        let image = ctx.config.marimo_image.clone();
         let pod = build_runner_pod(RunnerPodParams {
             name: runner.name()?.to_string(),
             namespace: namespace.to_string(),
@@ -58,7 +57,7 @@ impl RunnerReconciler {
             port: runner_port(runner),
             origin: runner_origin(&ctx.config, runner),
             command: runner.spec.command,
-            python_runtime,
+            python_runtime: workspace.spec.python_runtime.unwrap_or_default(),
             cpu: runner.spec.cpu.clone(),
             memory: runner.spec.memory.clone(),
             env: runner.spec.env.clone().unwrap_or_default(),
@@ -72,7 +71,6 @@ impl RunnerReconciler {
                 // bind and let one published version's slot be shared.
                 matches!(runner.spec.command, RunnerCommand::Render),
                 sources,
-                python_runtime,
             ),
             extra_volumes: Vec::new(),
             sidecars: runner.spec.sidecars.clone(),
@@ -95,7 +93,7 @@ impl RunnerReconciler {
                     .api_namespaced::<Pod>(namespace)
                     .get_opt(runner.name()?)
                     .await;
-                if matches!(&live, Ok(Some(live)) if runtime_class_drifted(live, &pod) || volumes_drifted(live, &pod) || asset_env_drifted(live, &pod))
+                if matches!(&live, Ok(Some(live)) if runtime_class_drifted(live, &pod) || retired_slot_attribute_drifted(live, &pod) || asset_env_drifted(live, &pod) || sandbox_env_drifted(live, &pod))
                 {
                     ctx.api_namespaced::<Pod>(namespace)
                         .delete_opt(runner.name()?)
@@ -122,11 +120,15 @@ fn runtime_class_drifted(live: &Pod, desired: &Pod) -> bool {
     class(live) != class(desired)
 }
 
-/// Check if both pods have the same python runtime volume attribute. This is needed because there
-/// may still exist pods created before python runtimes were introduced. Pods are simplify recreated
-/// if a drift is detected.
-fn volumes_drifted(live: &Pod, desired: &Pod) -> bool {
-    fn volume_python_runtime(pod: &Pod) -> Option<&str> {
+/// Slot-volume attributes older controllers set and this one never does. Volumes are
+/// immutable, so a live pod carrying one 422s every apply; this turns that into exactly
+/// one replacement. Append-only: a straggler pod would otherwise 422 forever.
+const RETIRED_SLOT_ATTRIBUTES: &[&str] = &["python_runtime"];
+
+/// Whether any [`RETIRED_SLOT_ATTRIBUTES`] entry differs between the live
+/// pod's slot volume and the desired one's.
+fn retired_slot_attribute_drifted(live: &Pod, desired: &Pod) -> bool {
+    fn slot_attribute<'a>(pod: &'a Pod, key: &str) -> Option<&'a str> {
         let spec = pod.spec.as_ref()?;
         let volume = spec.volumes.as_ref()?.iter().find_map(|vol| {
             let csi = vol.csi.as_ref()?;
@@ -135,10 +137,12 @@ fn volumes_drifted(live: &Pod, desired: &Pod) -> bool {
         volume
             .volume_attributes
             .as_ref()?
-            .get("python_runtime")
+            .get(key)
             .map(String::as_str)
     }
-    volume_python_runtime(live) != volume_python_runtime(desired)
+    RETIRED_SLOT_ATTRIBUTES
+        .iter()
+        .any(|key| slot_attribute(live, key) != slot_attribute(desired, key))
 }
 
 /// Whether the live pod's shared-asset env differs from the desired one. Env
@@ -148,19 +152,31 @@ fn volumes_drifted(live: &Pod, desired: &Pod) -> bool {
 /// The env is baked into start.sh's marimo flags at boot, so an in-place
 /// container restart could not apply it either.
 fn asset_env_drifted(live: &Pod, desired: &Pod) -> bool {
-    fn asset_url(pod: &Pod) -> Option<&str> {
-        pod.spec
-            .as_ref()?
-            .containers
-            .first()?
-            .env
-            .as_ref()?
-            .iter()
-            .find(|var| var.name == crate::controllers::runner_pod::ASSET_URL_ENV)?
-            .value
-            .as_deref()
-    }
-    asset_url(live) != asset_url(desired)
+    let name = crate::controllers::runner_pod::ASSET_URL_ENV;
+    runner_env(live, name) != runner_env(desired, name)
+}
+
+/// Whether the live pod runs another sandbox backend than the desired one.
+/// start.sh bakes it into marimo's `--sandbox` at boot and env is immutable,
+/// so only a replacement applies it; pods from before the runtime chose a
+/// backend carry none, and are replaced exactly once.
+fn sandbox_env_drifted(live: &Pod, desired: &Pod) -> bool {
+    let name = crate::controllers::runner_pod::SANDBOX_ENV;
+    runner_env(live, name) != runner_env(desired, name)
+}
+
+/// The value of the runner container's env var `name`.
+fn runner_env<'a>(pod: &'a Pod, name: &str) -> Option<&'a str> {
+    pod.spec
+        .as_ref()?
+        .containers
+        .first()?
+        .env
+        .as_ref()?
+        .iter()
+        .find(|var| var.name == name)?
+        .value
+        .as_deref()
 }
 
 pub(crate) fn runner_port(runner: &Runner) -> i32 {
@@ -208,7 +224,6 @@ mod tests {
             let volume = slot_volume::workspace_volume(
                 "bmow-test",
                 matches!(command, RunnerCommand::Render),
-                Default::default(),
                 Default::default(),
             );
             assert_eq!(volume.csi.unwrap().read_only, Some(expected), "{command:?}");
@@ -274,6 +289,89 @@ mod tests {
         assert!(!asset_env_drifted(
             &pod_with_asset_env(None),
             &pod_with_asset_env(None)
+        ));
+    }
+
+    /// start.sh bakes the backend into marimo at boot, so a pod running another
+    /// runtime than the workspace's is replaced, and a pod from before the
+    /// runtime chose a backend, which carries none, is replaced once. A pod
+    /// that already matches never is.
+    #[test]
+    fn only_sandbox_env_drift_marks_a_pod_for_replacement() {
+        use crate::controllers::runner_pod::with_sandbox_env;
+        use kubimo::WorkspacePythonRuntime::{Conda, Uv};
+        use kubimo::k8s_openapi::api::core::v1::Container;
+        fn pod_with_env(env: Option<Vec<kubimo::k8s_openapi::api::core::v1::EnvVar>>) -> Pod {
+            Pod {
+                spec: Some(PodSpec {
+                    containers: vec![Container {
+                        env,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+        let pod = |runtime| pod_with_env(Some(with_sandbox_env(Vec::new(), runtime)));
+        assert!(sandbox_env_drifted(&pod_with_env(None), &pod(Uv)));
+        assert!(sandbox_env_drifted(&pod(Conda), &pod(Uv)));
+        assert!(sandbox_env_drifted(&pod(Uv), &pod(Conda)));
+        assert!(!sandbox_env_drifted(&pod(Uv), &pod(Uv)));
+        assert!(!sandbox_env_drifted(&pod(Conda), &pod(Conda)));
+    }
+
+    /// A live pod whose slot volume still carries a retired attribute, whatever
+    /// its value, 422s on every apply and must be replaced; one that differs
+    /// only in an attribute still set (a changed quota) is some other 422 and
+    /// must be left alone.
+    #[test]
+    fn only_a_retired_slot_attribute_marks_a_pod_for_replacement() {
+        fn pod_with_slot_attributes(attributes: &[(&str, &str)]) -> Pod {
+            let mut volume = slot_volume::workspace_volume(
+                "bmow-test",
+                false,
+                slot_volume::SlotSources::default(),
+            );
+            volume
+                .csi
+                .as_mut()
+                .unwrap()
+                .volume_attributes
+                .get_or_insert_default()
+                .extend(
+                    attributes
+                        .iter()
+                        .map(|(key, value)| (key.to_string(), value.to_string())),
+                );
+            Pod {
+                spec: Some(PodSpec {
+                    volumes: Some(vec![volume]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+        let desired = pod_with_slot_attributes(&[("limitBytes", "2147483648")]);
+        for python_runtime in ["Uv", "Conda"] {
+            assert!(
+                retired_slot_attribute_drifted(
+                    &pod_with_slot_attributes(&[
+                        ("limitBytes", "2147483648"),
+                        ("python_runtime", python_runtime),
+                    ]),
+                    &desired
+                ),
+                "{python_runtime}"
+            );
+        }
+        assert!(!retired_slot_attribute_drifted(
+            &pod_with_slot_attributes(&[("limitBytes", "2147483648")]),
+            &desired
+        ));
+        assert!(!retired_slot_attribute_drifted(
+            &pod_with_slot_attributes(&[("limitBytes", "1073741824")]),
+            &desired
         ));
     }
 

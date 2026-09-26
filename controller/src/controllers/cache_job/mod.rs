@@ -42,8 +42,9 @@ impl Reconciler for CacheJobReconciler {
         self.apply_owner_reference(ctx, cache_job, &workspace)
             .await?;
 
-        // The cache job mounts the workspace volume; running it before the
-        // workspace's init job has populated the volume fails `uv sync`.
+        // The same gate a runner waits on: the cache job mounts the
+        // workspace's slot exactly as a runner does, and Ready is what says
+        // nothing is left to provision for it.
         if !is_workspace_ready(&workspace) {
             return Ok(Action::requeue(Duration::from_secs(5)));
         }
