@@ -113,7 +113,7 @@ jobs:
       # Tags the agent and marimo images by their own sources, so a controller-only
       # release leaves both the DaemonSet pod template and the runners' image unchanged
       # and Kubernetes rolls neither. The marimo image needs this as much as the agent:
-      # it is referenced by both the runners and the agent's venv-template initContainer,
+      # it is referenced by both the runners and the agent's marimo-template initContainer,
       # so a version-derived tag rolls the agent even though the agent image itself is
       # pinned. Script names follow the image names.
       - name: Image source hash
@@ -192,7 +192,7 @@ jobs:
           rev=$(./scripts/agent-image-rev)
           sed -i "s|^    sourceTag: \"\"$|    sourceTag: \"src-${rev}\"|" "$values"
           grep -n 'sourceTag:' "$values"
-      # Same again for the marimo image, which the runners and the agent's venv-template
+      # Same again for the marimo image, which the runners and the agent's marimo-template
       # initContainer both resolve to. Left on the appVersion it would roll the agent on
       # every release regardless of the pin above, and recreate every runner pod besides.
       # The two keys are told apart by indentation: marimo.sourceTag sits at the top

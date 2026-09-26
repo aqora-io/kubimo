@@ -1,46 +1,59 @@
 #!/bin/bash
 
-set -xe
+# Never `set -x`: it would trace the token into the pod log.
+set -euo pipefail
+
+# Declared unexported before it ever holds the token: bash exports every
+# variable it imports from the environment, and an assignment keeps the mark,
+# so a same-named variable in the pod's env would hand the token to marimo
+# and every kernel.
+declare +x kubimo_token=""
+base_url=""
+log="info"
+host="0.0.0.0"
+port="80"
+origin=""
+cmd=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
   --base-url)
-    BASE_URL="$2"
+    base_url="$2"
     shift
     shift
     ;;
   --token)
-    TOKEN="$2"
+    kubimo_token="$2"
     shift
     shift
     ;;
   --log-level)
-    LOG_LEVEL="$2"
+    log="$2"
     shift
     shift
     ;;
   --host)
-    HOST="$2"
+    host="$2"
     shift
     shift
     ;;
   --port)
-    PORT="$2"
+    port="$2"
     shift
     shift
     ;;
   --origin)
-    ORIGIN="$2"
+    origin="$2"
     shift
     shift
     ;;
-  -* | --*)
+  -*)
     echo "Unknown option $1"
     exit 1
     ;;
   *)
-    if [ -z "$CMD" ]; then
-      CMD="$1"
+    if [ -z "$cmd" ]; then
+      cmd="$1"
     else
       echo "Unknown positional arg $1"
       exit 1
@@ -50,218 +63,135 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-set -x
+# Out of the environment before anything forks, so no child ever inherits it.
+# marimo gets the token on stdin alone (see exec_marimo).
+kubimo_token="${kubimo_token:-${MARIMO_TOKEN:-}}"
+unset MARIMO_TOKEN
 
 # Unset kubernetes env vars
 for name in $(env | sed -n 's/^\(KUBERNETES[^=]*\)=.*/\1/p'); do
   unset "$name"
 done
 
-common_flags=("--log-level=${LOG_LEVEL:-info}")
-marimo_flags=("--host=${HOST:-0.0.0.0}" "--port=${PORT:-80}")
-directory=$(pwd)
+ws=$(pwd)
+marimo_flags=("--host=$host" "--port=$port")
 
-if [ -n "$BASE_URL" ]; then
-  marimo_flags+=("--base-url=$BASE_URL")
+if [ -n "$base_url" ]; then
+  marimo_flags+=("--base-url=$base_url")
 fi
 
 # Shared static-asset origin: rewrites the served HTML's ./assets/ references
 # to a runner-independent URL so browsers cache marimo's frontend across
 # runners and warm-pod claims. An env var, never a flag, for the same reason
 # as the claim marker below.
-if [ -n "$KUBIMO_ASSET_URL" ]; then
+if [ -n "${KUBIMO_ASSET_URL:-}" ]; then
   marimo_flags+=("--asset-url=$KUBIMO_ASSET_URL")
 fi
 
-TOKEN="${TOKEN:-$MARIMO_TOKEN}"
-if [ -z "$TOKEN" ]; then
-  marimo_flags+=("--no-token")
+if [ -n "$kubimo_token" ]; then
+  marimo_flags+=("--token-password-file=-")
 else
-  marimo_flags+=("--token-password=$TOKEN")
+  marimo_flags+=("--no-token")
 fi
 
-# Workspace content created before the template included [tool.marimo.venv]
-# needs the table, otherwise --sandbox builds an ephemeral sandbox per
-# notebook instead of using the workspace venv.
-ensure_marimo_venv_config() {
-  if [ -f pyproject.toml ] && ! is_marimo_venv_configured; then
-    /bin/cat >>pyproject.toml <<TOML
-
-[tool.marimo.venv]
-path = "$VIRTUAL_ENV"
-writable = false
-TOML
+# The token reaches marimo on stdin: as an argument it would show in every
+# process listing, and in the environment it would reach every kernel.
+# --quiet because marimo's startup banner prints its URL with
+# ?access_token=<token>; it silences marimo's other console notices too (such
+# as sandbox syncs), never its log lines.
+exec_marimo() {
+  if [ -n "$kubimo_token" ]; then
+    exec /usr/local/bin/marimo --log-level="$log" --quiet --yes "$@" <<<"$kubimo_token"
   fi
+  exec /usr/local/bin/marimo --log-level="$log" --yes "$@" </dev/null
 }
 
-# Sync the workspace venv, but never install marimo into it.
-#
-# marimo is already importable from the image's system site-packages, and that
-# is the *fork's* build. Workspaces created before this change still declare
-# `marimo[recommended,lsp]` in their own pyproject.toml — user data we do not
-# rewrite — and installing it would put a PyPI copy in the venv that shadows
-# the system one. Kernels would then run a different marimo from the server,
-# which marimo only warns about while the two talk over ZeroMQ.
-#
-# `--no-install-package` skips it without touching the user's declared
-# dependencies or their lockfile.
-uv_sync_workspace() {
-  /usr/local/bin/uv sync --no-install-package marimo
-}
-
-# Serialized on a lock file on the slot: the runner and the workspace's cache
-# job mount the same slot and both install into the same detached env at
-# start. pixi does not guard the prefix against a second installer, and the
-# loser dies in the clobber registry ("Expected just reordering, got
-# something else"). The lock lives under $HOME so both pods see it.
-#
-# Any further arguments run as a command under the same lock, after the
-# install: the runner's pyproject.toml check-then-append is not atomic either,
-# and a second runner on the workspace (edit + run) races it the same way.
-pixi_install_workspace() {
-  mkdir -p "$HOME/.cache"
-  (
-    /usr/bin/flock 9
-    /usr/local/bin/pixi install
-    "$@"
-  ) 9>"$HOME/.cache/.kubimo-pixi-install.lock"
-}
-
-is_marimo_venv_configured() {
-  /usr/local/bin/python3 -c '
-import sys, tomllib
-with open("pyproject.toml", "rb") as f:
-    data = tomllib.load(f)
-# Check for the table itself, not a key inside it: appending a duplicate
-# [tool.marimo.venv] header would be invalid TOML.
-sys.exit(0 if "venv" in data.get("tool", {}).get("marimo", {}) else 1)
-'
-}
-
-# Sync the workspace environment and pin the marimo venv table. The one shape
-# shared by a normal start, a post-claim container restart, and the claim
-# waiter below.
-sync_workspace_env() {
-  # Backgrounded (uv): marimo's --sandbox resolves each kernel's environment
-  # lazily at websocket connect, and /health is a constant response, so
-  # nothing about serving depends on this finishing. The venv itself already
-  # exists and is populated (from the image, via init-dirs or the agent's
-  # reflink template), which is what makes this safe — marimo hard-errors on
-  # a *missing* venv but never on a stale one.
-  #
-  # The trade: a workspace that has added dependencies has a window where they
-  # are not yet installed, and opening a notebook in it shows marimo's
-  # "Install packages" banner. Recoverable, and the same banner users already
-  # get for genuinely missing packages.
-  if [[ -n "$UV_PROJECT" ]]; then
-    uv_sync_workspace &
-    ensure_marimo_venv_config
-  elif [[ -x /usr/local/bin/pixi ]]; then
-    pixi_install_workspace ensure_marimo_venv_config
-  else
-    ensure_marimo_venv_config
-  fi
+# Workspaces created for the uv or conda images pin an environment this image
+# no longer has; kubimo_migrate.py gives their notebooks PEP 723 headers once
+# and exits early for every other workspace. A failure is logged and does not
+# stop the runner.
+migrate_workspace() {
+  /usr/local/bin/python3 /app/kubimo_migrate.py --log-level "$log" "$ws" ||
+    echo "Migrating the legacy workspace failed, starting anyway" >&2
 }
 
 # Warm-pool pre-boot. Set (as an env var, never a flag — an older image must
 # start normally rather than crash on an unknown argument) when this pod was
 # minted for a pool: the workspace is only the node template until a claim
-# hydrates the tenant's files and the agent drops the marker file. Until then
-# there is nothing to sync; afterwards the tenant's pyproject is in place and
-# the sync must run against it.
+# hydrates the tenant's files and the agent drops the marker file, which
+# kubimo_migrate.py waits for before migrating them.
 #
-# Polls rather than inotify: the agent writes the marker from the host, and
-# gVisor only delivers inotify events for writes made inside the sandbox.
-#
-# The subshell is backgrounded *before* the exec and survives it (it is its
-# own process); marimo stays PID 1 so signal handling is unchanged. A probe
-# restart re-runs this script with the marker already present, takes the
-# else-branch, and starts like any cold runner — idempotent by construction.
-if [[ "$CMD" == "edit" || "$CMD" == "run" ]]; then
-  if [[ -n "$KUBIMO_CLAIM_MARKER" && ! -e "$KUBIMO_CLAIM_MARKER" ]]; then
-    (
-      while [[ ! -e "$KUBIMO_CLAIM_MARKER" ]]; do sleep 2; done
-      cd "$directory" || exit 1
-      sync_workspace_env
-    ) &
+# Backgrounded as a direct command, never a `( ... ) &` subshell: a forked
+# bash keeps this script's argv, --token included, for as long as it runs. It
+# survives the exec below; marimo stays PID 1 so signal handling is unchanged.
+# A probe restart re-runs this script with the marker already present and
+# migrates in the foreground like any cold runner — idempotent by construction.
+if [[ "$cmd" == "edit" || "$cmd" == "run" ]]; then
+  if [[ -n "${KUBIMO_CLAIM_MARKER:-}" && ! -e "$KUBIMO_CLAIM_MARKER" ]]; then
+    /usr/local/bin/python3 /app/kubimo_migrate.py --log-level "$log" \
+      --wait-for "$KUBIMO_CLAIM_MARKER" "$ws" &
   else
-    sync_workspace_env
+    migrate_workspace
   fi
 fi
 
-# --sandbox on a directory makes marimo spawn each kernel as an IPC subprocess
-# on the workspace venv (see [tool.marimo.venv] in the template pyproject), so
-# user-installed packages aren't shadowed by the image's system site-packages
-# that launch.py prioritizes for the server.
-if [[ "$CMD" == "edit" ]]; then
-  # SHELL for marimo's terminal on pixi workspaces. Exported here rather than
-  # in sync_workspace_env: the claim waiter runs that function in a
-  # backgrounded subshell after the exec, where an export can't reach marimo.
-  if [[ -z "$UV_PROJECT" && -x /usr/local/bin/pixi ]]; then
-    export SHELL=/usr/local/bin/pixi-shell
-  fi
+# --sandbox=pixi on a directory runs each notebook's kernel in the pixi
+# environment its PEP 723 header describes, with this image's marimo wheel
+# overlaid (MARIMO_RUNTIME_WHEEL); nothing is synced before marimo starts.
+if [[ "$cmd" == "edit" ]]; then
   export MARIMO_IN_SECURE_ENVIRONMENT=true
   export MARIMO_SESSION_COOKIE_SECURE=true
-  exec /usr/local/bin/marimo \
-    "${common_flags[@]}" \
-    --yes \
+  # Otherwise marimo relaunches its server through `uv run` to overlay its
+  # editor tools on this interpreter, which already has them. marimo pops the
+  # variable, so kernels do not inherit it.
+  export MARIMO_SERVER_OVERLAY=1
+  exec_marimo \
     edit \
-    --sandbox \
+    --sandbox=pixi \
     --skip-update-check \
     --headless \
     --watch \
     --allow-origins='*' \
     "${marimo_flags[@]}" \
-    "$directory"
+    "$ws"
 
-elif [[ "$CMD" == "run" ]]; then
+elif [[ "$cmd" == "run" ]]; then
   export MARIMO_IN_SECURE_ENVIRONMENT=true
   export MARIMO_SESSION_COOKIE_SECURE=true
-  exec /usr/local/bin/marimo \
-    "${common_flags[@]}" \
-    --yes \
+  exec_marimo \
     run \
-    --sandbox \
+    --sandbox=pixi \
     --headless \
     --watch \
     --allow-origins='*' \
     "${marimo_flags[@]}" \
     --include-code \
-    "$directory"
+    "$ws"
 
-elif [[ "$CMD" == "render" ]]; then
+elif [[ "$cmd" == "render" ]]; then
   argv=(
-    --host "${HOST:-0.0.0.0}"
-    --port "${PORT:-80}"
+    --host "$host"
+    --port "$port"
   )
 
-  if [ -n "$ORIGIN" ]; then
-    argv+=(--origin "$ORIGIN")
+  if [ -n "$origin" ]; then
+    argv+=(--origin "$origin")
   fi
-  if [ -n "$BASE_URL" ]; then
-    argv+=(--base-path "$BASE_URL")
+  if [ -n "$base_url" ]; then
+    argv+=(--base-path "$base_url")
   fi
-  if [ -n "$TOKEN" ]; then
-    argv+=(--token "$TOKEN")
+  if [ -n "$kubimo_token" ]; then
+    argv+=(--token "$kubimo_token")
   fi
 
-  exec /usr/local/bin/marimo-ssr serve "${argv[@]}" "$directory"
+  exec /usr/local/bin/marimo-ssr serve "${argv[@]}" "$ws"
 
-elif [[ "$CMD" == "cache" ]]; then
-  if [[ -n "$UV_PROJECT" ]]; then
-    uv_sync_workspace
-  elif [[ -x /usr/local/bin/pixi ]]; then
-    # The image's VIRTUAL_ENV already points at the detached pixi env (the
-    # path pinned in pixi-pyproject.toml). CONDA_PREFIX is only set inside
-    # `pixi shell`/`pixi run`; exporting it here emptied VIRTUAL_ENV and
-    # exec'd /bin/python3.
-    pixi_install_workspace
-  fi
-  exec "$VIRTUAL_ENV/bin/python3" /app/cache.py \
-    --include-code "${common_flags[@]}"
+elif [[ "$cmd" == "cache" ]]; then
+  migrate_workspace
+  exec /usr/local/bin/python3 /app/cache.py --include-code --log-level="$log" "$ws"
 
 else
-  echo "Unknown command $CMD"
+  echo "Unknown command $cmd"
 fi
 
 echo "Run failed"

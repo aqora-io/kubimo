@@ -1,7 +1,7 @@
 # A warm pod pool and a runner that claims from it.
 #
 # The pool keeps `replicas` pods fully pre-booted: marimo serving /health on an
-# anonymous, venv-template-seeded slot, under a base-url and token minted at
+# anonymous, node-template-seeded slot, under a base-url and token minted at
 # each pod's birth. A Runner naming the pool in `spec.pool` adopts one instead
 # of cold-starting — the agent links the slot to the workspace, hydrates it
 # from S3 and acks, and only then does the controller create the Service and

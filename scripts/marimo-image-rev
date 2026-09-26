@@ -6,12 +6,12 @@
 # with a wider blast radius. This one image is referenced twice:
 #
 #   * runners are started from it, so moving the tag recreates every runner pod, and
-#   * the agent stages its venv template from it, so moving the tag rolls the agent
+#   * the agent stages its node template from it, so moving the tag rolls the agent
 #     DaemonSet, which destroys each node's data volume and re-hydrates every slot on it.
 #
 # Tagging it by the release version meant a controller-only release did both. The agent's
 # own `src-` tag did not prevent it: the tag protects the agent *container*, while the
-# venv-template initContainer still followed the chart appVersion.
+# marimo-template initContainer still followed the chart appVersion.
 #
 # The path list is every input that ends up in the image: the Dockerfile, the files baked
 # into it, and the bake file that pins the marimo fork. The image ships no Rust — the
