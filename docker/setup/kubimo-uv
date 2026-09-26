@@ -1,0 +1,33 @@
+#!/bin/bash
+# The uv marimo launches kernels through (MARIMO_PIXI_UV), offline first.
+#
+# A kernel runs `uv run ... --with <this image's marimo wheel> -- python ...`
+# to overlay marimo on its notebook's pixi environment. uv keys a file://
+# wheel in its cache on the file's ctime, which unpacking the image resets,
+# so a build-time overlay could never match: it isn't shipped, and each slot
+# builds its own offline. Every other package it needs is in the seeded
+# cache, and PyPI must not gate a kernel start, so a launch that can run
+# offline does; only one that cannot (a notebook on another Python, say) goes
+# online.
+set -euo pipefail
+
+uv=/usr/local/bin/uv
+
+if [[ "${1:-}" == "run" ]]; then
+  options=()
+  for arg in "${@:2}"; do
+    if [[ "$arg" == "--" ]]; then
+      # A trial launch with an empty program. It must not touch the stdin
+      # the kernel reads its arguments from, nor print to the stdout the
+      # server parses.
+      if "$uv" run --offline "${options[@]}" -- python -c '' \
+        </dev/null >/dev/null 2>&1; then
+        exec "$uv" run --offline "${@:2}"
+      fi
+      break
+    fi
+    options+=("$arg")
+  done
+fi
+
+exec "$uv" "$@"

@@ -11,8 +11,8 @@ variable "SCCACHE_REGION" {
 }
 
 variable "MARIMO_GIT" {
-  # feat-ssr branch of our fork
-  default = "https://github.com/aqora-io/marimo.git#fb878dba5272dd7ba7c2149f283df320db5ba9f0"
+  # aqora-io branch of our fork
+  default = "https://github.com/aqora-io/marimo.git#f3f8f996034e50049be0b510da33bf4d03a05e99"
 }
 
 group "default" {
@@ -58,11 +58,20 @@ target "docker-metadata-marimo" {}
 
 target "marimo" {
   inherits = ["docker-metadata-marimo"]
-  target = "uv"
+  target = "marimo"
   dockerfile = "docker/Dockerfile.marimo"
   context = "."
   # platforms = [BAKE_LOCAL_PLATFORM]
   args = {
     MARIMO_GIT = MARIMO_GIT
   }
+}
+
+# Runs the image's test stage: never pushed, so it is not in the default
+# group and its output is discarded once the build (and its RUN pytest) has
+# either passed or failed.
+target "marimo-test" {
+  inherits = ["marimo"]
+  target   = "test"
+  output   = ["type=cacheonly"]
 }

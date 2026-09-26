@@ -79,7 +79,7 @@ jobs:
       - name: Template (agent enabled)
         run: helm template charts/kubimo-controller --set agent.enabled=true --kube-version 1.29.0
 
-  cache-py:
+  docker-app:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -92,5 +92,27 @@ jobs:
         # Upstream release the MARIMO_GIT fork pin in docker-bake.hcl is based
         # on; bump this together with that pin.
         run: pip install 'marimo==0.25.0' pytest
-      - name: Test cache.py
-        run: pytest docker/app/test_cache.py -v
+      - name: Test docker/app
+        run: pytest docker/app -m "not image" -v
+
+  marimo-image-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      # Builds the marimo image through its `test` stage, which runs the whole
+      # docker/app suite, `image`-marked tests included, against the real pixi,
+      # uv and fork wheel the image ships. cacheonly in the target itself, so
+      # nothing is pushed; the gha cache scope is shared with cd.yaml's own
+      # marimo build.
+      - name: Build and test the marimo image
+        uses: docker/bake-action@v7
+        with:
+          source: .
+          files: docker-bake.hcl
+          targets: marimo-test
+          set: |
+            *.cache-from=type=gha,scope=marimo-amd64
+            *.cache-to=type=gha,scope=marimo-amd64,mode=max

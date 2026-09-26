@@ -58,8 +58,9 @@ spec:
         # of every first kernel downloading them.
         - name: marimo-template
           # Defaults to the runners' image, because it must equal it: this
-          # stages one venv per node that every slot reflinks, so a different
-          # image here hands runners a venv built for another interpreter.
+          # stages one node template per node that every slot reflinks, so a
+          # different image here hands runners a template built for another
+          # interpreter.
           # Resolved through the shared helper so the two cannot drift, and so
           # this initContainer stops tracking the chart appVersion — it was the
           # reason a controller-only release still rolled the agent despite
