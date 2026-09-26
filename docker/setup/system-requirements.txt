@@ -1,0 +1,5 @@
+aqora[pyarrow]
+ruff>=0.15.6
+ty>=0.0.23
+watchdog>=6.0.0
+nbconvert>=7.17.0
