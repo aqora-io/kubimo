@@ -8,6 +8,17 @@ spec:
   selector:
     matchLabels:
       {{- include "kubimo-controller.selectorLabels" . | nindent 6 }}
+  # Two controllers must never reconcile at once: they disagree on retired pod
+  # slot-volume attributes and warm-pool template hashes, and fighting over
+  # them mid-rollout churns every runner and warm pod in the cluster (seen
+  # live: ~290 warm pods and ~10 pod replacements in 35s). The default
+  # RollingUpdate lets the old pod keep running for its whole
+  # terminationGracePeriodSeconds — and an old controller that only reacts to
+  # SIGINT ignores the SIGTERM that starts that countdown outright — so
+  # Recreate is what actually guarantees the old pod is gone before the new
+  # one starts.
+  strategy:
+    type: Recreate
   template:
     metadata:
       {{- with .Values.podAnnotations }}

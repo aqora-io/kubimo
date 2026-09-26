@@ -3,6 +3,12 @@ templates:
   - deployment.yaml
 
 tests:
+  - it: should use the Recreate strategy so two controllers never run at once
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+
   - it: should expose the metrics port when enabled
     set:
       metrics:

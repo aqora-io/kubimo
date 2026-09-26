@@ -111,7 +111,12 @@ impl Reconciler for RunnerReconciler {
                 .map_ok(|_| false)
                 .boxed(),
             self.apply_pod(ctx, runner, &workspace)
-                .map_ok(|applied| matches!(applied, apply_pod::PodApply::Replaced))
+                .map_ok(|applied| {
+                    matches!(
+                        applied,
+                        apply_pod::PodApply::Replaced | apply_pod::PodApply::AwaitingTermination
+                    )
+                })
                 .boxed(),
             self.apply_service(ctx, runner).map_ok(|_| false).boxed(),
             self.apply_ingress(ctx, runner).map_ok(|_| false).boxed(),
@@ -129,23 +134,21 @@ impl Reconciler for RunnerReconciler {
         // a Runner whose resources put requests over limits, say — and never converges;
         // requeuing those on a fixed 2s timer would spin forever instead of letting the
         // controller's backoff space them out.
-        let replaced = match applied {
-            Ok(outcomes) => outcomes.into_iter().any(|replaced| replaced),
+        let needs_requeue = match applied {
+            Ok(outcomes) => outcomes.into_iter().any(|requeue| requeue),
             Err(err) if is_already_exists(&err) => {
                 return Ok(Action::requeue(Duration::from_secs(2)));
             }
             Err(err) => return Err(err),
         };
 
-        if replaced {
-            // apply_pod deleted a pod whose immutable runtimeClassName had drifted.
-            // Nothing has recreated it, and its deletion is not a change this
+        if needs_requeue {
+            // apply_pod either just deleted a pod whose immutable runtimeClassName
+            // had drifted (and logged it), or found one an earlier reconcile had
+            // already deleted for the same reason and still Terminating. Either
+            // way nothing has recreated it, and its deletion is not a change this
             // controller can wait on, so come back once the old one has finished
             // terminating and the name is free again.
-            tracing::info!(
-                runner = runner.name()?,
-                "replaced a drifted pod; requeuing to recreate it"
-            );
             return Ok(Action::requeue(Duration::from_secs(2)));
         }
 
