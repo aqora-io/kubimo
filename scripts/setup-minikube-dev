@@ -16,9 +16,9 @@ minikube addons enable metrics-server
 # can be iterated on, and a second one in-cluster would reconcile the same objects.
 #
 # `KUBIMO__MARIMO_IMAGE` is the same variable the README has you export for the
-# controller, and using it for both is deliberate: the agent stages one venv per node
-# that every slot reflinks, so a runner started from a different image gets a venv
-# built for another interpreter.
+# controller, and using it for both is deliberate: the agent stages one template per
+# node that every slot reflinks, so a runner started from a different image gets a
+# template built for another interpreter.
 # Two settings differ from a real cluster, both because minikube cannot do what the
 # defaults assume:
 #   allowUnquotaedSlots - minikube's filesystem has no XFS project quotas, and the

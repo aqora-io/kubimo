@@ -52,12 +52,10 @@ spec:
             # derived from its crate version (default_marimo_image in
             # controller/src/config.rs), so leaving this out when `controller.marimoImage`
             # is unset would put the version-derived tag back — the one this helper exists
-            # to avoid — and let the runners' image drift from the venv template the agent
+            # to avoid — and let the runners' image drift from the template the agent
             # stages from `kubimo-controller.marimoImage`.
             - name: KUBIMO__MARIMO_IMAGE
               value: {{ include "kubimo-controller.marimoImage" . | quote }}
-            - name: KUBIMO__MARIMO_CONDA_IMAGE
-              value: {{ include "kubimo-controller.marimoCondaImage" . | quote }}
             {{- with .Values.controller }}
             {{- if .rustLog }}
             - name: RUST_LOG

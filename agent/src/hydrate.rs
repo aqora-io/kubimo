@@ -23,8 +23,8 @@ use kubimo::WorkspaceRestoreSecrets;
 ///
 /// The slot is mounted at `/home/me`, and the indexer archives
 /// `/home/me/workspace`, so archive paths are relative to this subdirectory.
-/// `/home/me/venv` deliberately sits outside it — the venv is rebuilt, never
-/// restored.
+/// The rest of `/home/me` — the node template's pixi/uv caches — deliberately
+/// sits outside it and is never archived or restored.
 pub const WORKSPACE_SUBDIR: &str = "workspace";
 
 /// How many files to transfer concurrently.
@@ -219,7 +219,8 @@ async fn wait_until_deleted(client: &kubimo::Client, workspace: &str) {
 ///
 /// The archive scope is deliberately unchanged from the standalone indexer —
 /// `.gitignore` is honoured and only `<slot>/workspace` is walked. Tracked
-/// files are durable; the venv and other scratch are not, and are rebuilt.
+/// files are durable; the node template's caches and other scratch are not,
+/// and are rebuilt.
 ///
 /// `Some` means the archive now fully represents the slot, and only then may
 /// the caller record a flush. `None` means part of the tree — or all of it —
@@ -268,9 +269,9 @@ pub async fn flush_slot(
 #[derive(Debug, Clone, Copy)]
 pub struct Flushed {
     /// Total size of the workspace's tracked files, as the flush walked them.
-    /// Small next to the slot's disk usage — the venv is the bulk of that and
-    /// is never archived — which is why it is reported separately rather than
-    /// folded into `status.storage`.
+    /// Small next to the slot's disk usage — the node template's caches are
+    /// the bulk of that and are never archived — which is why it is reported
+    /// separately rather than folded into `status.storage`.
     pub content_bytes: u64,
 }
 

@@ -171,8 +171,8 @@ fn bytes_to_basic_blocks(bytes: u64) -> u64 {
 /// project's *block* quota, so without an inode limit a tenant can consume
 /// node-wide space with empty files that its byte quota never sees. One inode
 /// per 4KiB of quota caps that overhead at ~12.5% of the byte limit; the floor
-/// keeps small slots usable — a Python venv alone runs to tens of thousands of
-/// files.
+/// keeps small slots usable — the node template's pixi/uv caches alone run to
+/// tens of thousands of files.
 const INODE_BYTES_PER_INODE: u64 = 4096;
 const MIN_INODE_LIMIT: u64 = 65_536;
 

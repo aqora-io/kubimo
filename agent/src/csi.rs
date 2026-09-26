@@ -38,9 +38,10 @@ const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Volume attribute naming the workspace whose slot to mount. Set by the
 /// controller in the runner pod's inline volume definition.
 const ATTR_WORKSPACE: &str = "workspace";
-/// Volume attribute to declare how a workspace is installed. Set by the
-/// controller in the runner pod's inline volume definition.
-const ATTR_PYTHON_RUNTIME: &str = "python_runtime";
+// `python_runtime` is retired: every workspace runs the same marimo image
+// now, so there is no runtime left to choose. A controller older than this
+// release may still set it on pods created mid-rollout; the agent ignores
+// the attribute whatever its value. Never reuse the name.
 /// Optional per-slot hard capacity limit in bytes, from `spec.storage.max`.
 const ATTR_LIMIT_BYTES: &str = "limitBytes";
 /// Bucket and key prefix of the workspace's S3 archive, from `spec.indexer`.
@@ -729,7 +730,6 @@ impl KubimoNode {
         limit_bytes: u64,
         archive: Option<&crate::hydrate::ArchiveLocation>,
         seed: Option<&crate::hydrate::SeedArchive>,
-        python_runtime: Option<&str>,
     ) -> Result<(crate::store::ResolvedSlot, PathBuf), Status> {
         let mut resolved = self
             .store
@@ -790,7 +790,6 @@ impl KubimoNode {
                     quotas_enforced,
                     archive,
                     seed,
-                    python_runtime,
                 )
                 .await
             {
@@ -824,7 +823,7 @@ impl KubimoNode {
         Ok((resolved, dir))
     }
 
-    /// Provision a freshly created slot: project quota, ownership, the venv
+    /// Provision a freshly created slot: project quota, ownership, the node
     /// template, then hydration from S3.
     ///
     /// Split out from [`Self::prepare_slot`] so that a failure at any step is
@@ -842,7 +841,6 @@ impl KubimoNode {
         quotas_enforced: bool,
         archive: Option<&crate::hydrate::ArchiveLocation>,
         seed: Option<&crate::hydrate::SeedArchive>,
-        python_runtime: Option<&str>,
     ) -> Result<(), Status> {
         self.provision_slot_basics(
             workspace,
@@ -851,7 +849,6 @@ impl KubimoNode {
             dir,
             limit_bytes,
             quotas_enforced,
-            python_runtime,
         )
         .await?;
         // Only a freshly created slot is hydrated. Re-hydrating one that is
@@ -906,10 +903,9 @@ impl KubimoNode {
     }
 
     /// The identity-free half of provisioning: project quota, ownership, and
-    /// the venv template. Shared between a workspace's fresh slot (which goes
+    /// the node template. Shared between a workspace's fresh slot (which goes
     /// on to hydrate) and a pool pod's anonymous one (which deliberately does
     /// not — it has no workspace to hydrate from yet).
-    #[allow(clippy::too_many_arguments)]
     async fn provision_slot_basics(
         &self,
         owner: &str,
@@ -918,7 +914,6 @@ impl KubimoNode {
         dir: &Path,
         limit_bytes: u64,
         quotas_enforced: bool,
-        python_runtime: Option<&str>,
     ) -> Result<(), Status> {
         match (quotas_enforced, self.allow_unquotaed_slots) {
             (true, _) => {
@@ -955,13 +950,13 @@ impl KubimoNode {
             limit_bytes,
             "allocated slot"
         );
-        // Seed the venv from the node template before hydrating, so the
-        // runner does not have to build ~920MB of it from scratch. Failure
-        // is not fatal: `uv sync` will build one, just slowly.
-        match crate::venv::seed_from_template(self.store.layout().root(), dir, python_runtime).await
-        {
-            Ok(seeded) => tracing::info!(owner, seeded, "venv template"),
-            Err(err) => tracing::warn!(%err, owner, "could not seed venv template"),
+        // Seed the slot from the node template before hydrating, so the
+        // runner starts with pre-seeded pixi/uv caches instead of building
+        // them from scratch. Failure is not fatal: the kernel builds its own
+        // environment lazily, just slower.
+        match crate::venv::seed_from_template(self.store.layout().root(), dir).await {
+            Ok(seeded) => tracing::info!(owner, seeded, "node template"),
+            Err(err) => tracing::warn!(%err, owner, "could not seed node template"),
         }
         Ok(())
     }
@@ -1002,7 +997,6 @@ impl KubimoNode {
                 ))
             })?,
         };
-        let python_runtime = request.volume_context.get(ATTR_PYTHON_RUNTIME);
 
         let lock = self.store.lock_for_pool(&namespace, &pod);
         let _guard = lock.lock().await;
@@ -1025,7 +1019,6 @@ impl KubimoNode {
                     &dir,
                     limit_bytes,
                     quotas_enforced,
-                    python_runtime.map(String::as_str),
                 )
                 .await
             {
@@ -1224,8 +1217,6 @@ impl Node for KubimoNode {
                 ))
             })?;
 
-        let python_runtime = request.volume_context.get(ATTR_PYTHON_RUNTIME);
-
         // Serialise everything that follows against any other publish of the
         // same workspace on this node — a cache job is deliberately co-located
         // with a live runner, so two first publishes race here. Held from slot
@@ -1248,7 +1239,6 @@ impl Node for KubimoNode {
                 limit_bytes,
                 archive.as_ref(),
                 seed.as_ref(),
-                python_runtime.map(String::as_str),
             )
             .await?;
         self.publish_slot_status(
@@ -1325,7 +1315,7 @@ impl Node for KubimoNode {
             }
         };
         // No publish record can also mean an unclaimed pool pod going away:
-        // its anonymous slot holds only the venv template, so it is discarded
+        // its anonymous slot holds only the node template, so it is discarded
         // outright rather than kept as a warm cache. If a claim adopted it
         // mid-teardown this returns the freshly written record instead, and
         // the ordinary flush path below runs for it.
@@ -1766,6 +1756,40 @@ mod tests {
         );
     }
 
+    /// `python_runtime` is retired. A controller older than this release may
+    /// still set it on pods created mid-rollout, and the agent must ignore it
+    /// whatever its value rather than choke on it — this publish fails for
+    /// exactly the same reason, and in exactly the same way, as it would
+    /// without the attribute.
+    #[tokio::test]
+    async fn publish_ignores_the_retired_python_runtime_attribute() {
+        if quotas_would_be_enforced() {
+            return;
+        }
+        let (_dir, channel) = connected_with(false).await;
+        let status = NodeClient::new(channel)
+            .node_publish_volume(proto::NodePublishVolumeRequest {
+                volume_id: "csi-abc".into(),
+                target_path: "/tmp/kubimo-test-target-quota".into(),
+                volume_context: [
+                    (ATTR_WORKSPACE.to_string(), "bmow-abc".to_string()),
+                    (ATTR_POD_NAMESPACE.to_string(), "platform".to_string()),
+                    ("python_runtime".to_string(), "Conda".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            status.message().contains("prjquota"),
+            "the error should say how to fix it, got: {}",
+            status.message()
+        );
+    }
+
     /// Every Workspace lookup the agent makes is namespaced, and its own
     /// namespace is the wrong one — so refusing the mount is far better than
     /// proceeding and reading a live workspace as deleted, which skips its
@@ -1832,7 +1856,7 @@ mod tests {
         let store = SlotStore::new(crate::slot::SlotLayout::new(dir.path()));
         let node = KubimoNode::new("test-node".into(), store, 1024, false, None);
         let err = node
-            .prepare_slot("tenant-a", "workspace", 1024, None, None, None)
+            .prepare_slot("tenant-a", "workspace", 1024, None, None)
             .await
             .expect_err("must refuse unquotaed slots");
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
@@ -1862,7 +1886,7 @@ mod tests {
 
         let refusing = KubimoNode::new("test-node".into(), store, 1024, false, None);
         let err = refusing
-            .prepare_slot("tenant-a", "workspace", 1024, None, None, None)
+            .prepare_slot("tenant-a", "workspace", 1024, None, None)
             .await
             .expect_err("must refuse an unquotaed publish even for an existing slot");
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);

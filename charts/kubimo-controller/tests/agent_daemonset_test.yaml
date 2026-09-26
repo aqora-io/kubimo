@@ -1,0 +1,30 @@
+suite: agent daemonset
+templates:
+  - agent-daemonset.yaml
+# The DaemonSet's own guard fails the render below Kubernetes 1.29 (native
+# sidecar containers for the CSI registrar) — see ci.yaml's --kube-version
+# 1.29.0 for the same reason.
+capabilities:
+  majorVersion: "1"
+  minorVersion: "29"
+
+tests:
+  - it: should stage exactly one node-template init container named marimo-template
+    set:
+      agent:
+        enabled: true
+      marimo:
+        sourceTag: "src-abc123"
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 2
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: marimo-template
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/aqora-io/kubimo-marimo:src-abc123
+      - equal:
+          path: spec.template.spec.initContainers[1].name
+          value: node-driver-registrar

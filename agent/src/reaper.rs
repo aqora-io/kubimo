@@ -18,8 +18,9 @@ use crate::store::SlotStore;
 
 /// How often to sweep.
 ///
-/// Slots are cheap to keep (a few MiB of real disk each, since the venv is
-/// reflinked) and expensive to lose, so this is deliberately unhurried.
+/// Slots are cheap to keep (a few MiB of real disk each, since the node
+/// template is reflinked) and expensive to lose, so this is deliberately
+/// unhurried.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
 /// How long a flushed, unpublished slot is kept before being dropped.

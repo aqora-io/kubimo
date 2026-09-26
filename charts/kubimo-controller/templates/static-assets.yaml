@@ -10,16 +10,14 @@ marimo at it via KUBIMO__RUNNER_ASSET_BASE_PATH → KUBIMO_ASSET_URL →
 `--asset-url` (see templates/deployment.yaml and controller/src/config.rs).
 
 The tag is derived as text-after-last-colon, the same rule
-Config::runner_asset_url uses — both sides read the images rendered by
-kubimo-controller.marimoImage/.marimoCondaImage, so they cannot drift apart.
+Config::runner_asset_url uses — both sides read the image rendered by
+kubimo-controller.marimoImage, so they cannot drift apart.
 */}}
 {{- if .Values.staticAssets.enabled }}
 {{- $fullname := printf "%s-static-assets" (include "kubimo-controller.fullname" .) }}
 {{- $basePath := .Values.staticAssets.basePath | default "/marimo-assets" }}
 {{- $marimoImage := include "kubimo-controller.marimoImage" . }}
-{{- $condaImage := include "kubimo-controller.marimoCondaImage" . }}
 {{- $marimoTag := $marimoImage | splitList ":" | last }}
-{{- $condaTag := $condaImage | splitList ":" | last }}
 {{- $controller := .Values.controller | default dict }}
 {{- $ingressClassName := $controller.ingressClassName | default "nginx" }}
 {{- $hosts := list }}
@@ -89,12 +87,12 @@ spec:
         app.kubernetes.io/component: static-assets
       annotations:
         # Roll the pod when the served content or config would change.
-        checksum/config: {{ printf "%s|%s|%s" $marimoImage $condaImage $basePath | sha256sum }}
+        checksum/config: {{ printf "%s|%s" $marimoImage $basePath | sha256sum }}
     spec:
       initContainers:
-        # Copy `_static` out of the marimo image(s) into the shared emptyDir,
-        # keyed by tag. Resolved through the interpreter rather than a
-        # hard-coded site-packages path so the uv and pixi layouts both work.
+        # Copy `_static` out of the marimo image into the shared emptyDir, keyed
+        # by tag. Resolved through the interpreter rather than a hard-coded
+        # site-packages path.
         - name: copy-assets
           image: {{ $marimoImage | quote }}
           imagePullPolicy: IfNotPresent
@@ -105,18 +103,6 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-        {{- if ne $marimoTag $condaTag }}
-        - name: copy-assets-conda
-          image: {{ $condaImage | quote }}
-          imagePullPolicy: IfNotPresent
-          command:
-            - /usr/local/bin/python3
-            - -c
-            - "import marimo, pathlib, shutil; shutil.copytree(pathlib.Path(marimo.__file__).parent / '_static', '/data/{{ $condaTag }}', dirs_exist_ok=True)"
-          volumeMounts:
-            - name: data
-              mountPath: /data
-        {{- end }}
       containers:
         - name: nginx
           image: {{ .Values.staticAssets.image | quote }}

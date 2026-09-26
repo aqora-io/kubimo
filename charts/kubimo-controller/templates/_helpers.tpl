@@ -68,19 +68,19 @@ is about to detach. Refusing to render beats discovering it during an upgrade.
 {{- end }}
 
 {{/*
-The marimo image: what runners are started with, and what the agent stages its venv
+The marimo image: what runners are started with, and what the agent stages its node
 template from.
 
 Defined once because the two must resolve to the same image — a mismatch hands runners
-a venv built for a different interpreter than the one they run — and two copies of this
-expression are how that drift happens.
+a template built for a different interpreter than the one they run — and two copies of
+this expression are how that drift happens.
 
 The last-resort default is tagged by the marimo image's own sources (`src-<hash>`,
 written by CI; see scripts/marimo-image-rev) rather than by the chart appVersion. A
 version-derived tag moves on every release, and moving this one is expensive twice over:
 it recreates every runner pod, and it rolls the agent DaemonSet, which destroys each
 node's data volume and re-hydrates every slot on it. `agent.image.sourceTag` does not
-cover this — that protects the agent container, not the venv-template initContainer.
+cover this — that protects the agent container, not the marimo-template initContainer.
 
 `controller.marimoImage` still overrides the whole reference, and `controller` is
 optional in values.yaml, hence the dict guards.
@@ -91,14 +91,6 @@ optional in values.yaml, hence the dict guards.
 {{- $repo := $marimo.repository | default "ghcr.io/aqora-io/kubimo-marimo" -}}
 {{- $tag := $marimo.tag | default $marimo.sourceTag | default .Chart.AppVersion -}}
 {{- $controller.marimoImage | default (printf "%s:%s" $repo $tag) -}}
-{{- end }}
-
-{{- define "kubimo-controller.marimoCondaImage" -}}
-{{- $controller := .Values.controller | default dict -}}
-{{- $marimo := .Values.marimoConda | default dict -}}
-{{- $repo := $marimo.repository | default "ghcr.io/aqora-io/kubimo-conda-marimo" -}}
-{{- $tag := $marimo.tag | default $marimo.sourceTag | default .Chart.AppVersion -}}
-{{- $controller.marimoCondaImage | default (printf "%s:%s" $repo $tag) -}}
 {{- end }}
 
 {{/*
