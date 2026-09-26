@@ -55,8 +55,9 @@ pub const POOL_TEMPLATE_HASH_ANNOTATION: &str = "kubimo.aqora.io/pool-template-h
 /// attributes.
 pub const POOLED_VOLUME_ATTRIBUTE: &str = "pooled";
 
-/// Environment variable telling `start.sh` it is pre-booting for a pool: skip
-/// the dependency sync now and poll for [`CLAIM_MARKER_RELATIVE_PATH`] instead.
+/// Environment variable telling `start.sh` it is pre-booting for a pool: defer
+/// workspace preparation until the claim, which it learns of by polling for
+/// [`CLAIM_MARKER_RELATIVE_PATH`].
 /// An env var rather than a flag so an older image starts normally instead of
 /// crashing on an unknown argument.
 pub const CLAIM_MARKER_ENV: &str = "KUBIMO_CLAIM_MARKER";

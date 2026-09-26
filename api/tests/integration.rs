@@ -389,9 +389,9 @@ async fn test_runner_validation_accepts_equal_min_and_max() {
     .await;
 }
 
-/// The Pool CRD's admission rules: Render and Conda are refused outright, and
-/// command/pythonRuntime are pinned once created. These are the guards that
-/// keep a pool from minting pods its claims could never safely serve.
+/// The Pool CRD's admission rules: Render is refused outright, and the command
+/// and runtime are pinned once created. These are the guards that keep a pool
+/// from minting pods its claims could never safely serve.
 #[tokio::test]
 #[ignore = "requires a running Kubernetes cluster"]
 async fn test_pool_admission_rules() {
@@ -425,23 +425,6 @@ async fn test_pool_admission_rules() {
             "a Render pool must be refused"
         );
 
-        // Conda cannot be pooled yet: its dependency sync cannot run before
-        // marimo boots on a pre-booted pod.
-        let mut conda = kubimo::Pool::new(
-            "test-pool-conda",
-            kubimo::PoolSpec {
-                replicas: 1,
-                command: kubimo::RunnerCommand::Edit,
-                python_runtime: Some(kubimo::WorkspacePythonRuntime::Conda),
-                ..Default::default()
-            },
-        );
-        conda.metadata.namespace = Some(ns.clone());
-        assert!(
-            pools.patch(&conda).await.is_err(),
-            "a Conda pool must be refused"
-        );
-
         // Command is immutable: warm pods were booted with it baked in.
         let mut flipped = kubimo::Pool::new(
             "test-pool",
@@ -457,6 +440,46 @@ async fn test_pool_admission_rules() {
             "changing a pool's command must be refused"
         );
 
+        // Either runtime can be pooled.
+        let mut conda = kubimo::Pool::new(
+            "test-pool-conda",
+            kubimo::PoolSpec {
+                replicas: 1,
+                command: kubimo::RunnerCommand::Edit,
+                python_runtime: Some(kubimo::WorkspacePythonRuntime::Conda),
+                ..Default::default()
+            },
+        );
+        conda.metadata.namespace = Some(ns.clone());
+        pools.patch(&conda).await.expect("a Conda pool applies");
+
+        // The runtime is immutable too: warm pods boot marimo with its
+        // backend. Naming the default a pool already has changes nothing.
+        let pool_with = |python_runtime| {
+            let mut pool = kubimo::Pool::new(
+                "test-pool",
+                kubimo::PoolSpec {
+                    replicas: 1,
+                    command: kubimo::RunnerCommand::Edit,
+                    python_runtime,
+                    ..Default::default()
+                },
+            );
+            pool.metadata.namespace = Some(ns.clone());
+            pool
+        };
+        assert!(
+            pools
+                .patch(&pool_with(Some(kubimo::WorkspacePythonRuntime::Conda)))
+                .await
+                .is_err(),
+            "changing a pool's runtime must be refused"
+        );
+        pools
+            .patch(&pool_with(Some(kubimo::WorkspacePythonRuntime::Uv)))
+            .await
+            .expect("naming the default runtime must be accepted");
+
         // Replicas is a sizing knob and stays mutable.
         let mut resized = kubimo::Pool::new(
             "test-pool",
@@ -471,6 +494,57 @@ async fn test_pool_admission_rules() {
             .patch(&resized)
             .await
             .expect("resizing a pool must be accepted");
+    })
+    .await;
+}
+
+/// A workspace's runtime is pinned once created: its pods, pool claims and
+/// notebook environments are built for one sandbox backend. Absent resolves to
+/// `Uv`, so a server-side apply that starts or stops sending it is accepted.
+#[tokio::test]
+#[ignore = "requires a running Kubernetes cluster"]
+async fn test_workspace_python_runtime_is_pinned() {
+    with_namespace("test-workspace-python-runtime", |client, ns| async move {
+        let workspaces = client.api_namespaced::<Workspace>(&ns);
+        let apply = |name: &'static str, python_runtime| {
+            // storage stays set on every apply: with pythonRuntime the only field
+            // this manager owns, dropping it serializes the spec to `{}` and
+            // server-side apply nulls out the whole thing.
+            let mut workspace = Workspace::new(
+                name,
+                WorkspaceSpec {
+                    python_runtime,
+                    ..spec_with_storage(Some("2Gi"))
+                },
+            );
+            workspace.metadata.namespace = Some(ns.clone());
+            let workspaces = workspaces.clone();
+            async move { workspaces.patch(&workspace).await }
+        };
+        let uv = Some(kubimo::WorkspacePythonRuntime::Uv);
+        let conda = Some(kubimo::WorkspacePythonRuntime::Conda);
+
+        for python_runtime in [None, uv, None] {
+            apply(TEST_WORKSPACE, python_runtime)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("applying pythonRuntime {python_runtime:?} was refused: {e}")
+                });
+        }
+        assert!(
+            apply(TEST_WORKSPACE, conda).await.is_err(),
+            "changing a Uv workspace to Conda must be refused"
+        );
+
+        apply("test-conda-workspace", conda)
+            .await
+            .expect("a Conda workspace applies");
+        for python_runtime in [uv, None] {
+            assert!(
+                apply("test-conda-workspace", python_runtime).await.is_err(),
+                "changing a Conda workspace to {python_runtime:?} must be refused"
+            );
+        }
     })
     .await;
 }

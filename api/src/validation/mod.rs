@@ -14,9 +14,13 @@ pub fn workspace_restore_from_not_indexer_prefix() -> Rule {
     .field_path(".spec.restoreFrom")
 }
 
+/// A workspace's pods, pool claims and notebook environments are all built for
+/// its runtime's sandbox backend, so the runtime cannot change in place.
+/// Compared resolved, absent being `Uv`: under server-side apply, a client that
+/// starts or stops sending the default changes nothing and is not refused.
 pub fn workspace_immutable_fields() -> Rule {
     Rule::new(include_str!("./workspace_immutable_fields.cel"))
-        .message("workspace is immutable")
+        .message("workspace pythonRuntime is immutable")
         .field_path(".spec.pythonRuntime")
 }
 
@@ -35,20 +39,10 @@ pub fn pool_command_not_render() -> Rule {
         .field_path(".spec.command")
 }
 
-/// Conda is excluded from pools for now. A cold conda runner blocks on
-/// `mamba_update_workspace` *before* marimo serves; a pre-booted pool pod
-/// would have to run it after the claim, mutating the environment underneath
-/// kernels a user may already be connecting to.
-pub fn pool_python_runtime_uv() -> Rule {
-    Rule::new(include_str!("./pool_python_runtime_uv.cel"))
-        .message("pools only support the Uv python runtime")
-        .field_path(".spec.pythonRuntime")
-}
-
-/// A warm pod's image and venv template are baked at creation; a pool that
-/// changed runtime or command in place would claim pods built for the old
-/// spec. Replicas, resources and sidecars may change — the pool controller
-/// retires drifted warm pods — but these two identify what a pod *is*.
+/// A warm pod's command and sandbox backend are baked at creation, so a pool
+/// that changed either in place would claim pods built for the old spec;
+/// replicas, resources and sidecars may change (the pool controller retires
+/// drifted warm pods). The runtime is compared resolved, as on a Workspace.
 pub fn pool_immutable_fields() -> Rule {
     Rule::new(include_str!("./pool_immutable_fields.cel"))
         .message("pool command and pythonRuntime are immutable")
@@ -111,13 +105,12 @@ mod tests {
     #[test]
     fn test_runner_cel_compiles() {
         test_compiles(workspace_restore_from_not_indexer_prefix());
-        test_compiles(budget_selector_not_empty());
         test_compiles(workspace_immutable_fields());
+        test_compiles(budget_selector_not_empty());
         test_compiles(runner_immutable_fields());
         test_compiles(runner_max_memory_greater_than_min());
         test_compiles(runner_max_cpu_greater_than_min());
         test_compiles(pool_command_not_render());
-        test_compiles(pool_python_runtime_uv());
         test_compiles(pool_immutable_fields());
         test_compiles(pool_max_memory_greater_than_min());
         test_compiles(pool_max_cpu_greater_than_min());

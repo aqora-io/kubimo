@@ -28,6 +28,33 @@ use crate::resources::Resources;
 /// argument (same contract as the claim marker).
 pub(crate) const ASSET_URL_ENV: &str = "KUBIMO_ASSET_URL";
 
+/// How the workspace's runtime reaches start.sh: the marimo sandbox backend,
+/// `uv` or `pixi`, its notebooks run with. An env var for the same reason as
+/// [`ASSET_URL_ENV`]. Always the controller's, never a spec's own env: the
+/// runtime is the workspace's (or the pool's) to choose.
+pub(crate) const SANDBOX_ENV: &str = "KUBIMO_SANDBOX";
+
+/// `env` with [`SANDBOX_ENV`] set for `runtime`, replacing any copy the spec's
+/// env carried.
+pub(crate) fn with_sandbox_env(env: Vec<EnvVar>, runtime: WorkspacePythonRuntime) -> Vec<EnvVar> {
+    let mut env: Vec<EnvVar> = env
+        .into_iter()
+        .filter(|var| var.name != SANDBOX_ENV)
+        .collect();
+    env.push(EnvVar {
+        name: SANDBOX_ENV.into(),
+        value: Some(runtime.sandbox_backend().into()),
+        ..Default::default()
+    });
+    env
+}
+
+/// Startup probe budget, in 1 s periods. start.sh execs marimo without any
+/// environment sync (kernels build their per-notebook environments lazily),
+/// so one budget fits every command. Changing it later is an immutable
+/// pod-spec change that needs its own replacement handling.
+const STARTUP_PROBE_FAILURE_THRESHOLD: i32 = 90;
+
 /// How the marimo access token reaches start.sh.
 pub(crate) enum TokenSource<'a> {
     /// As a `--token` argument, from `spec.token.value` or a pool's minted
@@ -56,8 +83,8 @@ pub(crate) struct RunnerPodParams<'a> {
     pub port: i32,
     pub origin: Option<String>,
     pub command: RunnerCommand,
-    /// Drives the startup probe budget: conda's dependency sync runs before
-    /// marimo serves.
+    /// The workspace's runtime, or the pool's for a warm pod, reaching start.sh
+    /// as [`SANDBOX_ENV`].
     pub python_runtime: WorkspacePythonRuntime,
     pub cpu: Option<Requirement<CpuQuantity>>,
     pub memory: Option<Requirement<StorageQuantity>>,
@@ -82,7 +109,7 @@ pub(crate) fn build_runner_pod(params: RunnerPodParams<'_>) -> Pod {
         .unwrap_or(&params.base_url)
         .to_string();
     let mut command = cmd!["bash", "/setup/start.sh", "--base-url", params.base_url];
-    let mut env = params.env;
+    let mut env = with_sandbox_env(params.env, params.python_runtime);
     if let Some(asset_url) = params.asset_url {
         env.push(EnvVar {
             name: ASSET_URL_ENV.into(),
@@ -147,10 +174,7 @@ pub(crate) fn build_runner_pod(params: RunnerPodParams<'_>) -> Pod {
         env_from: params.env_from,
         startup_probe: Some(Probe {
             http_get: Some(probe_action.clone()),
-            failure_threshold: Some(match params.python_runtime {
-                WorkspacePythonRuntime::Uv => 90,
-                WorkspacePythonRuntime::Conda => 300,
-            }),
+            failure_threshold: Some(STARTUP_PROBE_FAILURE_THRESHOLD),
             period_seconds: Some(1),
             ..Default::default()
         }),
