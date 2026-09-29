@@ -115,6 +115,30 @@ migrate_workspace() {
     echo "Migrating the legacy workspace failed, starting anyway" >&2
 }
 
+# marimo's experimental isolate_apps serves every session of a notebook from
+# one process in that notebook's environment, instead of a kernel process per
+# session: a viewer joining a running notebook skips the kernel start, and
+# eight sessions took 0.34 GB instead of 1.68 GB. On for Run runners unless
+# their env sets KUBIMO_ISOLATE_APPS=false. marimo only reads it from config,
+# so it is written into the slot's user config, which stays on the node rather
+# than in the workspace archive, and always explicitly: the slot outlives the
+# runner, so an opt-out must overwrite an earlier true.
+isolate_apps() {
+  /usr/local/bin/python3 - "$1" <<'PY' ||
+import sys
+
+import tomlkit
+from marimo._utils.xdg import marimo_config_path
+
+path = marimo_config_path()
+doc = tomlkit.parse(path.read_text()) if path.exists() else tomlkit.document()
+doc.setdefault("experimental", tomlkit.table())["isolate_apps"] = sys.argv[1] == "true"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(tomlkit.dumps(doc))
+PY
+    echo "Setting isolate_apps failed, starting with marimo's config as it is" >&2
+}
+
 # Warm-pool pre-boot. Set (as an env var, never a flag — an older image must
 # start normally rather than crash on an unknown argument) when this pod was
 # minted for a pool: the workspace is only the node template until a claim
@@ -158,6 +182,11 @@ if [[ "$cmd" == "edit" ]]; then
 elif [[ "$cmd" == "run" ]]; then
   export MARIMO_IN_SECURE_ENVIRONMENT=true
   export MARIMO_SESSION_COOKIE_SECURE=true
+  if [[ "${KUBIMO_ISOLATE_APPS:-}" == "false" ]]; then
+    isolate_apps false
+  else
+    isolate_apps true
+  fi
   exec_marimo \
     run \
     --sandbox=pixi \
