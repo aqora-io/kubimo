@@ -274,3 +274,41 @@ def test_seeded_environment_is_reused_offline(monkeypatch):
     )
     assert virtual["__linux"] == "4.19=0"
     assert virtual["__archspec"] == f"1={platform.machine()}"
+
+
+def test_prebuilt_overlay_is_reused_as_is():
+    prebuild = subprocess.run(
+        [sys.executable, str(Path(__file__).parent / "kubimo_prebuild_overlay.py")],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert prebuild.returncode == 0, prebuild.stderr
+    notebook = Path("/home/me/workspace/readme.py")
+    assert not notebook.exists()
+
+    notebook.write_text(HEADER + NOTEBOOK)
+    try:
+        environment = _sync(notebook)
+    finally:
+        notebook.unlink()
+    plan = backends.launch(
+        environment, ["-c", "pass"], backend="pixi", overlay=runtime_overlay()
+    )
+    # What kubimo-uv execs, run directly: its trial launch would otherwise
+    # build a missing overlay out of sight. A reused overlay adds no
+    # ephemeral environment to uv's cache.
+    run = list(plan.argv).index("run")
+    environments = Path(plan.env["UV_CACHE_DIR"]) / "environments-v2"
+    before = sorted(environments.iterdir())
+    result = subprocess.run(
+        ["uv", "run", "--offline", *plan.argv[run + 1 :]],
+        env=dict(plan.env),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert sorted(environments.iterdir()) == before

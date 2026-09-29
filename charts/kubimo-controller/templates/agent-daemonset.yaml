@@ -86,6 +86,18 @@ spec:
                 exit 0
               fi
               rm -rf "$dest.partial"
+              # Pre-build the kernel overlay on this node, so each slot's first
+              # kernel reuses it instead of building its own. Best effort, and
+              # skipped on images that predate the script. SIGINT rather than
+              # timeout's SIGTERM: Python only cleans up on an interrupt.
+              if [ -f /app/kubimo_prebuild_overlay.py ]; then
+                timeout -s INT 300 python3 /app/kubimo_prebuild_overlay.py \
+                  || echo "overlay pre-build failed; slots will build their own"
+              fi
+              # Whatever the template's workspace holds surfaces in every
+              # workspace hydrated on this node, so it must be empty however
+              # the pre-build ended (a SIGKILL leaves its notebook behind).
+              find /home/me/workspace -mindepth 1 -delete
               cp -a /home/me "$dest.partial"
               mv "$dest.partial" "$dest"
               echo "staged node template"
