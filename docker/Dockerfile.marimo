@@ -87,8 +87,10 @@ RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
     --mount=type=cache,target=/var/cache/apt,sharing=locked \
 <<EOF
 apt-get update
+# graphviz puts `dot` on every kernel's PATH, which the graphviz Python
+# package shells out to when it renders.
 apt-get install -y --no-install-recommends \
-  build-essential cmake curl git xz-utils \
+  build-essential cmake curl git graphviz xz-utils \
 EOF
 
 COPY --from=pixi-release /mnt/pixi /usr/local/bin/pixi

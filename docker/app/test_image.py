@@ -62,6 +62,18 @@ direct_url = json.loads(Distribution.from_name("marimo").read_text("direct_url.j
 print(json.dumps({"direct_url": direct_url}))
 """
 
+# Printed by a child launched in a notebook's environment: what the image's
+# `dot` renders, found on the PATH a kernel gets, as the graphviz package
+# finds it.
+RENDER_WITH_DOT = """
+import json, subprocess
+svg = subprocess.run(
+    ["dot", "-Tsvg"], input="digraph { a -> b }", capture_output=True,
+    text=True, check=True,
+).stdout
+print(json.dumps({"svg": svg}))
+"""
+
 # Every proxy pointed at a closed port on loopback: any attempt to reach the
 # network fails immediately instead of hanging, so a trip online shows up as
 # a failure rather than a slow, silent success.
@@ -118,6 +130,16 @@ def test_fork_kernel_overlays_the_built_wheel(tmp_path):
     data = _run_json(environment, CHECK_FORK)
 
     assert "/opt/marimo/dist" in data["direct_url"]["url"]
+
+
+def test_graphviz_renders_from_a_kernel(tmp_path):
+    notebook = tmp_path / "nb.py"
+    notebook.write_text(HEADER + NOTEBOOK)
+
+    environment = _sync(notebook)
+    data = _run_json(environment, RENDER_WITH_DOT)
+
+    assert "<svg" in data["svg"]
 
 
 def test_user_pinned_marimo_is_shadowed(tmp_path):
