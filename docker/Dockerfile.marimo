@@ -157,7 +157,9 @@ WORKDIR /home/${USER}/workspace
 # launch; no cache mounts, so the result lands in this layer. The seeded
 # overlay and the wheel's own cache entries are dropped: uv keys them on the
 # wheel's ctime, which unpacking the image changes, so no slot could reuse
-# them. The workspace itself must stay empty: the agent hydrates it from S3.
+# them; the agent rebuilds them once per node while it stages the template
+# (docker/app/kubimo_prebuild_overlay.py). The workspace itself must stay
+# empty: the agent hydrates it from S3.
 RUN --mount=type=bind,source=docker/setup/seed-notebook.py,target=/mnt/seed-notebook.py \
 <<EOF
 cp /mnt/seed-notebook.py readme.py

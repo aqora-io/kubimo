@@ -28,3 +28,12 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[1].name
           value: node-driver-registrar
+
+  - it: should pre-build the kernel overlay, then empty the workspace, before copying the node template
+    set:
+      agent:
+        enabled: true
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: (?s)timeout -s INT 300 python3 /app/kubimo_prebuild_overlay\.py.*\|\| echo.*find /home/me/workspace -mindepth 1 -delete\s+cp -a /home/me
