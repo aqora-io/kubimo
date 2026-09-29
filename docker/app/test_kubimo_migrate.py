@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -1306,6 +1307,7 @@ def test_wait_for_migrates_once_the_marker_appears(tmp_path):
         {"pyproject.toml": TEMPLATE_PYPROJECT, "readme.py": TEMPLATE_README},
     )
     marker = tmp_path / "claimed"
+    report = tmp_path / "migration"
     before = snapshot(workspace)
     env = {k: v for k, v in os.environ.items() if k != "MARIMO_DEFAULT_REQUIRES_PYTHON"}
     process = subprocess.Popen(
@@ -1316,6 +1318,8 @@ def test_wait_for_migrates_once_the_marker_appears(tmp_path):
             "warn",
             "--wait-for",
             str(marker),
+            "--report",
+            str(report),
             "--system-requirements",
             str(SYSTEM_REQUIREMENTS),
             str(workspace),
@@ -1328,8 +1332,10 @@ def test_wait_for_migrates_once_the_marker_appears(tmp_path):
         time.sleep(1.5)
         assert process.poll() is None
         assert snapshot(workspace) == before
+        assert not report.exists()
 
-        marker.touch()
+        # The agent names the claimed pod in the marker.
+        marker.write_text("uid-1")
         _, stderr = process.communicate(timeout=60)
     finally:
         process.kill()
@@ -1338,6 +1344,65 @@ def test_wait_for_migrates_once_the_marker_appears(tmp_path):
     assert (workspace / "readme.py").read_text().startswith(SEED_HEADER)
     # The summary even at --log-level warn.
     assert "legacy uv workspace notebooks: 1 migrated" in stderr
+    # Named back once the headers are written: the agent acks on that.
+    assert report.read_text() == "uid-1"
+
+
+def test_the_report_names_the_claim_with_nothing_to_migrate(tmp_path):
+    workspace = write(tmp_path / "workspace", {"readme.py": TEMPLATE_README})
+    marker = tmp_path / "claimed"
+    marker.write_text("uid-1\n")
+    report = tmp_path / "migration"
+    report.write_text("pending")
+
+    argv = ["--wait-for", str(marker), "--report", str(report), str(workspace)]
+    assert kubimo_migrate.main(argv) == 0
+    assert report.read_text() == "uid-1"
+
+
+def test_the_report_names_the_claim_even_if_the_migration_fails(tmp_path, monkeypatch):
+    def fail(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(kubimo_migrate, "migrate", fail)
+    marker = tmp_path / "claimed"
+    marker.write_text("uid-1")
+    report = tmp_path / "migration"
+
+    argv = ["--wait-for", str(marker), "--report", str(report), str(tmp_path)]
+    with pytest.raises(RuntimeError, match="boom"):
+        kubimo_migrate.main(argv)
+    # A migration that failed is over all the same: the claim must not wait on it.
+    assert report.read_text() == "uid-1"
+
+
+def test_waiting_for_a_claim_prepares_the_migration_ahead_of_it(tmp_path, monkeypatch):
+    prepared = object()
+    monkeypatch.setattr(kubimo_migrate.SystemPackages, "installed", lambda: prepared)
+    received = []
+
+    def migrate(workspace, **kwargs):
+        received.append(kwargs["system"])
+        return 0
+
+    monkeypatch.setattr(kubimo_migrate, "migrate", migrate)
+    marker = tmp_path / "claimed"
+    claim = threading.Timer(0.5, marker.write_text, ["uid-1"])
+    claim.start()
+    try:
+        argv = ["--wait-for", str(marker), str(tmp_path)]
+        assert kubimo_migrate.main(argv) == 0
+    finally:
+        claim.cancel()
+    # Scanned before the claim, not after it.
+    assert received == [prepared]
+
+
+def test_report_needs_wait_for(tmp_path):
+    report = tmp_path / "migration"
+    with pytest.raises(SystemExit):
+        kubimo_migrate.main(["--report", str(report), str(tmp_path)])
+    assert not report.exists()
 
 
 def test_dry_run_prints_the_plan_and_writes_nothing(tmp_path, capsys):
