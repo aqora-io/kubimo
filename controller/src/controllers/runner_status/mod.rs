@@ -218,9 +218,27 @@ fn poll_deferred(runner: &Runner, conditions: &[K8sCondition]) -> bool {
         && !conditions::volume_is_bound(conditions)
 }
 
-#[derive(Debug, Clone, Default)]
+/// Bounds on one poll of a runner's API. Without them, a Service that is not
+/// routable yet keeps the request in the kernel's SYN retries for about two
+/// minutes before the poll gives up.
+const POLL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const POLL_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone)]
 struct RunnerStatusReconciler {
     client: reqwest::Client,
+}
+
+impl Default for RunnerStatusReconciler {
+    fn default() -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .connect_timeout(POLL_CONNECT_TIMEOUT)
+                .timeout(POLL_TIMEOUT)
+                .build()
+                .expect("failed to build the runner poll client"),
+        }
+    }
 }
 
 impl RunnerStatusReconciler {
@@ -340,6 +358,16 @@ impl Reconciler for RunnerStatusReconciler {
         let startup_complete = self
             .apply_startup_conditions(ctx, runner, &mut status)
             .await?;
+        // Clients gate on these conditions (the platform calls a runner ready
+        // once they are all True), so they are persisted before the poll below
+        // and never wait on its round trip to the runner.
+        let mut persisted = runner.status.clone();
+        if Some(&status) != persisted.as_ref() {
+            let mut patched = runner.clone();
+            patched.status = Some(status.clone());
+            ctx.api_for(runner)?.patch_status(&patched).await?;
+            persisted = patched.status;
+        }
         let action = if poll_deferred(runner, status.conditions.as_deref().unwrap_or_default()) {
             Action::await_change()
         } else {
@@ -356,7 +384,7 @@ impl Reconciler for RunnerStatusReconciler {
             Utc::now().timestamp(),
             Duration::from_secs(ctx.config.runner_status.interval_secs),
         );
-        if Some(&status) != runner.status.as_ref() {
+        if Some(&status) != persisted.as_ref() {
             let mut patched = runner.clone();
             patched.status = Some(status);
             ctx.api_for(runner)?.patch_status(&patched).await?;
@@ -478,6 +506,28 @@ mod tests {
         });
         assert!(poll_deferred(&runner, &[]));
         assert!(!poll_deferred(&runner, &volume_bound()));
+    }
+
+    /// A runner that accepts the connection but never answers fails the poll
+    /// at `POLL_TIMEOUT` instead of holding the reconcile indefinitely.
+    #[tokio::test]
+    async fn an_unresponsive_runner_fails_the_poll_in_bounded_time() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = RunnerApi {
+            client: RunnerStatusReconciler::default().client,
+            api_endpoint: format!("http://{}/api/", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+            token: None,
+        };
+        let err = tokio::time::timeout(POLL_TIMEOUT + Duration::from_secs(2), api.connections())
+            .await
+            .expect("the poll outlived its timeout")
+            .unwrap_err();
+        assert!(
+            matches!(&err, RunnerStatusError::Reqwest(err) if err.is_timeout()),
+            "{err:?}"
+        );
     }
 
     /// The wire contract shared with marimo and marimo-ssr.
