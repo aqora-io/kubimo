@@ -231,6 +231,9 @@ elif [[ "$cmd" == "render" ]]; then
     argv+=(--token "$kubimo_token")
   fi
 
+  # React, which marimo-ssr loads from node_modules, picks its build from
+  # this at runtime; unset, pages render with the slower development build.
+  export NODE_ENV=production
   exec /usr/local/bin/marimo-ssr serve "${argv[@]}" "$ws"
 
 elif [[ "$cmd" == "cache" ]]; then

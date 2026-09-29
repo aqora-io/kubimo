@@ -2,9 +2,10 @@
 
 The token reaches marimo on stdin alone, never argv, the environment kernels
 inherit or the log; run mode serves notebooks from app hosts unless opted out;
-and a warm pod reports its claim-time migration in the order the agent relies
-on. A stray `set -x`, an exported helper or a subshell would regress any of
-these without failing anything else.
+render mode serves pages with React's production build; and a warm pod reports
+its claim-time migration in the order the agent relies on. A stray `set -x`, an
+exported helper or a subshell would regress any of these without failing
+anything else.
 
 Run inside the built image by the `marimo-test` bake target, like
 test_image.py.
@@ -173,6 +174,28 @@ def test_the_token_reaches_marimo_on_stdin_alone(tmp_path, command, token_via):
         # ...and nothing else did: kernels inherit the server's environment.
         assert _processes_holding(TOKEN.encode()) == []
     assert TOKEN not in log.read_text()
+
+
+def _environments_of(program: bytes) -> list[list[bytes]]:
+    """The initial environment of every process running `program`."""
+    found = []
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        with contextlib.suppress(OSError):
+            argv = (process / "cmdline").read_bytes().split(b"\0")
+            if any(arg.endswith(b"/" + program) for arg in argv):
+                found.append((process / "environ").read_bytes().split(b"\0"))
+    return found
+
+
+def test_render_serves_with_react_production_build(tmp_path):
+    workspace = _workspace(tmp_path, {"readme.py": HEADER + NOTEBOOK})
+    with _serving(tmp_path, workspace, "render"):
+        environments = _environments_of(b"marimo-ssr")
+    # React is external to marimo-ssr's bundle and reads this when loaded.
+    assert environments
+    assert all(b"NODE_ENV=production" in env for env in environments)
 
 
 @pytest.mark.parametrize(("opt_out", "isolated"), [(None, True), ("false", False)])
