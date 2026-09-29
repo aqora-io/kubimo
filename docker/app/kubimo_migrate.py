@@ -754,6 +754,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Wait for this file to exist before migrating.",
     )
     parser.add_argument(
+        "--report",
+        type=Path,
+        metavar="FILE",
+        help="Once the migration is over, write the --wait-for marker's content here.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the planned headers and pyproject.toml change; write nothing.",
@@ -766,18 +772,58 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("workspace", type=Path, help="Workspace to migrate.")
     args = parser.parse_args(argv)
+    if args.report is not None and args.wait_for is None:
+        parser.error("--report needs --wait-for")
     logging.basicConfig(level=args.log_level.upper())
+    system = None
     if args.wait_for is not None:
         # A warm-pool pod boots before its claim hydrates the tenant's files.
+        if not args.wait_for.exists():
+            system = _prepare()
         # Polls: the agent writes the marker from the host, and gVisor only
-        # delivers inotify events for writes made inside the sandbox.
+        # delivers inotify events for writes made inside the sandbox. Finely,
+        # as a reported migration holds the claim's ack.
         while not args.wait_for.exists():
-            time.sleep(1)
-    return migrate(
-        args.workspace,
-        dry_run=args.dry_run,
-        system_requirements=args.system_requirements,
-    )
+            time.sleep(0.1)
+    try:
+        return migrate(
+            args.workspace,
+            dry_run=args.dry_run,
+            system_requirements=args.system_requirements,
+            system=system,
+        )
+    finally:
+        if args.report is not None:
+            _report(args.report, args.wait_for)
+
+
+def _prepare() -> SystemPackages | None:
+    """Do what a migration needs regardless of the workspace while the pod
+    waits for its claim: the claim's ack waits for the migration, and under
+    gVisor these imports and the scan of the image's packages take 3.5 s."""
+    try:
+        import kubimo_walk  # noqa: F401
+        from marimo._server.files import directory_scanner  # noqa: F401
+
+        return SystemPackages.installed()
+    except Exception:
+        # Left to the migration itself, as without a claim to wait for.
+        logger.exception("Failed to prepare the migration ahead of the claim")
+        return None
+
+
+def _report(report: Path, marker: Path) -> None:
+    """Tell the agent the migration is over: it acks the claim once `report`
+    names it, as the claim marker does."""
+    try:
+        tmp = report.with_name(f"{report.name}.tmp")
+        tmp.write_text(marker.read_text().strip())
+        os.replace(tmp, report)
+    except OSError as error:
+        logger.warning(
+            f"Could not report the migration done, so the claim's ack waits "
+            f"out its timeout: {error}"
+        )
 
 
 if __name__ == "__main__":

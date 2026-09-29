@@ -4,24 +4,28 @@
 //! it. Everything else about the claim is this agent's job: link the pod's
 //! anonymous slot to the workspace, re-quota it, hydrate the workspace's files
 //! from S3 into the directory marimo is already serving, start the sync
-//! watcher, write the marker file the pod's `start.sh` is polling for, and ack
-//! by annotating the pod `claim-state: bound`. The controller withholds the
-//! Service and Ingress until that ack, so no user ever reaches an unhydrated
-//! workspace.
+//! watcher, write the marker file the pod's `start.sh` is polling for, wait
+//! for the pod to report the legacy-workspace migration that marker starts,
+//! and ack by annotating the pod `claim-state: bound`. The controller withholds
+//! the Service and Ingress until that ack, so no user ever reaches an
+//! unhydrated workspace, or a notebook whose header is still to be written.
 //!
 //! Failure is always acked as `failed` rather than retried silently: the
 //! controller deletes the pod and falls back to a cold start, and the pool
 //! mints a replacement. Better one cold start than a pod bound to a slot in an
 //! unknown state.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::StreamExt;
 use kubimo::k8s_openapi::api::core::v1::Pod;
 use kubimo::kube::runtime::watcher::Event;
 use kubimo::pool::{
     CLAIM_ANNOTATION, CLAIM_ERROR_ANNOTATION, CLAIM_MARKER_RELATIVE_PATH, CLAIM_STATE_ANNOTATION,
-    CLAIM_STATE_BOUND, CLAIM_STATE_FAILED, POOL_LABEL, PoolClaim,
+    CLAIM_STATE_BOUND, CLAIM_STATE_FAILED, MIGRATION_MARKER_RELATIVE_PATH, POOL_LABEL, PoolClaim,
 };
 use kubimo::{Expr, FilterParams, json_patch_macros::*};
 
@@ -31,12 +35,15 @@ use crate::csi::KubimoNode;
 ///
 /// Claims are handled one at a time: they are rare (one per notebook open),
 /// hydration is the only slow step, and serialising them keeps every
-/// slot-store interaction trivially ordered. The watcher relists on restart,
-/// which is what redelivers a claim the agent crashed in the middle of.
+/// slot-store interaction trivially ordered. The wait for the pod's migration
+/// touches no slot-store state, so it runs beside the loop ([`PendingAcks`]).
+/// The watcher relists on restart, which is what redelivers a claim the agent
+/// crashed in the middle of.
 pub async fn run(node: Arc<KubimoNode>, client: kubimo::Client) {
     let params = FilterParams::new()
         .with_fields(("spec.nodeName", node.node_id()))
         .with_labels(Expr::new(POOL_LABEL).exists());
+    let pending = PendingAcks::default();
     loop {
         let mut stream = client.api_global::<Pod>().watch(&params);
         while let Some(event) = stream.next().await {
@@ -51,7 +58,7 @@ pub async fn run(node: Arc<KubimoNode>, client: kubimo::Client) {
             if !wants_binding(&pod) {
                 continue;
             }
-            handle_claim(&node, &pod).await;
+            handle_claim(&node, &pod, &pending).await;
         }
         // The watcher only ends on repeated failures; back off and rebuild it.
         tracing::warn!("pool pod watch ended; restarting it");
@@ -74,7 +81,7 @@ fn wants_binding(pod: &Pod) -> bool {
         )
 }
 
-async fn handle_claim(node: &Arc<KubimoNode>, pod: &Pod) {
+async fn handle_claim(node: &Arc<KubimoNode>, pod: &Pod, pending: &PendingAcks) {
     let (Some(pod_name), Some(pod_namespace), Some(pod_uid)) = (
         pod.metadata.name.as_deref(),
         pod.metadata.namespace.as_deref(),
@@ -106,13 +113,26 @@ async fn handle_claim(node: &Arc<KubimoNode>, pod: &Pod) {
         None => return,
     };
     match bind(node, pod_namespace, pod_name, pod_uid, &claim).await {
-        Ok(()) => {
-            tracing::info!(
-                pod = pod_name,
-                workspace = %claim.workspace,
-                "bound a claimed pool slot"
-            );
-            ack(node, pod_namespace, pod_name, Ok(())).await;
+        Ok(slot_dir) => {
+            let (node, namespace, name) =
+                (node.clone(), pod_namespace.to_owned(), pod_name.to_owned());
+            let workspace = claim.workspace;
+            pending.spawn(slot_dir, pod_uid, move |migration| async move {
+                if migration == Migration::TimedOut {
+                    tracing::warn!(
+                        pod = name.as_str(),
+                        %workspace,
+                        "the pod's migration did not report done in time; acking anyway"
+                    );
+                }
+                tracing::info!(
+                    pod = name.as_str(),
+                    %workspace,
+                    ?migration,
+                    "bound a claimed pool slot"
+                );
+                ack(&node, &namespace, &name, Ok(())).await;
+            });
         }
         Err(reason) => {
             tracing::warn!(
@@ -126,14 +146,15 @@ async fn handle_claim(node: &Arc<KubimoNode>, pod: &Pod) {
     }
 }
 
-/// Execute one claim end to end. Any `Err` is acked as `failed`.
+/// Execute one claim end to end, returning the bound slot's directory. Any
+/// `Err` is acked as `failed`.
 async fn bind(
     node: &Arc<KubimoNode>,
     pod_namespace: &str,
     pod_name: &str,
     pod_uid: &str,
     claim: &PoolClaim,
-) -> Result<(), &'static str> {
+) -> Result<PathBuf, &'static str> {
     let store = node.store();
     let workspace = claim.workspace.as_str();
     // Pool lock first, workspace lock second — the same order everywhere, so
@@ -149,11 +170,8 @@ async fn bind(
         // No anonymous slot. Either this claim already completed and the ack
         // was lost — re-ack it — or the slot genuinely never existed on this
         // node (an agent pod replacement destroyed the data volume).
-        return if claim_already_bound(node, pod_namespace, workspace, pod_uid) {
-            Ok(())
-        } else {
-            Err("no anonymous slot for this pod on this node")
-        };
+        return already_bound_slot(node, pod_namespace, workspace, pod_uid)
+            .ok_or("no anonymous slot for this pod on this node");
     };
     if pool_slot.pod_uid != pod_uid {
         return Err("the anonymous slot belongs to another incarnation of this pod");
@@ -339,33 +357,29 @@ async fn bind(
         )
         .await;
     }
-    Ok(())
+    Ok(dir)
 }
 
-/// Whether this claim already completed before a restart or a lost ack: the
+/// The slot this claim already bound before a restart or a lost ack: the
 /// workspace resolves to a slot on this node whose marker names this pod.
 ///
 /// The workspace is looked up in the pod's own namespace — that is the only
 /// namespace [`bind`] ever adopts into. Deliberately does not restart the
 /// watcher: the credentials were lost with the agent container, which is the
 /// same (pre-existing) gap every published slot has across an agent restart.
-fn claim_already_bound(
+fn already_bound_slot(
     node: &Arc<KubimoNode>,
     pod_namespace: &str,
     workspace: &str,
     pod_uid: &str,
-) -> bool {
+) -> Option<PathBuf> {
     let Ok(Some(slot)) = node.store().lookup(pod_namespace, workspace) else {
-        return false;
+        return None;
     };
-    let marker = node
-        .store()
-        .layout()
-        .slot_dir(&slot.id)
-        .join(CLAIM_MARKER_RELATIVE_PATH);
-    std::fs::read_to_string(marker)
-        .map(|content| content.trim() == pod_uid)
-        .unwrap_or(false)
+    let dir = node.store().layout().slot_dir(&slot.id);
+    std::fs::read_to_string(dir.join(CLAIM_MARKER_RELATIVE_PATH))
+        .is_ok_and(|content| content.trim() == pod_uid)
+        .then_some(dir)
 }
 
 /// Write the marker `start.sh` is polling for, atomically: create-and-rename
@@ -379,6 +393,108 @@ fn write_marker(slot_dir: &std::path::Path, pod_uid: &str) -> std::io::Result<()
     std::fs::write(&tmp, pod_uid)?;
     std::fs::rename(&tmp, &marker)?;
     Ok(())
+}
+
+/// How long an ack waits for the pod's migration. It reports within about
+/// 150 ms of the claim marker, a legacy workspace's included, as the pod
+/// prepares it while it waits for a claim; past this the ack goes out anyway,
+/// as it did before pods reported, rather than hold the user on a migration
+/// that is stuck.
+const MIGRATION_WAIT: Duration = Duration::from_secs(30);
+/// Every claim waits on at least one poll: the pod renames its report into
+/// place, so a fine poll sees it as soon as it lands.
+const MIGRATION_POLL: Duration = Duration::from_millis(50);
+
+/// The pod's claim-time migration, as far as the ack is concerned.
+#[derive(Debug, PartialEq)]
+enum Migration {
+    /// No report: an older image or controller, or a claim that beat
+    /// `start.sh`, which then migrates before marimo serves anything.
+    NotReported,
+    /// Reported done after this long.
+    Done(Duration),
+    /// Still not done when the wait ran out.
+    TimedOut,
+}
+
+/// Claims whose ack waits for the pod's migration report, by pod uid.
+///
+/// The wait runs beside the claim loop rather than in it: a pod that never
+/// reports (deleted mid-claim, its migration process gone) would otherwise
+/// hold every other claim on the node for [`MIGRATION_WAIT`]. One wait per
+/// claim: watch events for the pod that were queued before its ack re-enter
+/// [`handle_claim`] and join the wait already under way.
+#[derive(Clone, Default)]
+struct PendingAcks(Arc<Mutex<HashSet<String>>>);
+
+impl PendingAcks {
+    /// Run `ack` once the pod reports its migration or the wait runs out,
+    /// without waiting for either. Returns whether a wait started, which it
+    /// does not while this claim's ack is already waiting.
+    fn spawn<F, Fut>(&self, slot_dir: PathBuf, pod_uid: &str, ack: F) -> bool
+    where
+        F: FnOnce(Migration) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        if !self.lock().insert(pod_uid.to_owned()) {
+            return false;
+        }
+        let pending = self.clone();
+        let pod_uid = pod_uid.to_owned();
+        tokio::spawn(async move {
+            let migration = wait_for_migration(&slot_dir, &pod_uid, MIGRATION_WAIT).await;
+            // Released before the ack, so an ack that fails (or panics) never
+            // keeps a later event for this claim from waiting and acking again.
+            pending.lock().remove(&pod_uid);
+            ack(migration).await;
+        });
+        true
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        match self.0.lock() {
+            Ok(waiting) => waiting,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+/// Wait for the pod to report the migration the claim marker starts
+/// ([`MIGRATION_MARKER_RELATIVE_PATH`] naming this pod), so the ack, and with
+/// it the first session, never beats the notebook headers it writes.
+async fn wait_for_migration(slot_dir: &Path, pod_uid: &str, timeout: Duration) -> Migration {
+    let report = slot_dir.join(MIGRATION_MARKER_RELATIVE_PATH);
+    let start = tokio::time::Instant::now();
+    loop {
+        match read_report(&report) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Migration::NotReported;
+            }
+            Ok(content) if content.trim() == pod_uid => return Migration::Done(start.elapsed()),
+            // Pending, or not a report the pod wrote (a link, a FIFO): only
+            // the pod naming this claim ends the wait early.
+            _ => {}
+        }
+        if start.elapsed() >= timeout {
+            return Migration::TimedOut;
+        }
+        tokio::time::sleep(MIGRATION_POLL).await;
+    }
+}
+
+/// Read the report the way the pod leaves it. This agent runs as root and the
+/// pod's user owns the file, so it follows no link, never blocks on a FIFO, and
+/// reads no more than a pod uid needs.
+fn read_report(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let mut content = String::new();
+    file.take(64).read_to_string(&mut content)?;
+    Ok(content)
 }
 
 /// Record the claim's outcome on the pod. Best-effort with one retry: a lost
@@ -469,5 +585,82 @@ mod tests {
         // Idempotent: a re-run replaces it in place.
         write_marker(dir.path(), "uid-1").unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "uid-1");
+    }
+
+    /// No report acks at once; a pending one holds the ack until the pod names
+    /// this claim, and a report naming another pod never releases it.
+    #[tokio::test]
+    async fn the_ack_waits_for_the_pods_migration_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join(MIGRATION_MARKER_RELATIVE_PATH);
+        assert_eq!(
+            wait_for_migration(dir.path(), "uid-1", MIGRATION_WAIT).await,
+            Migration::NotReported
+        );
+
+        std::fs::write(&report, "pending").unwrap();
+        let pod = {
+            let report = report.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                std::fs::write(&report, "uid-1\n").unwrap();
+            })
+        };
+        assert!(matches!(
+            wait_for_migration(dir.path(), "uid-1", MIGRATION_WAIT).await,
+            Migration::Done(_)
+        ));
+        pod.await.unwrap();
+
+        std::fs::write(&report, "uid-2").unwrap();
+        assert_eq!(
+            wait_for_migration(dir.path(), "uid-1", Duration::from_millis(200)).await,
+            Migration::TimedOut
+        );
+    }
+
+    /// The wait runs beside the claim loop: spawning it returns at once, a
+    /// second event for the same claim joins the wait under way instead of
+    /// starting another, and the one ack runs when the pod reports.
+    #[tokio::test]
+    async fn an_ack_waits_for_the_migration_beside_the_claim_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join(MIGRATION_MARKER_RELATIVE_PATH);
+        std::fs::write(&report, "pending").unwrap();
+        let pending = PendingAcks::default();
+        let (acked, mut acks) = tokio::sync::mpsc::unbounded_channel();
+        let ack = |acked: tokio::sync::mpsc::UnboundedSender<Migration>| {
+            move |migration| async move { acked.send(migration).unwrap() }
+        };
+
+        assert!(pending.spawn(dir.path().to_owned(), "uid-1", ack(acked.clone())));
+        assert!(!pending.spawn(dir.path().to_owned(), "uid-1", ack(acked.clone())));
+        let quiet = Duration::from_millis(200);
+        assert!(tokio::time::timeout(quiet, acks.recv()).await.is_err());
+
+        std::fs::write(&report, "uid-1").unwrap();
+        let migration = tokio::time::timeout(Duration::from_secs(5), acks.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(migration, Migration::Done(_)));
+        assert!(tokio::time::timeout(quiet, acks.recv()).await.is_err());
+        // Settled: a later event for the claim waits (and acks) again.
+        assert!(pending.spawn(dir.path().to_owned(), "uid-1", ack(acked)));
+    }
+
+    /// The pod's user owns the report: a link in its place is not followed,
+    /// even to a file naming the claim.
+    #[tokio::test]
+    async fn a_linked_report_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::write(&elsewhere, "uid-1").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.path().join(MIGRATION_MARKER_RELATIVE_PATH))
+            .unwrap();
+        assert_eq!(
+            wait_for_migration(dir.path(), "uid-1", Duration::from_millis(200)).await,
+            Migration::TimedOut
+        );
     }
 }

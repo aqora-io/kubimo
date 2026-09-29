@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 use kubimo::k8s_openapi::api::core::v1::{EnvVar, Pod, Secret, SecretVolumeSource, Volume};
 use kubimo::kube::api::ObjectMeta;
 use kubimo::pool::{
-    CLAIM_MARKER_ENV, CLAIM_MARKER_RELATIVE_PATH, POOL_LABEL, POOL_STATE_LABEL, POOL_STATE_WARM,
+    CLAIM_MARKER_ENV, CLAIM_MARKER_RELATIVE_PATH, MIGRATION_MARKER_ENV,
+    MIGRATION_MARKER_RELATIVE_PATH, POOL_LABEL, POOL_STATE_LABEL, POOL_STATE_WARM,
     POOL_TEMPLATE_HASH_ANNOTATION, WARM_BASE_URL_ANNOTATION, WARM_TOKEN_ANNOTATION,
 };
 use kubimo::{Pool, prelude::*};
@@ -114,6 +115,14 @@ pub(crate) fn build_warm_pod(
         name: CLAIM_MARKER_ENV.to_string(),
         value: Some(format!(
             "{dir}/{CLAIM_MARKER_RELATIVE_PATH}",
+            dir = slot_volume::MOUNT_DIR
+        )),
+        ..Default::default()
+    });
+    env.push(EnvVar {
+        name: MIGRATION_MARKER_ENV.to_string(),
+        value: Some(format!(
+            "{dir}/{MIGRATION_MARKER_RELATIVE_PATH}",
             dir = slot_volume::MOUNT_DIR
         )),
         ..Default::default()
@@ -303,6 +312,12 @@ mod tests {
         let env = pod.spec.as_ref().unwrap().containers[0].env.as_ref();
         assert!(env.unwrap().iter().any(|var| {
             var.name == CLAIM_MARKER_ENV && var.value.as_deref() == Some("/home/me/.kubimo/claimed")
+        }));
+        // Where the pod reports the migration the claim starts, outside the
+        // root-owned directory of the claim marker.
+        assert!(env.unwrap().iter().any(|var| {
+            var.name == MIGRATION_MARKER_ENV
+                && var.value.as_deref() == Some("/home/me/.kubimo-migration")
         }));
     }
 

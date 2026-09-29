@@ -111,7 +111,7 @@ exec_marimo() {
 # and exits early for every other workspace. A failure is logged and does not
 # stop the runner.
 migrate_workspace() {
-  /usr/local/bin/python3 /app/kubimo_migrate.py --log-level "$log" "$ws" ||
+  /usr/local/bin/python3 /app/kubimo_migrate.py --log-level "$log" "$@" "$ws" ||
     echo "Migrating the legacy workspace failed, starting anyway" >&2
 }
 
@@ -150,10 +150,28 @@ PY
 # survives the exec below; marimo stays PID 1 so signal handling is unchanged.
 # A probe restart re-runs this script with the marker already present and
 # migrates in the foreground like any cold runner — idempotent by construction.
+#
+# The agent holds its ack, and with it every session, until the migration
+# reports done through KUBIMO_MIGRATION_MARKER; a session planned first would
+# give a legacy notebook the server's Python for as long as it stays open.
+# "pending" goes down before the marker check, so whichever comes first, this
+# line or the claim, either the agent waits for the report or the migration
+# runs in the foreground below, before marimo serves anything.
 if [[ "$cmd" == "edit" || "$cmd" == "run" ]]; then
-  if [[ -n "${KUBIMO_CLAIM_MARKER:-}" && ! -e "$KUBIMO_CLAIM_MARKER" ]]; then
-    /usr/local/bin/python3 /app/kubimo_migrate.py --log-level "$log" \
-      --wait-for "$KUBIMO_CLAIM_MARKER" "$ws" &
+  if [[ -n "${KUBIMO_CLAIM_MARKER:-}" ]]; then
+    claim_args=(--wait-for "$KUBIMO_CLAIM_MARKER")
+    if [[ -n "${KUBIMO_MIGRATION_MARKER:-}" ]]; then
+      printf pending >"$KUBIMO_MIGRATION_MARKER.tmp" &&
+        mv -f "$KUBIMO_MIGRATION_MARKER.tmp" "$KUBIMO_MIGRATION_MARKER" ||
+        echo "Could not report the migration pending; a claim will not wait for it" >&2
+      claim_args+=(--report "$KUBIMO_MIGRATION_MARKER")
+    fi
+    if [[ ! -e "$KUBIMO_CLAIM_MARKER" ]]; then
+      /usr/local/bin/python3 /app/kubimo_migrate.py --log-level "$log" \
+        "${claim_args[@]}" "$ws" &
+    else
+      migrate_workspace "${claim_args[@]}"
+    fi
   else
     migrate_workspace
   fi

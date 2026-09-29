@@ -67,6 +67,20 @@ pub const CLAIM_MARKER_ENV: &str = "KUBIMO_CLAIM_MARKER";
 /// subtree, so the indexer never uploads it.
 pub const CLAIM_MARKER_RELATIVE_PATH: &str = ".kubimo/claimed";
 
+/// Environment variable naming the file a warm pod reports its claim-time
+/// migration through: [`MIGRATION_MARKER_RELATIVE_PATH`] under the slot root.
+/// Unset (an older controller), the pod migrates without reporting.
+pub const MIGRATION_MARKER_ENV: &str = "KUBIMO_MIGRATION_MARKER";
+
+/// Where, relative to the slot root, a warm pod reports on the legacy-workspace
+/// migration the claim marker starts: `pending` from boot, then the claim
+/// marker's content once that migration is over, whatever its outcome. The
+/// agent holds the ack until then, so no session can plan a notebook's
+/// environment before the migration has written its header. A pod with no
+/// report (an older image) is acked at once. Written by the pod's user, so
+/// outside the root-owned directory of the claim marker.
+pub const MIGRATION_MARKER_RELATIVE_PATH: &str = ".kubimo-migration";
+
 /// The payload of [`CLAIM_ANNOTATION`]: everything the agent needs to turn a
 /// pod's anonymous slot into the workspace's slot. Carries no credentials —
 /// the agent holds the S3 secret kubelet delivered at NodePublishVolume, which
