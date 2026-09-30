@@ -6,8 +6,12 @@
 # of cold-starting — the agent links the slot to the workspace, hydrates it
 # from S3 and acks, and only then does the controller create the Service and
 # Ingress. Anything that makes the runner ineligible (different command,
-# resources, env, sidecars, or S3 secret; or the pool being empty)
+# runtime, resources, env, sidecars, or S3 secret; or the pool being empty)
 # silently falls back to a cold start.
+#
+# A warm pod boots marimo with its pool's sandbox backend, so each runtime
+# needs pools of its own: `pythonRuntime: Conda` serves Conda workspaces;
+# absent (or `Uv`) serves Uv ones.
 #
 # IMPORTANT — consumers must read the effective URL from the Runner *status*:
 # a claimed pod serves `status.claim.ingressPath` with `status.claim.token`,
@@ -23,6 +27,7 @@ metadata:
 spec:
   replicas: 2
   command: "Edit" # Edit or Run; Render cannot be pooled (read-only slots)
+  # pythonRuntime: "Conda"     # the backend warm pods boot with; absent is Uv. Immutable
   # cpu: { min: "250m", max: "2" }     # a claiming runner's resources must match
   # memory: { min: "512Mi", max: "2Gi" }
   # env: []                    # baseline env; a claiming runner's env must be a subset

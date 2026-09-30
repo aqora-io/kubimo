@@ -1,14 +1,21 @@
 #!/bin/bash
-# The uv marimo launches kernels through (MARIMO_PIXI_UV), offline first.
+# The uv marimo runs, offline first: for the pixi backend's kernel launches
+# (MARIMO_PIXI_UV) and for everything the uv backend does (MARIMO_UV).
 #
 # A kernel runs `uv run ... --with <this image's marimo wheel> -- python ...`
-# to overlay marimo on its notebook's pixi environment. uv keys a file://
-# wheel in its cache on the file's ctime, which unpacking the image resets,
-# so a build-time overlay could never match: it isn't shipped, and each slot
+# to overlay marimo on its notebook's environment. uv keys a file:// wheel in
+# its cache on the file's ctime, which unpacking the image resets, so a
+# build-time overlay could never match: it isn't shipped, and each slot
 # builds its own offline. Every other package it needs is in the seeded
 # cache, and PyPI must not gate a kernel start, so a launch that can run
 # offline does; only one that cannot (a notebook on another Python, say) goes
 # online.
+#
+# The uv backend also syncs a notebook's environment before every start, and
+# `uv sync` re-resolves the manifest each time; one the cache can answer
+# needs no index, so only a manifest that names something new goes online.
+# Adding a package and reading its resolved version (`uv add`, `uv tree`)
+# always go online, so a pin never comes from a stale cache.
 set -euo pipefail
 
 uv=/usr/local/bin/uv
@@ -28,6 +35,15 @@ if [[ "${1:-}" == "run" ]]; then
     fi
     options+=("$arg")
   done
+fi
+
+if [[ "${1:-}" == "sync" ]]; then
+  # marimo reads the sync's report from stdout, so only the attempt that
+  # succeeds may print one, and the offline attempt's complaints go nowhere.
+  if report=$("$uv" sync --offline "${@:2}" </dev/null 2>/dev/null); then
+    printf '%s\n' "$report"
+    exit 0
+  fi
 fi
 
 exec "$uv" "$@"

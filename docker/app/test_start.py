@@ -2,10 +2,11 @@
 
 The token reaches marimo on stdin alone, never argv, the environment kernels
 inherit or the log; run mode serves notebooks from app hosts unless opted out;
-render mode serves pages with React's production build; and a warm pod reports
-its claim-time migration in the order the agent relies on. A stray `set -x`, an
-exported helper or a subshell would regress any of these without failing
-anything else.
+edit and run use the sandbox backend KUBIMO_SANDBOX names; render mode serves
+pages with React's production build; and a warm pod reports its claim-time
+migration in the order the agent relies on. A stray `set -x`, an exported
+helper or a subshell would regress any of these without failing anything
+else.
 
 Run inside the built image by the `marimo-test` bake target, like
 test_image.py.
@@ -196,6 +197,50 @@ def test_render_serves_with_react_production_build(tmp_path):
     # React is external to marimo-ssr's bundle and reads this when loaded.
     assert environments
     assert all(b"NODE_ENV=production" in env for env in environments)
+
+
+def _argvs_of(program: bytes) -> list[list[bytes]]:
+    """The argv of every process running `program`."""
+    found = []
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        with contextlib.suppress(OSError):
+            argv = (process / "cmdline").read_bytes().split(b"\0")
+            if any(arg.endswith(b"/" + program) for arg in argv):
+                found.append(argv)
+    return found
+
+
+@pytest.mark.parametrize(
+    ("variable", "backend"), [(None, b"pixi"), ("uv", b"uv"), ("pixi", b"pixi")]
+)
+@pytest.mark.parametrize("command", ["edit", "run"])
+def test_the_sandbox_backend_follows_kubimo_sandbox(
+    tmp_path, command, variable, backend
+):
+    workspace = _workspace(tmp_path, {"readme.py": HEADER + NOTEBOOK})
+    env = {} if variable is None else {"KUBIMO_SANDBOX": variable}
+    with _serving(tmp_path, workspace, command, env=env):
+        servers = _argvs_of(b"marimo")
+    assert servers
+    for argv in servers:
+        assert b"--sandbox=" + backend in argv, argv
+
+
+def test_an_unknown_sandbox_backend_is_refused(tmp_path):
+    workspace = _workspace(tmp_path, {"readme.py": HEADER + NOTEBOOK})
+    result = subprocess.run(
+        ["bash", START, "edit", "--host", "127.0.0.1", "--port", str(_free_port())],
+        cwd=workspace,
+        env={**os.environ, "KUBIMO_SANDBOX": "conda", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "Unknown KUBIMO_SANDBOX conda" in result.stderr
 
 
 @pytest.mark.parametrize(("opt_out", "isolated"), [(None, True), ("false", False)])

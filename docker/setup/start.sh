@@ -68,6 +68,16 @@ done
 kubimo_token="${kubimo_token:-${MARIMO_TOKEN:-}}"
 unset MARIMO_TOKEN
 
+# The sandbox backend this pod's notebooks run with, from its workspace's
+# runtime (its pool's, on a warm pod). An env var, like KUBIMO_ASSET_URL. The
+# controller always sets it; unset is pixi, which this image ran before the
+# runtime chose and which handles anything uv does.
+sandbox="${KUBIMO_SANDBOX:-pixi}"
+if [[ "$sandbox" != "uv" && "$sandbox" != "pixi" ]]; then
+  echo "Unknown KUBIMO_SANDBOX $sandbox" >&2
+  exit 1
+fi
+
 # Unset kubernetes env vars
 for name in $(env | sed -n 's/^\(KUBERNETES[^=]*\)=.*/\1/p'); do
   unset "$name"
@@ -111,7 +121,8 @@ exec_marimo() {
 # and exits early for every other workspace. A failure is logged and does not
 # stop the runner.
 migrate_workspace() {
-  /usr/local/bin/python3 /app/kubimo_migrate.py --log-level "$log" "$@" "$ws" ||
+  /usr/local/bin/python3 /app/kubimo_migrate.py --log-level "$log" \
+    --backend "$sandbox" "$@" "$ws" ||
     echo "Migrating the legacy workspace failed, starting anyway" >&2
 }
 
@@ -168,7 +179,7 @@ if [[ "$cmd" == "edit" || "$cmd" == "run" ]]; then
     fi
     if [[ ! -e "$KUBIMO_CLAIM_MARKER" ]]; then
       /usr/local/bin/python3 /app/kubimo_migrate.py --log-level "$log" \
-        "${claim_args[@]}" "$ws" &
+        --backend "$sandbox" "${claim_args[@]}" "$ws" &
     else
       migrate_workspace "${claim_args[@]}"
     fi
@@ -177,8 +188,8 @@ if [[ "$cmd" == "edit" || "$cmd" == "run" ]]; then
   fi
 fi
 
-# --sandbox=pixi on a directory runs each notebook's kernel in the pixi
-# environment its PEP 723 header describes, with this image's marimo wheel
+# --sandbox on a directory runs each notebook's kernel in the environment its
+# PEP 723 header describes, built by $sandbox, with this image's marimo wheel
 # overlaid (MARIMO_RUNTIME_WHEEL); nothing is synced before marimo starts.
 if [[ "$cmd" == "edit" ]]; then
   export MARIMO_IN_SECURE_ENVIRONMENT=true
@@ -189,7 +200,7 @@ if [[ "$cmd" == "edit" ]]; then
   export MARIMO_SERVER_OVERLAY=1
   exec_marimo \
     edit \
-    --sandbox=pixi \
+    --sandbox="$sandbox" \
     --skip-update-check \
     --headless \
     --watch \
@@ -207,7 +218,7 @@ elif [[ "$cmd" == "run" ]]; then
   fi
   exec_marimo \
     run \
-    --sandbox=pixi \
+    --sandbox="$sandbox" \
     --headless \
     --watch \
     --allow-origins='*' \
@@ -238,7 +249,8 @@ elif [[ "$cmd" == "render" ]]; then
 
 elif [[ "$cmd" == "cache" ]]; then
   migrate_workspace
-  exec /usr/local/bin/python3 /app/cache.py --include-code --log-level="$log" "$ws"
+  exec /usr/local/bin/python3 /app/cache.py --include-code --log-level="$log" \
+    --backend "$sandbox" "$ws"
 
 else
   echo "Unknown command $cmd"
