@@ -205,6 +205,8 @@ class _Headers:
     # and what their kernels imported undeclared.
     sources: dict[str, dict | None]
     implicit: _ImplicitPackages | None
+    # The sandbox backend the workspace's runners build environments with.
+    backend: str = "pixi"
 
     def block(self, notebook: Path, text: str) -> str:
         """The `# /// script` block for `notebook`, whose source is `text`."""
@@ -215,13 +217,24 @@ class _Headers:
             name = _name(requirement)
             if name not in self.sources:
                 dependencies.append(requirement)
-            elif self.sources[name] is not None:
+            elif self.sources[name] is None:
+                continue
+            elif self.backend == "uv":
+                # uv keeps the requirement and reads its source apart.
+                dependencies.append(requirement)
+                sourced[name] = self.sources[name]
+            else:
                 sourced[name] = self.sources[name] | _extras(requirement)
+        pixi, uv = self.pixi, {}
         # Only uv workspaces have sources, and no [tool.pixi] tables of their own.
-        pixi = {**self.pixi, "pypi-dependencies": sourced} if sourced else self.pixi
+        if sourced and self.backend == "uv":
+            uv = {"sources": sourced}
+        elif sourced:
+            pixi = {**self.pixi, "pypi-dependencies": sourced}
         if notebook.parent != self.root:
-            pixi = _rebased(pixi, os.path.relpath(self.root, notebook.parent))
-        return _render(self.requires_python, dependencies, pixi)
+            to_root = os.path.relpath(self.root, notebook.parent)
+            pixi, uv = _rebased(pixi, to_root), _rebased(uv, to_root)
+        return _render(self.requires_python, dependencies, pixi, uv, self.backend)
 
 
 def migrate(
@@ -230,6 +243,7 @@ def migrate(
     dry_run: bool = False,
     system_requirements: Path = SYSTEM_REQUIREMENTS,
     system: SystemPackages | None = None,
+    backend: str = "pixi",
 ) -> int:
     """Migrate `workspace` if it is a legacy one; returns the exit code."""
     pyproject = _load_toml(workspace / "pyproject.toml")
@@ -246,7 +260,7 @@ def migrate(
         from kubimo_walk import find_files
         from marimo._server.files.directory_scanner import is_marimo_app
 
-        headers = _plan(root, flavour, pyproject, system_requirements, system)
+        headers = _plan(root, flavour, pyproject, system_requirements, system, backend)
         notebooks = [
             path
             for path in find_files(root, (".py", ".md", ".qmd"))
@@ -312,6 +326,7 @@ def _plan(
     pyproject: dict,
     system_requirements: Path,
     system: SystemPackages | None,
+    backend: str = "pixi",
 ) -> _Headers:
     """The headers the notebooks of a legacy `flavour` workspace get."""
     requires_python = (
@@ -326,9 +341,14 @@ def _plan(
             for requirement in _lookup(pyproject, "project", "dependencies") or []
         ]
         sources = _from_uv_sources(pyproject)
-        return _Headers(root, requires_python, declared, {}, sources, implicit)
+        return _Headers(root, requires_python, declared, {}, sources, implicit, backend)
     declared, pixi = _from_pixi(_load_toml(root / "pixi.toml"))
-    return _Headers(root, requires_python, declared, pixi, {}, None)
+    if backend == "uv" and pixi:
+        logger.warning(
+            "This workspace runs uv, which ignores the [tool.pixi] tables its "
+            "pixi.toml is carried into: its conda dependencies need the Conda runtime"
+        )
+    return _Headers(root, requires_python, declared, pixi, {}, None, backend)
 
 
 def _migrate_notebook(path: Path, name: str, headers: _Headers, dry_run: bool) -> str:
@@ -504,7 +524,13 @@ def _dependencies(declared: list[str], inferred: list[str]) -> list[str]:
     return dependencies
 
 
-def _render(requires_python: str, dependencies: list[str], pixi: dict) -> str:
+def _render(
+    requires_python: str,
+    dependencies: list[str],
+    pixi: dict,
+    uv: dict | None = None,
+    backend: str = "pixi",
+) -> str:
     """The `# /// script` block."""
     import tomlkit
     from marimo._environments.script_metadata import wrap_block
@@ -512,20 +538,24 @@ def _render(requires_python: str, dependencies: list[str], pixi: dict) -> str:
     document = tomlkit.document()
     # A Python pin carried over from pixi.toml wins over requires-python in
     # pixi's solve, and marimo checks requires-python against the running
-    # kernel on every package change: writing both would contradict it.
-    if not _pins_python(pixi):
+    # kernel on every package change: writing both would contradict it. uv
+    # ignores [tool.pixi], so under uv requires-python is the only pin.
+    if backend == "uv" or not _pins_python(pixi):
         document["requires-python"] = requires_python
     array = tomlkit.array()
     array.extend(dependencies)
     document["dependencies"] = array.multiline(True)
-    if pixi:
-        # One level of tables under [tool.pixi], everything deeper inline.
-        document["tool"] = {
-            "pixi": {
-                key: {name: _inline(value) for name, value in table.items()}
-                for key, table in pixi.items()
-            }
+    # One level of tables under each tool, everything deeper inline.
+    tool = {
+        name: {
+            key: {entry: _inline(value) for entry, value in table.items()}
+            for key, table in tables.items()
         }
+        for name, tables in (("pixi", pixi), ("uv", uv or {}))
+        if tables
+    }
+    if tool:
+        document["tool"] = tool
     return wrap_block(tomlkit.dumps(document))
 
 
@@ -765,6 +795,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Print the planned headers and pyproject.toml change; write nothing.",
     )
     parser.add_argument(
+        "--backend",
+        default="pixi",
+        choices=("uv", "pixi"),
+        help="The sandbox backend the workspace's runners build environments with.",
+    )
+    parser.add_argument(
         "--system-requirements",
         type=Path,
         default=SYSTEM_REQUIREMENTS,
@@ -791,6 +827,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             system_requirements=args.system_requirements,
             system=system,
+            backend=args.backend,
         )
     finally:
         if args.report is not None:

@@ -71,13 +71,14 @@ async def _cache_app(path: Path, *, include_code: bool):
     _write_export(export_dir, md_result)
 
 
-async def _launch_plan(path: Path, args: list[str]):
-    """Plan `python <args>` in the notebook's pixi environment, or on this
-    interpreter for a notebook without a header, like marimo run."""
+async def _launch_plan(path: Path, args: list[str], backend: str):
+    """Plan `python <args>` in the notebook's environment, built by `backend`
+    as the workspace's runners build it, or on this interpreter for a
+    notebook without a header, like marimo run."""
     if script_metadata.loads(path.read_text(encoding="utf-8")) is None:
         return backends.launch_fallback(args)
     try:
-        environment = await backends.sync_notebook_async(str(path), backend="pixi")
+        environment = await backends.sync_notebook_async(str(path), backend=backend)
     # pixi's `install --help` probe gives up with a TimeoutError of its own.
     except (EnvironmentManagerError, TimeoutError) as error:
         delay = random.uniform(*_RETRY_DELAY)
@@ -86,12 +87,12 @@ async def _launch_plan(path: Path, args: list[str]):
             f"{_tail(str(error)) or 'timed out'}"
         )
         await asyncio.sleep(delay)
-        environment = await backends.sync_notebook_async(str(path), backend="pixi")
-    return backends.launch(environment, args, backend="pixi", overlay=runtime_overlay())
+        environment = await backends.sync_notebook_async(str(path), backend=backend)
+    return backends.launch(environment, args, backend=backend, overlay=runtime_overlay())
 
 
 async def _cache_in_worker(
-    path: Path, args: list[str], *, root: Path, timeout: float
+    path: Path, args: list[str], *, root: Path, timeout: float, backend: str
 ) -> bool:
     """Cache the notebook at `path` by running the worker `args` in its
     environment from the workspace `root`, all within `timeout` seconds;
@@ -102,7 +103,7 @@ async def _cache_in_worker(
     stderr = collections.deque(maxlen=20)
     try:
         async with asyncio.timeout(timeout):
-            plan = await _launch_plan(path, args)
+            plan = await _launch_plan(path, args, backend)
             # From the workspace root, like the runner's kernels: relative
             # paths resolve as they do in the live notebook.
             completed = await process.run_command(
@@ -146,6 +147,7 @@ async def _cache_all_apps(
     log_level: str,
     jobs: int,
     timeout: float,
+    backend: str,
 ):
     root = Path(directory).resolve()
     files = find_files(root, include_gitignored=include_gitignored)
@@ -163,7 +165,9 @@ async def _cache_all_apps(
     async def cache_in_turn(path: Path) -> bool:
         args = [os.path.abspath(__file__), "--one", str(path), *flags]
         async with semaphore:
-            return await _cache_in_worker(path, args, root=root, timeout=timeout)
+            return await _cache_in_worker(
+                path, args, root=root, timeout=timeout, backend=backend
+            )
 
     results = await asyncio.gather(*(cache_in_turn(path) for path in notebooks))
     successful = sum(results)
@@ -202,6 +206,12 @@ def main(argv: list[str] | None = None):
         help="Seconds a notebook may take to cache, its environment sync included.",
     )
     parser.add_argument(
+        "--backend",
+        default="pixi",
+        choices=("uv", "pixi"),
+        help="The sandbox backend the workspace's runners build environments with.",
+    )
+    parser.add_argument(
         "--one",
         type=Path,
         metavar="NOTEBOOK",
@@ -221,6 +231,7 @@ def main(argv: list[str] | None = None):
                 log_level=args.log_level,
                 jobs=args.jobs,
                 timeout=args.timeout,
+                backend=args.backend,
             )
         )
 

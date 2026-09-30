@@ -463,7 +463,8 @@ def test_unparsable_lock_pins_the_image_versions(tmp_path, caplog):
     assert "uv.lock" in caplog.text
 
 
-def test_uv_sources_are_carried_or_left_out(tmp_path, caplog):
+@pytest.mark.parametrize("backend", ["pixi", "uv"])
+def test_uv_sources_are_carried_or_left_out(tmp_path, caplog, backend):
     pyproject = """[project]
 name = "sourced"
 version = "0.1.0"
@@ -524,26 +525,32 @@ source = { editable = "libs/localpkg" }
         },
     )
 
-    assert migrate(workspace) == 0
+    assert migrate(workspace, backend=backend) == 0
+    sources = {
+        "mylib": {
+            "git": "https://github.com/org/mylib",
+            "tag": "v1.0",
+            "subdirectory": "py",
+        },
+        "localpkg": {"path": "../libs/localpkg", "editable": True},
+        "wheelpkg": {"url": "https://example.com/wheelpkg-1.0-py3-none-any.whl"},
+    }
+    if backend == "pixi":
+        # pixi declares a sourced requirement in its pypi-dependencies table.
+        sources["mylib"]["extras"] = ["fast"]
+        expected = {
+            "dependencies": ["marimo"],
+            "tool": {"pixi": {"pypi-dependencies": sources}},
+        }
+    else:
+        # uv keeps the requirement and reads its source apart.
+        expected = {
+            "dependencies": ["marimo", "mylib[fast]>=1.0", "localpkg==0.1.0", "wheelpkg"],
+            "tool": {"uv": {"sources": sources}},
+        }
     assert header(workspace / "analysis/nb.py") == {
         "requires-python": "==3.12.*",
-        "dependencies": ["marimo"],
-        "tool": {
-            "pixi": {
-                "pypi-dependencies": {
-                    "mylib": {
-                        "git": "https://github.com/org/mylib",
-                        "tag": "v1.0",
-                        "subdirectory": "py",
-                        "extras": ["fast"],
-                    },
-                    "localpkg": {"path": "../libs/localpkg", "editable": True},
-                    "wheelpkg": {
-                        "url": "https://example.com/wheelpkg-1.0-py3-none-any.whl"
-                    },
-                }
-            }
-        },
+        **expected,
     }
     # Never resolved from PyPI instead: left out, and said so.
     for name in ("private", "member", "platformpkg", "internal-tools", "winlib"):
@@ -703,6 +710,27 @@ def test_a_pixi_python_pin_is_not_contradicted_by_requires_python(tmp_path, pin)
     migrated = header(workspace / "readme.py")
     assert "requires-python" not in migrated
     assert "python" in str(migrated["tool"]["pixi"])
+
+
+def test_under_uv_requires_python_is_written_beside_a_pixi_python_pin(
+    tmp_path, caplog
+):
+    # uv ignores [tool.pixi], so requires-python is its only Python pin; the
+    # conda tables are kept, and the log says they need the Conda runtime.
+    workspace = write(
+        tmp_path,
+        {
+            "pyproject.toml": CONDA_PYPROJECT,
+            "pixi.toml": '[dependencies]\npython = "3.11.*"\njq = "*"\n',
+            "readme.py": notebook("pass"),
+        },
+    )
+
+    assert migrate(workspace, backend="uv") == 0
+    migrated = header(workspace / "readme.py")
+    assert migrated["requires-python"] == "==3.12.*"
+    assert migrated["tool"]["pixi"]["dependencies"] == {"python": "3.11.*", "jq": "*"}
+    assert "need the Conda runtime" in caplog.text
 
 
 @pytest.mark.parametrize(

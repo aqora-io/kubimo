@@ -136,12 +136,14 @@ COPY --chown=root --chmod=u=rwx,go=rx docker/setup/kubimo-uv /usr/local/bin/kubi
 # The fork overlays itself into every kernel from its own wheel, through
 # kubimo-uv (uv, offline first) instead of a uv fetched through `pixi exec`,
 # and new notebooks' headers require the Python the caches below are seeded
-# for. The caches live under /home/me, the node template each new slot is
-# copied from, so what the seed downloads reaches every slot. UV_TOOL_BIN_DIR
-# is blanked: the base image points it at /usr/local/bin, which me cannot
-# write.
+# for. The uv backend runs kubimo-uv for everything too, package operations
+# inside kernels included (MARIMO_UV: uv resets UV in the processes it runs).
+# The caches live under /home/me, the node template each new slot is copied
+# from, so what the seed downloads reaches every slot. UV_TOOL_BIN_DIR is
+# blanked: the base image points it at /usr/local/bin, which me cannot write.
 ENV MARIMO_RUNTIME_WHEEL=/opt/marimo/dist \
     MARIMO_PIXI_UV=/usr/local/bin/kubimo-uv \
+    MARIMO_UV=/usr/local/bin/kubimo-uv \
     MARIMO_DEFAULT_REQUIRES_PYTHON="==3.12.*" \
     PIXI_CACHE_DIR=/home/${USER}/.cache/rattler/cache \
     UV_CACHE_DIR=/home/${USER}/.cache/uv \
@@ -167,8 +169,11 @@ WORKDIR /home/${USER}/workspace
 # overlay and the wheel's own cache entries are dropped: uv keys them on the
 # wheel's ctime, which unpacking the image changes, so no slot could reuse
 # them; the agent rebuilds them once per node while it stages the template
-# (docker/app/kubimo_prebuild_overlay.py). The workspace itself must stay
-# empty: the agent hydrates it from S3.
+# (docker/app/kubimo_prebuild_overlay.py). The uv backend's environment of the
+# same notebook is synced after that cleanup, so it and the PyPI marimo its
+# manifest names stay cached and a new uv notebook resolves offline too; it is
+# not launched, as its overlay is keyed on the same ctime. The workspace
+# itself must stay empty: the agent hydrates it from S3.
 RUN --mount=type=bind,source=docker/setup/seed-notebook.py,target=/mnt/seed-notebook.py \
 <<EOF
 cp /mnt/seed-notebook.py readme.py
@@ -181,13 +186,19 @@ env = asyncio.run(backends.sync_notebook_async(nb, backend="pixi"))
 plan = backends.launch(env, ["-c", "import marimo, zmq, msgspec"], backend="pixi", overlay=runtime_overlay())
 subprocess.run(list(plan.argv), env=dict(plan.env), check=True)
 PY
-rm readme.py
 for env in /home/${USER}/.cache/uv/environments-v2/*/*; do
   rm -r "$(readlink -f "$env")"
 done
 rm -r /home/${USER}/.cache/uv/environments-v2
 uv cache clean marimo
+/usr/local/bin/python3 - <<'PY'
+import asyncio
+from marimo._environments import backends
+asyncio.run(backends.sync_notebook_async("/home/me/workspace/readme.py", backend="uv"))
+PY
+rm readme.py
 du -shc /home/${USER}/.cache/*
+find /home/${USER}/.cache | wc -l
 EOF
 
 COPY docker/setup /setup

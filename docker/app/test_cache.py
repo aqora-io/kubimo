@@ -163,16 +163,24 @@ def test_cache_writes_the_snapshots_the_renderer_serves(tmp_path):
     assert snapshot.is_file() and snapshot.stat().st_size > 0, result.stderr
 
 
-def test_notebook_with_a_header_is_cached_in_its_own_environment(tmp_path, sandbox):
+@pytest.mark.parametrize(
+    ("flags", "backend"),
+    [([], "pixi"), (["--backend", "uv"], "uv"), (["--backend", "pixi"], "pixi")],
+    ids=["default", "uv", "pixi"],
+)
+def test_notebook_with_a_header_is_cached_in_its_own_environment(
+    tmp_path, sandbox, flags, backend
+):
     notebook = tmp_path / "nb.py"
     notebook.write_text(HEADER + NOTEBOOK)
     (tmp_path / "plain.py").write_text(NOTEBOOK)
 
-    cache.main(["--include-code", str(tmp_path)])
+    cache.main(["--include-code", *flags, str(tmp_path)])
 
-    # Only the notebook with a header has an environment; the other one's
-    # worker runs on this interpreter, like marimo run.
-    assert sandbox.synced == [(str(notebook), "pixi")]
+    # Only the notebook with a header has an environment, built by the
+    # workspace's backend; the other one's worker runs on this interpreter,
+    # like marimo run.
+    assert sandbox.synced == [(str(notebook), backend)]
     assert sandbox.launched == [
         (
             ENVIRONMENT,
@@ -184,7 +192,7 @@ def test_notebook_with_a_header_is_cached_in_its_own_environment(tmp_path, sandb
                 "--log-level",
                 "info",
             ],
-            "pixi",
+            backend,
             runtime_overlay(),
         )
     ]
