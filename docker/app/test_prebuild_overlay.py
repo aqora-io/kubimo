@@ -76,6 +76,43 @@ def test_a_launch_past_its_share_is_killed_with_what_it_started(
             os.kill(grandchild, signal.SIGKILL)
 
 
+def test_an_interrupted_launch_is_killed_with_what_it_started(tmp_path, monkeypatch):
+    # The agent's `timeout -s INT` interrupts the pre-build with a SIGINT that
+    # only its own process group gets: the launch, in a session of its own,
+    # would otherwise go on writing into the cache during the template copy.
+    pid_file = tmp_path / "grandchild"
+    monkeypatch.setattr(kubimo_prebuild_overlay, "TIMEOUT_SECONDS", 30)
+    monkeypatch.setattr(overlay, "runtime_overlay", lambda: None)
+    _synced(monkeypatch)
+    monkeypatch.setattr(
+        backends,
+        "launch",
+        lambda environment, args, *, backend, overlay: ProcessPlan(
+            argv=("bash", "-c", f"sleep 60 & echo $! > {pid_file}; wait"),
+            env=dict(os.environ),
+        ),
+    )
+
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    signal.alarm(1)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            kubimo_prebuild_overlay.prebuild("uv")
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+    grandchild = int(pid_file.read_text())
+    try:
+        assert _gone(grandchild)
+    finally:
+        if not _gone(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
+
+
 def test_a_sync_past_its_share_gives_up(monkeypatch, one_second_share):
     # Otherwise one hung sync spends the whole budget and the other backend
     # never gets its turn.

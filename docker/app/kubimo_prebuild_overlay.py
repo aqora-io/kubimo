@@ -73,13 +73,15 @@ def prebuild(backend: str) -> None:
     )
     # A session of its own, so a timeout kills what the launch started too:
     # kubimo-uv's offline trial and the kernel uv starts would otherwise go on
-    # writing into the cache while the agent copies the template.
+    # writing into the cache while the agent copies the template. The agent's
+    # own SIGINT reaches only our process group, so its KeyboardInterrupt
+    # kills the session as well.
     with subprocess.Popen(
         list(plan.argv), env=dict(plan.env), start_new_session=True
     ) as process:
         try:
             process.wait(timeout=start + TIMEOUT_SECONDS - time.monotonic())
-        except subprocess.TimeoutExpired:
+        except BaseException:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             raise
