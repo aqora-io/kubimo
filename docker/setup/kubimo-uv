@@ -24,10 +24,11 @@ if [[ "${1:-}" == "run" ]]; then
   options=()
   for arg in "${@:2}"; do
     if [[ "$arg" == "--" ]]; then
-      # A trial launch with an empty program. It must not touch the stdin
-      # the kernel reads its arguments from, nor print to the stdout the
-      # server parses.
-      if "$uv" run --offline "${options[@]}" -- python -c '' \
+      # A trial launch running `true`: uv builds the same overlay for it
+      # without the cost of starting Python. It must not touch the stdin the
+      # kernel reads its arguments from, nor print to the stdout the server
+      # parses.
+      if "$uv" run --offline "${options[@]}" -- true \
         </dev/null >/dev/null 2>&1; then
         exec "$uv" run --offline "${@:2}"
       fi
