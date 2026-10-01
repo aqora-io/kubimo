@@ -32,7 +32,7 @@ spec:
   # memory: { min: "512Mi", max: "2Gi" }
   # env: []                    # baseline env; a claiming runner's env must be a subset
   # sidecars: []               # template containers; may mount the per-pod "claim" Secret
-  # s3SecretName: "s3-credentials"  # must match claiming workspaces' indexer secret
+  s3SecretName: "workspace-s3" # must match claiming workspaces' indexer secret (basic.yaml's)
   storage: "4Gi" # interim slot quota; re-quota'd to the workspace's storage.max at claim
 ---
 apiVersion: kubimo.aqora.io/v1
