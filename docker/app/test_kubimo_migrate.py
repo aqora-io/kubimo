@@ -536,26 +536,62 @@ source = { editable = "libs/localpkg" }
         "wheelpkg": {"url": "https://example.com/wheelpkg-1.0-py3-none-any.whl"},
     }
     if backend == "pixi":
-        # pixi declares a sourced requirement in its pypi-dependencies table.
+        # pixi declares a sourced requirement in its pypi-dependencies table,
+        # and has no package indexes, workspace members or marker lists.
         sources["mylib"]["extras"] = ["fast"]
         expected = {
             "dependencies": ["marimo"],
             "tool": {"pixi": {"pypi-dependencies": sources}},
         }
+        left_out = {"private", "member", "platformpkg", "internal-tools", "winlib"}
     else:
-        # uv keeps the requirement and reads its source apart.
-        expected = {
-            "dependencies": ["marimo", "mylib[fast]>=1.0", "localpkg==0.1.0", "wheelpkg"],
-            "tool": {"uv": {"sources": sources}},
+        # uv keeps the requirement and reads its source apart, package indexes
+        # included; only a workspace member means nothing outside the workspace.
+        sources |= {
+            "private": {"index": "internal"},
+            "platformpkg": [
+                {"index": "internal", "marker": "sys_platform == 'linux'"},
+                {"path": "../platformpkg", "marker": "sys_platform != 'linux'"},
+            ],
+            "internal-tools": {"index": "internal"},
+            "winlib": {
+                "git": "https://github.com/org/winlib",
+                "marker": "sys_platform == 'win32'",
+            },
         }
+        expected = {
+            "dependencies": [
+                "marimo",
+                "mylib[fast]>=1.0",
+                "localpkg==0.1.0",
+                "wheelpkg",
+                "private",
+                "platformpkg",
+                "winlib",
+                "internal-tools==3.0.0",
+            ],
+            "tool": {
+                "uv": {
+                    "index": [
+                        {
+                            "name": "internal",
+                            "url": "https://pypi.internal.example/simple",
+                            "explicit": True,
+                        }
+                    ],
+                    "sources": sources,
+                }
+            },
+        }
+        left_out = {"member"}
     assert header(workspace / "analysis/nb.py") == {
         "requires-python": "==3.12.*",
         **expected,
     }
     # Never resolved from PyPI instead: left out, and said so.
     for name in ("private", "member", "platformpkg", "internal-tools", "winlib"):
-        assert f"Leaving {name} out" in caplog.text
-    assert "[tool.uv] package indexes" in caplog.text
+        assert (f"Leaving {name} out" in caplog.text) == (name in left_out)
+    assert ("[tool.uv] package indexes" in caplog.text) == (backend == "pixi")
 
 
 def test_imports_of_a_notebook_that_does_not_parse_are_still_found(tmp_path):
@@ -744,7 +780,7 @@ def test_under_uv_requires_python_is_written_beside_a_pixi_python_pin(
     ],
     ids=["index-url", "default index"],
 )
-def test_uv_default_index_requirements_are_left_out(tmp_path, caplog, index):
+def test_uv_default_index_requirements_are_left_out_under_pixi(tmp_path, caplog, index):
     pyproject = f"""[project]
 dependencies = [
     "marimo>=0.23",
@@ -805,7 +841,9 @@ mylib = {{ git = "https://github.com/org/mylib" }}
     ],
     ids=["extra-index-url", "find-links", "non-default index"],
 )
-def test_uv_package_indexes_are_not_carried_and_said_so(tmp_path, caplog, indexes):
+def test_uv_package_indexes_are_not_carried_under_pixi_and_said_so(
+    tmp_path, caplog, indexes
+):
     pyproject = f'[project]\ndependencies = ["six"]\n\n[tool.uv]\n{indexes}\n{UV_VENV}'
     workspace = write(
         tmp_path, {"pyproject.toml": pyproject, "nb.py": notebook("import six")}
@@ -821,6 +859,89 @@ def test_uv_package_indexes_are_not_carried_and_said_so(tmp_path, caplog, indexe
         "headers: requirements without a [tool.uv.sources] entry will resolve "
         "from PyPI"
     ) in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("indexes", "carried"),
+    [
+        (
+            '[tool.uv]\nindex-url = "https://pypi.internal.example/simple"\n',
+            {"index-url": "https://pypi.internal.example/simple"},
+        ),
+        (
+            (
+                '[[tool.uv.index]]\nname = "internal"\n'
+                'url = "https://pypi.internal.example/simple"\ndefault = true\n'
+            ),
+            {
+                "index": [
+                    {
+                        "name": "internal",
+                        "url": "https://pypi.internal.example/simple",
+                        "default": True,
+                    }
+                ]
+            },
+        ),
+        (
+            '[tool.uv]\nextra-index-url = ["https://pypi.internal.example/simple"]\n',
+            {"extra-index-url": ["https://pypi.internal.example/simple"]},
+        ),
+        (
+            '[tool.uv]\nfind-links = ["https://pypi.internal.example/wheels/"]\n',
+            {"find-links": ["https://pypi.internal.example/wheels/"]},
+        ),
+    ],
+    ids=["index-url", "default index", "extra-index-url", "find-links"],
+)
+def test_uv_headers_carry_the_workspace_package_indexes(
+    tmp_path, caplog, indexes, carried
+):
+    pyproject = (
+        f'[project]\ndependencies = ["six", "pandas>=2"]\n\n{indexes}\n{UV_VENV}'
+    )
+    workspace = write(
+        tmp_path, {"pyproject.toml": pyproject, "nb.py": notebook("import numpy, six")}
+    )
+
+    assert migrate(workspace, backend="uv") == 0
+    # Every requirement resolves from the indexes it always did.
+    assert header(workspace / "nb.py") == {
+        "requires-python": "==3.12.*",
+        "dependencies": ["marimo", "six", "pandas>=2", "numpy==2.3.4"],
+        "tool": {"uv": carried},
+    }
+    assert "Leaving" not in caplog.text
+    assert "package indexes are not carried" not in caplog.text
+
+
+def test_uv_index_locations_are_rebased_onto_the_notebook(tmp_path):
+    pyproject = f"""[project]
+dependencies = ["tinypkg"]
+
+[tool.uv]
+find-links = ["./wheels", "https://example.com/wheels/"]
+
+[[tool.uv.index]]
+name = "local"
+url = "./simple"
+format = "flat"
+
+[tool.uv.sources]
+tinypkg = {{ index = "local" }}
+
+{UV_VENV}"""
+    workspace = write(
+        tmp_path, {"pyproject.toml": pyproject, "analysis/nb.py": notebook("pass")}
+    )
+
+    assert migrate(workspace, backend="uv") == 0
+    # uv resolves a script's relative locations from the script's directory.
+    assert header(workspace / "analysis/nb.py")["tool"]["uv"] == {
+        "find-links": ["../wheels", "https://example.com/wheels/"],
+        "index": [{"name": "local", "url": "../simple", "format": "flat"}],
+        "sources": {"tinypkg": {"index": "local"}},
+    }
 
 
 def test_pixi_default_index_requirements_are_left_out(tmp_path, caplog):
