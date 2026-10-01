@@ -2,6 +2,7 @@
 
 import fnmatch
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
@@ -23,6 +24,28 @@ def _is_gitignored(path: Path, git_root: Path) -> bool:
     except Exception:
         # If git command fails, assume file is not ignored
         return False
+
+
+def _gitignored(paths: list[Path], git_root: Path) -> set[Path]:
+    """Which of `paths` git ignores, asked in one run. git refuses the whole
+    batch over a single path it will not check (one inside a submodule, say),
+    and then each path is asked about on its own."""
+    if not paths:
+        return set()
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "--stdin", "-z"],
+            cwd=git_root,
+            input=b"".join(os.fsencode(path) + b"\0" for path in paths),
+            capture_output=True,
+        )
+    except Exception:
+        # If git command fails, assume nothing is ignored
+        return set()
+    # git check-ignore returns 0 if a path is ignored, 1 if none is
+    if result.returncode in (0, 1):
+        return {Path(os.fsdecode(path)) for path in result.stdout.split(b"\0") if path}
+    return {path for path in paths if _is_gitignored(path, git_root)}
 
 
 @dataclass(frozen=True)
@@ -201,22 +224,26 @@ def find_files(
         return item.is_dir() and not item.is_symlink()
 
     if git_root:
-        # Walk directories manually to skip gitignored directories
-        def walk_dir_git(path: Path):
-            try:
-                for item in path.iterdir():
-                    if is_real_dir(item):
-                        # Check if directory is gitignored, skip if it is
-                        if not _is_gitignored(item, git_root):
-                            walk_dir_git(item)
-                    elif item.is_file() and item.suffix in suffixes:
-                        # Only check file if we got here (parent dirs not ignored)
-                        if not _is_gitignored(item, git_root):
-                            files.append(item)
-            except OSError as error:
-                logger.warning(f"Skipping {path}: {error}")
-
-        walk_dir_git(directory_path)
+        # Walk level by level to skip gitignored directories, asking git about
+        # a whole level at once: a process per path costs seconds on a large
+        # tree under gVisor.
+        level = [directory_path]
+        while level:
+            candidates = []
+            for path in level:
+                try:
+                    for item in path.iterdir():
+                        if is_real_dir(item):
+                            candidates.append((item, True))
+                        elif item.is_file() and item.suffix in suffixes:
+                            candidates.append((item, False))
+                except OSError as error:
+                    logger.warning(f"Skipping {path}: {error}")
+            ignored = _gitignored([item for item, _ in candidates], git_root)
+            level = []
+            for item, is_dir in candidates:
+                if item not in ignored:
+                    (level if is_dir else files).append(item)
         logger.info(f"Found {len(files)} non-gitignored {'/'.join(suffixes)} files")
     elif not include_gitignored:
 

@@ -118,6 +118,72 @@ def test_the_walk_never_follows_a_directory_symlink(tmp_path, git):
     ]
 
 
+def _git_check_ignore_calls(monkeypatch):
+    """The `git check-ignore` runs the walk makes, recorded as they happen."""
+    calls = []
+    run = subprocess.run
+
+    def recording(args, *rest, **kwargs):
+        if args[:2] == ["git", "check-ignore"]:
+            calls.append(args)
+        return run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(kubimo_walk.subprocess, "run", recording)
+    return calls
+
+
+def test_a_git_walk_asks_git_about_each_level_at_once(tmp_path, monkeypatch):
+    # The migration walks a workspace in the foreground of a cold start, and
+    # a git process per path costs seconds on a large tree under gVisor: git
+    # hears about a whole level at once, an ignored directory still skipped.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text(".venv/\nignored.py\n")
+    names = [f"notebooks/nb{index}.py" for index in range(30)]
+    names += ["top.py", "ignored.py", ".venv/hidden.py", "a/b/c/deep.py"]
+    for name in names:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x = 1\n")
+    calls = _git_check_ignore_calls(monkeypatch)
+
+    files = kubimo_walk.find_files(str(tmp_path))
+
+    assert sorted(path.relative_to(tmp_path).as_posix() for path in files) == sorted(
+        [*names[:30], "top.py", "a/b/c/deep.py"]
+    )
+    # One run per level of the tree (.git's own included), not per path.
+    assert 0 < len(calls) <= 6
+
+
+def test_a_level_git_refuses_is_asked_about_path_by_path(tmp_path, monkeypatch):
+    # git refuses a whole batch over one path inside a submodule; that level
+    # is then asked about one path at a time, as every path once was.
+    git = ["git", "-c", "user.email=me@example.com", "-c", "user.name=me"]
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "inner.py").write_text("x = 1\n")
+    subprocess.run([*git, "init", "-q"], cwd=sub, check=True)
+    subprocess.run([*git, "add", "."], cwd=sub, check=True)
+    subprocess.run([*git, "commit", "-qm", "sub"], cwd=sub, check=True)
+    subprocess.run([*git, "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [*git, "submodule", "add", "-q", "./sub", "sub"], cwd=tmp_path, check=True
+    )
+    (tmp_path / ".gitignore").write_text("other/dropped.py\n")
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "kept.py").write_text("x = 1\n")
+    (tmp_path / "other" / "dropped.py").write_text("x = 1\n")
+    calls = _git_check_ignore_calls(monkeypatch)
+
+    files = kubimo_walk.find_files(str(tmp_path))
+
+    assert sorted(path.relative_to(tmp_path).as_posix() for path in files) == [
+        "other/kept.py",
+        "sub/inner.py",
+    ]
+    assert calls
+
+
 def test_cache_exports_html_and_markdown(tmp_path):
     notebook = tmp_path / "nb.py"
     notebook.write_text(NOTEBOOK)
