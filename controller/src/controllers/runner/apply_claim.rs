@@ -14,15 +14,16 @@ use kubimo::k8s_openapi::api::core::v1::{Container, Pod, Secret};
 use kubimo::pool::{
     CLAIM_ANNOTATION, CLAIM_STATE_ANNOTATION, CLAIM_STATE_BOUND, CLAIM_STATE_FAILED, POOL_LABEL,
     POOL_STATE_CLAIMED, POOL_STATE_LABEL, POOL_STATE_WARM, POOL_TEMPLATE_HASH_ANNOTATION,
-    PoolClaim, WARM_BASE_URL_ANNOTATION, WARM_TOKEN_ANNOTATION,
+    PoolClaim, ROUTE_LABEL, WARM_BASE_URL_ANNOTATION, WARM_TOKEN_ANNOTATION,
 };
 use kubimo::{
     CpuQuantity, CpuUnit, FilterParams, KubimoLabel, Pool, Requirement, Runner, RunnerClaim,
-    StorageQuantity, Workspace, json_patch_macros::*, prelude::*,
+    RunnerIngress, StorageQuantity, Workspace, json_patch_macros::*, prelude::*,
 };
 
 use crate::Config;
 use crate::context::Context;
+use crate::controllers::ingress::{IngressParams, build_ingress};
 use crate::controllers::slot_volume::SlotSources;
 use crate::controllers::workspace_affinity;
 
@@ -30,10 +31,10 @@ use super::RunnerReconciler;
 
 pub(crate) enum ClaimOutcome {
     /// A warm pod is bound (or binding) to this runner. Until `acked`, the
-    /// agent is still linking and hydrating the slot, and the Service/Ingress
-    /// must not exist yet — routing users to an unhydrated workspace is the
-    /// claim's one unacceptable failure mode.
-    Claimed { acked: bool },
+    /// agent is still linking and hydrating the slot, and nothing may route
+    /// to the pod — routing users to an unhydrated workspace is the claim's
+    /// one unacceptable failure mode.
+    Claimed { acked: bool, pod: Box<Pod> },
     /// Build the pod the ordinary way.
     ColdPath,
 }
@@ -269,7 +270,37 @@ impl RunnerReconciler {
         // agent acked, and a sidecar reading the claim Secret would wait on
         // it forever.
         self.copy_sidecar_secrets(ctx, runner, &pod).await?;
-        Ok(ClaimOutcome::Claimed { acked })
+        Ok(ClaimOutcome::Claimed {
+            acked,
+            pod: Box::new(pod),
+        })
+    }
+
+    /// Route an acked pod through the Service and Ingress minted with it:
+    /// make sure both exist (the claim may have beaten the pool to them),
+    /// then give the pod the label its Service selects.
+    pub(crate) async fn route_claimed_pod(
+        &self,
+        ctx: &Context,
+        pod: &Pod,
+        route: &str,
+    ) -> Result<(), kubimo::Error> {
+        crate::controllers::pool::warm_pod::ensure_route(ctx, pod).await?;
+        let labelled = pod
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(ROUTE_LABEL))
+            .is_some_and(|value| value == route);
+        if !labelled {
+            ctx.api_namespaced::<Pod>(pod.require_namespace()?)
+                .patch_json(
+                    pod.name()?,
+                    patch![add!(["metadata", "labels", ROUTE_LABEL] => route),],
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     /// Drop a recorded claim whose pod is gone, returning whether one was
@@ -523,6 +554,11 @@ fn eligible(
     {
         return Err("log level differs from the pool's");
     }
+    // The claimed pod is routed by the Ingress minted with it, from the
+    // configured defaults.
+    if !ingress_settings_are_default(config, runner.spec.ingress.as_ref()) {
+        return Err("ingress settings differ from the pool's");
+    }
     // `--origin` was baked at boot from the configured host; a runner that
     // asks for a different first host would get the wrong allowed origin.
     let spec_host = runner
@@ -538,6 +574,26 @@ fn eligible(
         return Err("ingress host differs from the configured runner host");
     }
     Ok(())
+}
+
+/// Whether a runner's ingress settings build the same Ingress as the
+/// configured defaults, the path aside: a claim ignores the spec's path.
+fn ingress_settings_are_default(config: &Config, ingress: Option<&RunnerIngress>) -> bool {
+    let build = |ingress| {
+        build_ingress(
+            config,
+            IngressParams {
+                name: "",
+                namespace: None,
+                owner_reference: Default::default(),
+                path: String::new(),
+                service_name: "",
+                port: 0,
+                ingress,
+            },
+        )
+    };
+    build(ingress) == build(None)
 }
 
 fn storage_requirements_match(
@@ -848,6 +904,79 @@ mod tests {
                     &pool(pool_runtime)
                 ),
                 Err("python runtime differs from the pool's"),
+            );
+        }
+    }
+
+    /// A claimed pod is routed by the Ingress minted with it from the
+    /// configured defaults, so a runner asking for other ingress settings
+    /// cold-starts. The path the platform sets is ignored by a claim anyway.
+    #[test]
+    fn only_runners_with_default_ingress_settings_are_eligible() {
+        use kubimo::{PoolSpec, RunnerCommand, RunnerSpec, RunnerTls};
+        let mut config = crate::Config::test_default();
+        config.runner_hosts = vec!["kubimo.org".into()];
+        let workspace = Workspace::new("bmow-x", Default::default());
+        let pool = Pool::new(
+            "editors",
+            PoolSpec {
+                command: RunnerCommand::Edit,
+                ..Default::default()
+            },
+        );
+        let eligible_with = |ingress: RunnerIngress| {
+            let runner = Runner::new(
+                "bmor-x",
+                RunnerSpec {
+                    workspace: "bmow-x".into(),
+                    command: RunnerCommand::Edit,
+                    ingress: Some(ingress),
+                    ..Default::default()
+                },
+            );
+            eligible(&config, &runner, &workspace, &pool)
+        };
+        let tls = |tls: RunnerTls| RunnerIngress {
+            tls: Some(tls),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            eligible_with(RunnerIngress {
+                path: Some("/runner/abc".into()),
+                ..Default::default()
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            eligible_with(tls(RunnerTls {
+                hosts: Some(vec!["kubimo.org".into()]),
+                ..Default::default()
+            })),
+            Ok(())
+        );
+        for differing in [
+            RunnerIngress {
+                class_name: Some("traefik".into()),
+                ..Default::default()
+            },
+            tls(RunnerTls {
+                cluster_issuer: Some("letsencrypt".into()),
+                ..Default::default()
+            }),
+            tls(RunnerTls {
+                secret_name: Some("wildcard-tls".into()),
+                ..Default::default()
+            }),
+            tls(RunnerTls {
+                hosts: Some(vec!["kubimo.org".into(), "other.kubimo.org".into()]),
+                ..Default::default()
+            }),
+        ] {
+            assert_eq!(
+                eligible_with(differing.clone()),
+                Err("ingress settings differ from the pool's"),
+                "{differing:?}"
             );
         }
     }

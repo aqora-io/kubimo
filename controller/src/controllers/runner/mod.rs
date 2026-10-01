@@ -22,6 +22,7 @@ use kubimo::{
 
 use crate::backoff::default_error_policy;
 use crate::context::Context;
+use crate::controllers::pool::warm_pod;
 use crate::controllers::workspace_affinity;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
@@ -72,9 +73,9 @@ impl Reconciler for RunnerReconciler {
         };
 
         match self.apply_claim(ctx, runner, &workspace).await? {
-            apply_claim::ClaimOutcome::Claimed { acked: false } => {
-                // The agent is still hydrating the claimed slot. Service and
-                // Ingress are withheld until its ack so no user reaches an
+            apply_claim::ClaimOutcome::Claimed { acked: false, .. } => {
+                // The agent is still hydrating the claimed slot. Nothing
+                // routes to the pod until its ack, so no user reaches an
                 // unhydrated workspace. The claimed pod carries an
                 // ownerReference to this runner and this controller owns
                 // pods, so the ack annotation triggers a reconcile promptly;
@@ -82,14 +83,25 @@ impl Reconciler for RunnerReconciler {
                 self.apply_owner_reference(ctx, runner).await?;
                 return Ok(Action::requeue(Duration::from_secs(2)));
             }
-            apply_claim::ClaimOutcome::Claimed { acked: true } => {
+            apply_claim::ClaimOutcome::Claimed { acked: true, pod } => {
                 // apply_pod is skipped wholesale: the claimed pod keeps its
                 // pool name and its warm-slot volume, and must never be
                 // measured against — or replaced by — the cold pod shape.
+                //
+                // A pod minted with its own Service and Ingress is reached
+                // through them; only one claimed under an older controller
+                // gets the runner's Ingress. Never both: ingress-nginx
+                // refuses a second Ingress for the same host and path.
+                let route = async {
+                    match warm_pod::route_name(&pod) {
+                        Some(route) => self.route_claimed_pod(ctx, &pod, route).await,
+                        None => self.apply_ingress(ctx, runner).await.map(|_| ()),
+                    }
+                };
                 futures::future::try_join_all([
                     self.apply_owner_reference(ctx, runner).boxed(),
                     self.apply_service(ctx, runner).map_ok(|_| ()).boxed(),
-                    self.apply_ingress(ctx, runner).map_ok(|_| ()).boxed(),
+                    route.boxed(),
                 ])
                 .await?;
                 return Ok(Action::await_change());

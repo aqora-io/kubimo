@@ -49,6 +49,13 @@ pub fn pool_immutable_fields() -> Rule {
         .field_path(".spec.command")
 }
 
+/// Warm pods are named `<pool>-<8 hex>`, and each is routed through a Service
+/// named after it, so the pool name plus that suffix must be a DNS-1035 label.
+pub fn pool_name_is_a_service_name() -> Rule {
+    Rule::new(include_str!("./pool_name_is_a_service_name.cel"))
+        .message("pool name must be a DNS-1035 label of at most 54 characters")
+}
+
 /// See [`runner_max_memory_greater_than_min`].
 pub fn pool_max_memory_greater_than_min() -> Rule {
     Rule::new(include_str!("./pool_max_memory_greater_than_min.cel"))
@@ -115,5 +122,27 @@ mod tests {
         test_compiles(pool_max_memory_greater_than_min());
         test_compiles(pool_max_cpu_greater_than_min());
         test_compiles(log_level());
+        test_compiles(pool_name_is_a_service_name());
+    }
+
+    /// Warm pods are named `<pool>-<8 hex>`, and each pod's Service after the
+    /// pod, so the pool name must leave room for a valid Service name.
+    #[test]
+    fn pool_names_leave_room_for_their_warm_pods_service_names() {
+        use cel_interpreter::{Context, Value};
+        let program = Program::compile(&pool_name_is_a_service_name().rule).unwrap();
+        let accepts = |name: &str| {
+            let mut ctx = Context::default();
+            ctx.add_variable("self", serde_json::json!({"metadata": {"name": name}}))
+                .unwrap();
+            program.execute(&ctx).unwrap() == Value::Bool(true)
+        };
+        assert!(accepts("runner"));
+        assert!(accepts("runner-conda-view"));
+        assert!(accepts(&"a".repeat(54)));
+        assert!(!accepts(&"a".repeat(55)));
+        assert!(!accepts("1runner"));
+        assert!(!accepts("runner.view"));
+        assert!(!accepts("runner-"));
     }
 }
