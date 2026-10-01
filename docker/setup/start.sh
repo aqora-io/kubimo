@@ -70,9 +70,9 @@ unset MARIMO_TOKEN
 
 # The sandbox backend this pod's notebooks run with, from its workspace's
 # runtime (its pool's, on a warm pod). An env var, like KUBIMO_ASSET_URL. The
-# controller always sets it; unset is pixi, which this image ran before the
-# runtime chose and which handles anything uv does.
-sandbox="${KUBIMO_SANDBOX:-pixi}"
+# controller always sets it; unset is uv, as an absent runtime is. It also
+# picks the backend a legacy workspace is migrated for, once and for good.
+sandbox="${KUBIMO_SANDBOX:-uv}"
 if [[ "$sandbox" != "uv" && "$sandbox" != "pixi" ]]; then
   echo "Unknown KUBIMO_SANDBOX $sandbox" >&2
   exit 1
