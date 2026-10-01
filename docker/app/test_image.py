@@ -410,3 +410,64 @@ def test_an_uncached_package_fails_the_uv_sync_cleanly(tmp_path, monkeypatch):
 
     with pytest.raises(UvCommandError):
         _sync(notebook, "uv")
+
+
+def _flat_index_wheel(directory, name, version, source):
+    """Write a pure-Python wheel of `name` into `directory`, a flat index."""
+    import base64
+    import hashlib
+    import zipfile
+
+    info = f"{name}-{version}.dist-info"
+    files = {
+        f"{name}/__init__.py": source,
+        f"{info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+        f"{info}/WHEEL": "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    record = []
+    for path, text in files.items():
+        digest = hashlib.sha256(text.encode()).digest()
+        encoded = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+        record.append(f"{path},sha256={encoded},{len(text.encode())}")
+    files[f"{info}/RECORD"] = "\n".join([*record, f"{info}/RECORD,,"]) + "\n"
+    directory.mkdir(parents=True)
+    with zipfile.ZipFile(
+        directory / f"{name}-{version}-py3-none-any.whl", "w"
+    ) as wheel:
+        for path, text in files.items():
+            wheel.writestr(path, text)
+
+
+def test_a_migrated_uv_header_resolves_from_the_workspace_index(tmp_path, monkeypatch):
+    # A legacy uv workspace whose package only an index of its own serves (a
+    # local flat one, so nothing goes online): the migrated header of a
+    # notebook below the root names that index, rebased onto the notebook,
+    # and the real uv resolves the package from it.
+    import kubimo_migrate
+
+    workspace = tmp_path / "workspace"
+    _flat_index_wheel(workspace / "wheels", "tinypkg", "0.1.0", "VALUE = 42\n")
+    (workspace / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["tinypkg"]\n\n'
+        '[[tool.uv.index]]\nname = "local"\nurl = "./wheels"\nformat = "flat"\n'
+        "explicit = true\n\n"
+        '[tool.uv.sources]\ntinypkg = { index = "local" }\n\n'
+        '[tool.marimo.venv]\npath = "/home/me/venv"\n'
+    )
+    notebook = workspace / "analysis" / "nb.py"
+    notebook.parent.mkdir()
+    notebook.write_text(
+        NOTEBOOK.replace("    return", "    import tinypkg\n    return")
+    )
+    for name, value in CUT_NETWORK.items():
+        monkeypatch.setenv(name, value)
+
+    assert kubimo_migrate.migrate(workspace, backend="uv") == 0
+    environment = _sync(notebook, "uv")
+    data = _run_json(
+        environment,
+        'import json, tinypkg; print(json.dumps({"value": tinypkg.VALUE}))',
+        "uv",
+    )
+
+    assert data == {"value": 42}

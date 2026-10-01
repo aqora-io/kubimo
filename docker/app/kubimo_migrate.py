@@ -10,11 +10,13 @@ untouched before anything heavy is imported.
 
 Headers reproduce the environment a notebook last ran in: a uv requirement
 without a version of its own is pinned to uv.lock's, and git, path and url
-sources carry over. A dependency whose source pixi cannot express (a package
-index, a workspace member) is left out and logged, never resolved from PyPI
-instead, and so is every declared one without a source when the workspace
-replaced PyPI with a default index of its own. Other package indexes set for
-the whole workspace do not carry over: the requirements without a source of
+sources carry over. Under the uv backend so do package index sources and the
+workspace's package indexes, and only a workspace member is left out. Under
+pixi, a dependency whose source pixi cannot express (a package index, a
+workspace member) is left out and logged, never resolved from PyPI instead,
+and so is every declared one without a source when the workspace replaced PyPI
+with a default index of its own. Other package indexes set for the whole
+workspace do not carry over to pixi: the requirements without a source of
 their own resolve from PyPI, as logged.
 
 Two runner pods can migrate one slot at once, and flock does not reach across
@@ -68,6 +70,11 @@ _PIXI_SOURCE_KEYS = {
     "path",
     "editable",
 }
+# The [tool.uv] package index settings uv headers carry, scalars before the
+# [[tool.uv.index]] tables, as TOML has them.
+_UV_INDEX_KEYS = ("index-url", "extra-index-url", "find-links", "index")
+# Keys whose relative values are locations a script's own directory anchors.
+_LOCATION_KEYS = {"path", "url", "index-url", "extra-index-url", "find-links"}
 # Import statements, for a notebook that does not parse.
 _IMPORT = re.compile(
     r"^[ \t]*(?:from[ \t]+(\w[\w.]*)[ \t]+import|import[ \t]+(\w[\w.]*))",
@@ -202,8 +209,10 @@ class _Headers:
     declared: list[str]
     pixi: dict
     # uv workspaces only: [tool.uv.sources] as _from_uv_sources gives them,
-    # and what their kernels imported undeclared.
-    sources: dict[str, dict | None]
+    # the [tool.uv] package indexes the uv backend carries along, and what
+    # their kernels imported undeclared.
+    sources: dict[str, dict | list | None]
+    indexes: dict
     implicit: _ImplicitPackages | None
     # The sandbox backend the workspace's runners build environments with.
     backend: str = "pixi"
@@ -225,10 +234,10 @@ class _Headers:
                 sourced[name] = self.sources[name]
             else:
                 sourced[name] = self.sources[name] | _extras(requirement)
-        pixi, uv = self.pixi, {}
+        pixi, uv = self.pixi, dict(self.indexes)
         # Only uv workspaces have sources, and no [tool.pixi] tables of their own.
         if sourced and self.backend == "uv":
-            uv = {"sources": sourced}
+            uv["sources"] = sourced
         elif sourced:
             pixi = {**self.pixi, "pypi-dependencies": sourced}
         if notebook.parent != self.root:
@@ -340,15 +349,18 @@ def _plan(
             _pinned(requirement, implicit.locked)
             for requirement in _lookup(pyproject, "project", "dependencies") or []
         ]
-        sources = _from_uv_sources(pyproject)
-        return _Headers(root, requires_python, declared, {}, sources, implicit, backend)
+        sources = _from_uv_sources(pyproject, backend)
+        indexes = _uv_indexes(pyproject) if backend == "uv" else {}
+        return _Headers(
+            root, requires_python, declared, {}, sources, indexes, implicit, backend
+        )
     declared, pixi = _from_pixi(_load_toml(root / "pixi.toml"))
     if backend == "uv" and pixi:
         logger.warning(
             "This workspace runs uv, which ignores the [tool.pixi] tables its "
             "pixi.toml is carried into: its conda dependencies need the Conda runtime"
         )
-    return _Headers(root, requires_python, declared, pixi, {}, None, backend)
+    return _Headers(root, requires_python, declared, pixi, {}, {}, None, backend)
 
 
 def _migrate_notebook(path: Path, name: str, headers: _Headers, dry_run: bool) -> str:
@@ -426,12 +438,32 @@ def _from_pixi(manifest: dict) -> tuple[list[str], dict]:
     return declared, pixi
 
 
-def _from_uv_sources(pyproject: dict) -> dict[str, dict | None]:
-    """[tool.uv.sources] by normalized name: the pypi-dependencies table pixi
-    takes instead, or None where pixi has none (package indexes, workspace
-    members, conditional sources) or the requirement came from the default
-    index the workspace set in PyPI's place."""
+def _from_uv_sources(
+    pyproject: dict, backend: str = "pixi"
+) -> dict[str, dict | list | None]:
+    """[tool.uv.sources] by normalized name, or None for a requirement headers
+    leave out. uv takes every source, the package indexes they name coming
+    along (_uv_indexes), but a workspace member's: a notebook belongs to no
+    workspace. pixi takes a pypi-dependencies table instead, and has none for
+    package indexes, workspace members or conditional sources, nor for a
+    requirement that came from the default index the workspace set in PyPI's
+    place."""
     uv = _lookup(pyproject, "tool", "uv") or {}
+    if backend == "uv":
+        sources = {}
+        for name, source in uv.get("sources", {}).items():
+            entries = source if isinstance(source, list) else [source]
+            if any(
+                isinstance(entry, dict) and "workspace" in entry for entry in entries
+            ):
+                logger.warning(
+                    f"Leaving {name} out of notebook headers: it is a workspace "
+                    "member, and a notebook belongs to no workspace"
+                )
+                sources[_normalize(name)] = None
+            else:
+                sources[_normalize(name)] = source
+        return sources
     replaces_pypi = "index-url" in uv or any(
         index.get("default") for index in uv.get("index", [])
     )
@@ -479,6 +511,13 @@ def _from_uv_sources(pyproject: dict) -> dict[str, dict | None]:
     return sources
 
 
+def _uv_indexes(pyproject: dict) -> dict:
+    """The [tool.uv] settings saying where the workspace's packages come from,
+    which uv reads from a script's header as well."""
+    uv = _lookup(pyproject, "tool", "uv") or {}
+    return {key: uv[key] for key in _UV_INDEX_KEYS if key in uv}
+
+
 def _pinned(requirement: str, locked: Mapping[str, str]) -> str:
     """`requirement` pinned to its uv.lock version, the one the notebook last
     ran with, unless it has a version or URL of its own."""
@@ -498,17 +537,21 @@ def _extras(requirement: str) -> dict:
     return {"extras": extras} if extras else {}
 
 
-def _rebased(value, to_root: str):
-    """`value` with each relative `path` rebased from the workspace root onto a
-    notebook `to_root` below it: pixi resolves a script's paths from its
-    directory."""
+def _rebased(value, to_root: str, key: str | None = None):
+    """`value` with each relative location (a path source, a package index, a
+    find-links entry) rebased from the workspace root onto a notebook `to_root`
+    below it: pixi and uv resolve a script's locations from its directory."""
     if isinstance(value, dict):
-        return {
-            key: os.path.normpath(os.path.join(to_root, item))
-            if key == "path" and isinstance(item, str) and not os.path.isabs(item)
-            else _rebased(item, to_root)
-            for key, item in value.items()
-        }
+        return {entry: _rebased(item, to_root, entry) for entry, item in value.items()}
+    if isinstance(value, list):
+        return [_rebased(item, to_root, key) for item in value]
+    if (
+        key in _LOCATION_KEYS
+        and isinstance(value, str)
+        and "://" not in value
+        and not os.path.isabs(value)
+    ):
+        return os.path.normpath(os.path.join(to_root, value))
     return value
 
 
@@ -545,18 +588,25 @@ def _render(
     array = tomlkit.array()
     array.extend(dependencies)
     document["dependencies"] = array.multiline(True)
-    # One level of tables under each tool, everything deeper inline.
+    # One level of tables under each tool, or an array of them (uv's
+    # [[tool.uv.index]]), everything deeper inline.
     tool = {
-        name: {
-            key: {entry: _inline(value) for entry, value in table.items()}
-            for key, table in tables.items()
-        }
+        name: {key: _tables(value) for key, value in tables.items()}
         for name, tables in (("pixi", pixi), ("uv", uv or {}))
         if tables
     }
     if tool:
         document["tool"] = tool
     return wrap_block(tomlkit.dumps(document))
+
+
+def _tables(value):
+    """A [tool.*] entry: a table, an array of tables, or a plain value."""
+    if isinstance(value, dict):
+        return {entry: _inline(item) for entry, item in value.items()}
+    if isinstance(value, list) and value and all(isinstance(i, dict) for i in value):
+        return [_tables(item) for item in value]
+    return value
 
 
 def _pins_python(pixi: dict) -> bool:
