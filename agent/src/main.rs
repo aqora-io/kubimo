@@ -399,7 +399,8 @@ fn serve(
             // server-side apply reports that as a 409 we only log. Keeping the
             // indexer's identity makes the writes idempotent instead. It must
             // stay distinct from the controller's `kubimo-controller`, which
-            // owns `status.conditions` on the same object.
+            // owns `status.conditions` and `status.pythonRuntime` on the same
+            // object.
             let client = match kubimo::Client::builder()
                 .name("kubimo-indexer")
                 .build()
