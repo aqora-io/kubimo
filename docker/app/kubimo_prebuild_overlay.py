@@ -17,8 +17,11 @@ Best effort, backend by backend: the caller stages the template whatever
 this exits with.
 """
 
+import asyncio
+import contextlib
 import os
 import pwd
+import signal
 import subprocess
 import sys
 import time
@@ -33,9 +36,9 @@ NOTEBOOK = Path(f"/home/{USER}/workspace/readme.py")
 # What a kernel imports on startup, so their bytecode lands in the template.
 KERNEL_IMPORTS = "import marimo._ipc.launch_kernel, marimo._runtime.runtime"
 # uv first: its overlay is the quicker, and both must fit in the caller's
-# 300 s budget, each launch in its own share of it.
+# 300 s budget, each backend in its own share of it.
 BACKENDS = ("uv", "pixi")
-TIMEOUT_SECONDS = 120
+TIMEOUT_SECONDS = 140
 
 
 def drop_privileges() -> None:
@@ -50,24 +53,38 @@ def drop_privileges() -> None:
 
 
 def prebuild(backend: str) -> None:
-    """Build `backend`'s overlay on the canonical notebook's environment."""
+    """Build `backend`'s overlay on the canonical notebook's environment,
+    within TIMEOUT_SECONDS."""
     from marimo._environments import backends
     from marimo._environments.overlay import runtime_overlay
 
     start = time.monotonic()
-    environment = backends.sync_notebook(str(NOTEBOOK), backend=backend)
+    environment = asyncio.run(
+        asyncio.wait_for(
+            backends.sync_notebook_async(str(NOTEBOOK), backend=backend),
+            timeout=TIMEOUT_SECONDS,
+        )
+    )
     plan = backends.launch(
         environment,
         ["-c", KERNEL_IMPORTS],
         backend=backend,
         overlay=runtime_overlay(),
     )
-    subprocess.run(
-        list(plan.argv),
-        env=dict(plan.env),
-        check=True,
-        timeout=TIMEOUT_SECONDS,
-    )
+    # A session of its own, so a timeout kills what the launch started too:
+    # kubimo-uv's offline trial and the kernel uv starts would otherwise go on
+    # writing into the cache while the agent copies the template.
+    with subprocess.Popen(
+        list(plan.argv), env=dict(plan.env), start_new_session=True
+    ) as process:
+        try:
+            process.wait(timeout=start + TIMEOUT_SECONDS - time.monotonic())
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            raise
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, plan.argv)
     print(f"pre-built the {backend} kernel overlay in {time.monotonic() - start:.1f}s")
 
 
