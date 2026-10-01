@@ -36,4 +36,4 @@ tests:
     asserts:
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
-          pattern: (?s)timeout -s INT 300 python3 /app/kubimo_prebuild_overlay\.py.*\|\| echo.*find /home/me/workspace -mindepth 1 -delete\s+cp -a /home/me
+          pattern: (?s)timeout -k 30 -s INT 300 python3 /app/kubimo_prebuild_overlay\.py.*\|\| echo.*find /home/me/workspace -mindepth 1 -delete\s+cp -a /home/me

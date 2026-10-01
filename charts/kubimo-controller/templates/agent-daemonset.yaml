@@ -89,9 +89,11 @@ spec:
               # Pre-build the kernel overlay on this node, so each slot's first
               # kernel reuses it instead of building its own. Best effort, and
               # skipped on images that predate the script. SIGINT rather than
-              # timeout's SIGTERM: Python only cleans up on an interrupt.
+              # timeout's SIGTERM: Python only cleans up on an interrupt. A
+              # pre-build that survives it anyway is killed 30 s later, or the
+              # node would never get past this initContainer.
               if [ -f /app/kubimo_prebuild_overlay.py ]; then
-                timeout -s INT 300 python3 /app/kubimo_prebuild_overlay.py \
+                timeout -k 30 -s INT 300 python3 /app/kubimo_prebuild_overlay.py \
                   || echo "overlay pre-build failed; slots will build their own"
               fi
               # Whatever the template's workspace holds surfaces in every
