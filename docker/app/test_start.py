@@ -213,7 +213,7 @@ def _argvs_of(program: bytes) -> list[list[bytes]]:
 
 
 @pytest.mark.parametrize(
-    ("variable", "backend"), [(None, b"pixi"), ("uv", b"uv"), ("pixi", b"pixi")]
+    ("variable", "backend"), [(None, b"uv"), ("uv", b"uv"), ("pixi", b"pixi")]
 )
 @pytest.mark.parametrize("command", ["edit", "run"])
 def test_the_sandbox_backend_follows_kubimo_sandbox(
