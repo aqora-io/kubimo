@@ -358,7 +358,22 @@ def test_failed_worker_does_not_stop_the_others(tmp_path, sandbox, caplog):
     assert (tmp_path / "__marimo__" / "nb.html").is_file()
     assert not (tmp_path / "__marimo__" / "broken.html").exists()
     assert "the worker broke" in caplog.text
-    assert "1 apps cached successfully, 1 failed or skipped" in caplog.text
+    assert "1 apps cached successfully, 1 failed, 0 skipped" in caplog.text
+
+
+def test_the_summary_tells_failed_notebooks_from_skipped_files(
+    tmp_path, sandbox, caplog
+):
+    # The cache job always exits 0, so its summary is where a failure shows:
+    # a helper module the walk finds is skipped, not failed.
+    caplog.set_level(logging.INFO)
+    sandbox.worker = ["-c", "import sys; sys.exit('the worker broke')"]
+    (tmp_path / "broken.py").write_text(HEADER + NOTEBOOK)
+    (tmp_path / "helpers.py").write_text("def helper():\n    return 1\n")
+
+    cache.main([str(tmp_path)])
+
+    assert "0 apps cached successfully, 1 failed, 1 skipped" in caplog.text
 
 
 def test_environment_sync_is_retried_once(tmp_path, sandbox, monkeypatch, caplog):
@@ -375,7 +390,7 @@ def test_environment_sync_is_retried_once(tmp_path, sandbox, monkeypatch, caplog
     assert synced == ["broken.py", "broken.py", "flaky.py", "flaky.py"]
     assert [Path(args[2]).name for _, args, _, _ in sandbox.launched] == ["flaky.py"]
     assert "pixi could not sync broken.py" in caplog.text
-    assert "1 apps cached successfully, 1 failed or skipped" in caplog.text
+    assert "1 apps cached successfully, 1 failed, 0 skipped" in caplog.text
 
 
 def test_worker_is_stopped_at_the_timeout(tmp_path, sandbox, caplog):
@@ -392,7 +407,7 @@ def test_worker_is_stopped_at_the_timeout(tmp_path, sandbox, caplog):
     assert time.monotonic() - started < 30
     assert "its worker timed out" in caplog.text
     assert "still exporting" in caplog.text
-    assert "0 apps cached successfully, 1 failed or skipped" in caplog.text
+    assert "0 apps cached successfully, 1 failed, 0 skipped" in caplog.text
 
 
 def test_environment_sync_counts_against_the_timeout(
@@ -412,7 +427,7 @@ def test_environment_sync_counts_against_the_timeout(
     assert time.monotonic() - started < 30
     assert sandbox.launched == []
     assert "syncing its environment timed out" in caplog.text
-    assert "0 apps cached successfully, 1 failed or skipped" in caplog.text
+    assert "0 apps cached successfully, 1 failed, 0 skipped" in caplog.text
 
 
 def test_pixi_timing_out_is_a_failed_environment_sync(
