@@ -81,8 +81,8 @@ pub(crate) fn template_hash(config: &Config, pool: &Pool) -> String {
         "shape": WARM_POD_SHAPE,
         "image": image,
         "command": pool.spec.command,
-        // Resolved, not as written: absent meant pixi before the runtime chose
-        // the backend, so a pod minted then must not match a `Uv` pool now.
+        // Resolved, not as written: absent is Uv, so spelling the default out
+        // must not retire warm pods that already boot uv.
         "pythonRuntime": pool.spec.python_runtime.unwrap_or_default(),
         "logLevel": pool.spec.log_level,
         "cpu": pool.spec.cpu,
