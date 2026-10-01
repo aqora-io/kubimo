@@ -171,9 +171,11 @@ async def _cache_all_apps(
 
     results = await asyncio.gather(*(cache_in_turn(path) for path in notebooks))
     successful = sum(results)
-    failed = len(files) - successful
+    failed = len(notebooks) - successful
+    skipped = len(files) - len(notebooks)
     logger.info(
-        f"Caching complete: {successful} apps cached successfully, {failed} failed or skipped"
+        f"Caching complete: {successful} apps cached successfully, {failed} failed, "
+        f"{skipped} skipped as not marimo apps"
     )
 
 
