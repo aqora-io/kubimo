@@ -368,7 +368,9 @@ def _migrate_notebook(path: Path, name: str, headers: _Headers, dry_run: bool) -
     from marimo._environments import script_metadata
 
     original = path.read_bytes()
-    text = original.decode()
+    # Python's parser, marimo's included, rejects U+FEFF in a source string:
+    # a UTF-8 file needs no byte order mark, and the rewrite drops it.
+    text = original.decode().removeprefix("\ufeff")
     if script_metadata.loads(text) is not None:
         return "had a header"
     block = headers.block(path, text)

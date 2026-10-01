@@ -1,3 +1,4 @@
+import ast
 import errno
 import importlib
 import logging
@@ -1402,6 +1403,21 @@ def test_header_goes_below_shebang_and_encoding_lines(tmp_path, prefix, newline)
     assert (workspace / "readme.py").read_bytes() == (
         prefix + block + newline + newline + body
     ).encode()
+
+
+def test_a_byte_order_mark_is_dropped_so_the_notebook_parses(tmp_path):
+    # Python's parser, and so marimo's, rejects U+FEFF in a source string,
+    # wherever the header would leave it; the migration rewrites the file
+    # anyway, and a UTF-8 file needs no byte order mark.
+    workspace = write(
+        tmp_path,
+        {"pyproject.toml": TEMPLATE_PYPROJECT, "readme.py": "\ufeff" + TEMPLATE_README},
+    )
+
+    assert migrate(workspace) == 0
+    migrated = (workspace / "readme.py").read_text(encoding="utf-8")
+    assert migrated == f"{SEED_HEADER}\n\n{TEMPLATE_README}"
+    ast.parse(migrated)
 
 
 def test_a_blank_line_below_the_header_is_not_doubled(tmp_path):
