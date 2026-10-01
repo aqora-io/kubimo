@@ -39,3 +39,22 @@ kubectl apply -f examples/basic.yaml
 ```
 
 You should be able to access it soon with `$(minikube ip)/editor`
+
+## Upgrading from 0.2.x
+
+The chart runs the controller Deployment with the `Recreate` strategy, so two
+controllers never reconcile side by side during a rollout. Applied server-side
+(helm 4, or Argo CD with `ServerSideApply=true`), the upgrade of a release
+installed with the default `RollingUpdate` is refused: the API server filled in
+`spec.strategy.rollingUpdate`, no field manager owns it to remove it, and it is
+forbidden beside `Recreate`. A refused upgrade leaves the new CRDs and agent
+running beside the old controller, so switch the strategy once, before
+upgrading. It does not restart the controller:
+
+```bash
+kubectl -n <namespace> patch deployment <deployment> --type=json \
+  -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
+```
+
+`<deployment>` is the controller Deployment the release created, which
+`kubectl -n <namespace> get deployments` lists.
