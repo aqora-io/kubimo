@@ -1,14 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
-
-use kubimo::k8s_openapi::api::networking::v1::{
-    HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
-    IngressServiceBackend, IngressSpec, IngressTLS, ServiceBackendPort,
-};
-use kubimo::kube::api::ObjectMeta;
+use kubimo::k8s_openapi::api::networking::v1::Ingress;
 use kubimo::{Runner, prelude::*};
 
 use crate::context::Context;
-use crate::controllers::ingress::effective_ingress_path;
+use crate::controllers::ingress::{IngressParams, build_ingress, effective_ingress_path};
 use crate::controllers::runner::apply_pod::runner_port;
 
 use super::RunnerReconciler;
@@ -20,122 +14,20 @@ impl RunnerReconciler {
         runner: &Runner,
     ) -> Result<Ingress, kubimo::Error> {
         let namespace = runner.require_namespace()?;
-        let ingress_class_name = runner
-            .spec
-            .ingress
-            .as_ref()
-            .and_then(|ingress| ingress.class_name.clone())
-            .unwrap_or_else(|| ctx.config.ingress_class_name.clone());
-        let spec_tls = runner
-            .spec
-            .ingress
-            .as_ref()
-            .and_then(|ingress| ingress.tls.as_ref());
-        let mut annotations = BTreeMap::new();
-        annotations.insert(
-            "kubernetes.io/ingress.class".to_string(),
-            ingress_class_name.clone(),
-        );
-        // Keeps the kernel websocket and the code-mode SSE stream alive while a
-        // cell runs; see `runner_proxy_timeout_secs` in the config.
-        let proxy_timeout_secs = ctx.config.runner_proxy_timeout_secs.to_string();
-        annotations.insert(
-            "nginx.ingress.kubernetes.io/proxy-read-timeout".to_string(),
-            proxy_timeout_secs.clone(),
-        );
-        annotations.insert(
-            "nginx.ingress.kubernetes.io/proxy-send-timeout".to_string(),
-            proxy_timeout_secs,
-        );
-        if let Some(cluster_issuer) = spec_tls
-            .and_then(|tls| tls.cluster_issuer.as_ref())
-            .or(ctx.config.cluster_issuer.as_ref())
-        {
-            annotations.insert(
-                "cert-manager.io/cluster-issuer".to_string(),
-                cluster_issuer.clone(),
-            );
-        }
-        let mut hosts = ctx
-            .config
-            .runner_hosts
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        if let Some(spec_hosts) = spec_tls.and_then(|tls| tls.hosts.as_ref()) {
-            for host in spec_hosts {
-                hosts.insert(host.clone());
-            }
-        }
-        let (tls, hosts) = if hosts.is_empty() {
-            (None, vec![None])
-        } else {
-            (
-                Some(vec![IngressTLS {
-                    hosts: Some(hosts.iter().cloned().collect()),
-                    secret_name: Some(
-                        runner
-                            .ingress_tls_secret_name()
-                            .map(ToOwned::to_owned)
-                            .unwrap_or_else(|| {
-                                let mut tls_secret_name = String::new();
-                                for hostname in &hosts {
-                                    tls_secret_name.push_str(
-                                        hostname
-                                            .to_lowercase()
-                                            .replace(|ch: char| !ch.is_ascii_alphanumeric(), "-")
-                                            .trim_start_matches('-'),
-                                    );
-                                    tls_secret_name.push('-');
-                                }
-                                tls_secret_name.push_str("tls");
-                                tls_secret_name
-                            }),
-                    ),
-                }]),
-                hosts.into_iter().map(Some).collect(),
-            )
-        };
-        let rules = hosts
-            .into_iter()
-            .map(|host| {
-                kubimo::Result::Ok(IngressRule {
-                    host,
-                    http: Some(HTTPIngressRuleValue {
-                        paths: vec![HTTPIngressPath {
-                            path: Some(effective_ingress_path(runner)?),
-                            path_type: "Prefix".to_string(),
-                            backend: IngressBackend {
-                                service: Some(IngressServiceBackend {
-                                    name: runner.name()?.to_string(),
-                                    port: Some(ServiceBackendPort {
-                                        number: Some(runner_port(runner)),
-                                        ..Default::default()
-                                    }),
-                                }),
-                                ..Default::default()
-                            },
-                        }],
-                    }),
-                })
-            })
-            .collect::<kubimo::Result<Vec<_>>>()?;
-        let svc = Ingress {
-            metadata: ObjectMeta {
-                name: runner.metadata.name.clone(),
+        let ingress = build_ingress(
+            &ctx.config,
+            IngressParams {
+                name: runner.name()?,
                 namespace: runner.metadata.namespace.clone(),
-                owner_references: Some(vec![runner.static_controller_owner_ref()?]),
-                annotations: Some(annotations),
-                ..Default::default()
+                owner_reference: runner.static_controller_owner_ref()?,
+                path: effective_ingress_path(runner)?,
+                service_name: runner.name()?,
+                port: runner_port(runner),
+                ingress: runner.spec.ingress.as_ref(),
             },
-            spec: Some(IngressSpec {
-                ingress_class_name: Some(ingress_class_name),
-                tls,
-                rules: Some(rules),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        ctx.api_namespaced::<Ingress>(namespace).patch(&svc).await
+        );
+        ctx.api_namespaced::<Ingress>(namespace)
+            .patch(&ingress)
+            .await
     }
 }

@@ -4,10 +4,13 @@
 # anonymous, node-template-seeded slot, under a base-url and token minted at
 # each pod's birth. A Runner naming the pool in `spec.pool` adopts one instead
 # of cold-starting — the agent links the slot to the workspace, hydrates it
-# from S3 and acks, and only then does the controller create the Service and
-# Ingress. Anything that makes the runner ineligible (different command,
-# runtime, resources, env, sidecars, or S3 secret; or the pool being empty)
-# silently falls back to a cold start.
+# from S3 and acks. Each warm pod gets its own Service and Ingress when it is
+# minted, but the Service only selects the pod once the controller labels it
+# at the ack. Anything that makes the runner ineligible (different command,
+# runtime, resources, env, sidecars, ingress settings, or S3 secret; or the
+# pool being empty) silently falls back to a cold start. Pool names are at
+# most 54 characters: a warm pod's name adds 9, and its Service is named after
+# it.
 #
 # A warm pod boots marimo with its pool's sandbox backend, so each runtime
 # needs pools of its own: `pythonRuntime: Conda` serves Conda workspaces;

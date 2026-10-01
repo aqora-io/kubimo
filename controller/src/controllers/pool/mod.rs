@@ -119,6 +119,9 @@ impl Reconciler for PoolReconciler {
                 Err(kubimo::kube::Error::Api(status)) if status.code == 409 => {}
                 Err(err) => return Err(err.into()),
             }
+            // The same crash before the route would put an Ingress write,
+            // and an nginx reload, back on the claim path.
+            warm_pod::ensure_route(ctx, pod).await?;
         }
 
         let deficit = (pool.spec.replicas as usize).saturating_sub(kept.len());
@@ -132,6 +135,7 @@ impl Reconciler for PoolReconciler {
                 .patch(&warm_pod::build_warm_pod(&ctx.config, pool, &identity)?)
                 .await?;
             secrets.patch(&warm_pod::claim_secret(&created)?).await?;
+            warm_pod::ensure_route(ctx, &created).await?;
         }
 
         let mut patched = pool.clone();
@@ -151,10 +155,10 @@ impl Reconciler for PoolReconciler {
 
     // Cleanup is the default no-op on purpose. Warm and retiring pods carry a
     // controller ownerReference to the Pool, so garbage collection removes
-    // them (and their claim Secrets, owned by the pods). Claimed pods are
-    // deliberately left alone: their ownerReference was swapped to the Runner
-    // at claim time, so deleting a Pool never takes down a notebook someone is
-    // sitting in.
+    // them (and their claim Secrets, Services and Ingresses, owned by the
+    // pods). Claimed pods are deliberately left alone: their ownerReference
+    // was swapped to the Runner at claim time, so deleting a Pool never takes
+    // down a notebook someone is sitting in.
 }
 
 /// Withdraw a warm pod from the claimable set, then delete it.

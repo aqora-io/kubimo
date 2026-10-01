@@ -6,8 +6,8 @@
 //! from S3 into the directory marimo is already serving, start the sync
 //! watcher, write the marker file the pod's `start.sh` is polling for, wait
 //! for the pod to report the legacy-workspace migration that marker starts,
-//! and ack by annotating the pod `claim-state: bound`. The controller withholds
-//! the Service and Ingress until that ack, so no user ever reaches an
+//! and ack by annotating the pod `claim-state: bound`. Nothing routes to the
+//! pod until the controller sees that ack, so no user ever reaches an
 //! unhydrated workspace, or a notebook whose header is still to be written.
 //!
 //! Failure is always acked as `failed` rather than retried silently: the
@@ -272,8 +272,8 @@ async fn bind(
         });
     // Hydrating into the live directory is safe: the restore writes file by
     // file and deletes nothing it does not know, marimo's file listing is
-    // per-request, and no user session exists yet — the Service and Ingress
-    // only appear after the ack.
+    // per-request, and no user session exists yet — nothing routes to the pod
+    // before the ack.
     let s3 = node.s3_for(pod_namespace, workspace);
     let restored = node
         .hydrate_new_slot(

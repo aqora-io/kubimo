@@ -5,26 +5,38 @@
 //! token minted here. Both are baked into the pod command — marimo cannot
 //! change them once serving — and recorded as annotations, which is what the
 //! runner reconciler reads back at claim time.
+//!
+//! Each warm pod also gets its own Service and Ingress at mint, so that
+//! ingress-nginx has long programmed the route by the time the pod is claimed.
+//! The Service selects a label the pod only gets once the claim is acked.
 
 use std::collections::BTreeMap;
 
-use kubimo::k8s_openapi::api::core::v1::{EnvVar, Pod, Secret, SecretVolumeSource, Volume};
+use kubimo::k8s_openapi::api::core::v1::{
+    EnvVar, Pod, Secret, SecretVolumeSource, Service, ServicePort, ServiceSpec, Volume,
+};
+use kubimo::k8s_openapi::api::networking::v1::Ingress;
 use kubimo::kube::api::ObjectMeta;
 use kubimo::pool::{
     CLAIM_MARKER_ENV, CLAIM_MARKER_RELATIVE_PATH, MIGRATION_MARKER_ENV,
     MIGRATION_MARKER_RELATIVE_PATH, POOL_LABEL, POOL_STATE_LABEL, POOL_STATE_WARM,
-    POOL_TEMPLATE_HASH_ANNOTATION, WARM_BASE_URL_ANNOTATION, WARM_TOKEN_ANNOTATION,
+    POOL_TEMPLATE_HASH_ANNOTATION, ROUTE_LABEL, WARM_BASE_URL_ANNOTATION, WARM_ROUTE_ANNOTATION,
+    WARM_TOKEN_ANNOTATION,
 };
 use kubimo::{Pool, prelude::*};
 use sha2::{Digest, Sha256};
 
 use crate::Config;
-use crate::controllers::ingress::ingress_path_from_name;
+use crate::context::Context;
+use crate::controllers::ingress::{IngressParams, build_ingress, ingress_path_from_name};
 use crate::controllers::runner_pod::{RunnerPodParams, TokenSource, build_runner_pod};
 use crate::controllers::slot_volume;
 
 /// The volume name pool sidecar templates mount the per-pod claim Secret by.
 pub(crate) const CLAIM_VOLUME_NAME: &str = "claim";
+
+/// Edit/Run only (CEL), both of which serve on 80.
+const PORT: i32 = 80;
 
 pub(crate) struct WarmPodIdentity {
     pub name: String,
@@ -69,7 +81,7 @@ pub(crate) fn claim_secret(pod: &Pod) -> kubimo::Result<Secret> {
 /// Bumped whenever this controller changes how it builds a warm pod beyond
 /// what [`template_hash`] fingerprints from the pool, so pods minted by an
 /// older build are retired rather than claimed.
-const WARM_POD_SHAPE: u32 = 1;
+const WARM_POD_SHAPE: u32 = 2;
 
 /// Everything that decides what a warm pod *is*, hashed so drift can be
 /// detected without diffing pod specs. Deliberately excludes the minted
@@ -92,6 +104,14 @@ pub(crate) fn template_hash(config: &Config, pool: &Pool) -> String {
         "s3SecretName": pool.spec.s3_secret_name,
         "storage": pool.spec.storage,
         "origin": config.runner_hosts.first(),
+        // What the Ingress minted with the pod is built from: it is never
+        // re-applied, so a config change retires the pod instead.
+        "ingress": {
+            "className": config.ingress_class_name,
+            "hosts": config.runner_hosts,
+            "clusterIssuer": config.cluster_issuer,
+            "proxyTimeoutSecs": config.runner_proxy_timeout_secs,
+        },
     });
     // Inserted only when configured: flipping the asset origin on (or off)
     // must retire warm pods so they re-mint with the right KUBIMO_ASSET_URL,
@@ -142,6 +162,7 @@ pub(crate) fn build_warm_pod(
                 identity.base_url.clone(),
             ),
             (WARM_TOKEN_ANNOTATION.to_string(), identity.token.clone()),
+            (WARM_ROUTE_ANNOTATION.to_string(), identity.name.clone()),
             (
                 POOL_TEMPLATE_HASH_ANNOTATION.to_string(),
                 template_hash(config, pool),
@@ -153,8 +174,7 @@ pub(crate) fn build_warm_pod(
         base_url: identity.base_url.clone(),
         token: TokenSource::Value(&identity.token),
         log_level: pool.spec.log_level,
-        // Edit/Run only (CEL), both of which serve on 80.
-        port: 80,
+        port: PORT,
         origin: config
             .runner_hosts
             .first()
@@ -186,9 +206,102 @@ pub(crate) fn build_warm_pod(
     }))
 }
 
+/// The name of the Service and Ingress the pod is routed through, or `None`
+/// for a pod minted before warm pods were routed from birth.
+pub(crate) fn route_name(pod: &Pod) -> Option<&str> {
+    pod.metadata
+        .annotations
+        .as_ref()?
+        .get(WARM_ROUTE_ANNOTATION)
+        .map(String::as_str)
+}
+
+fn require_route_name(pod: &Pod) -> kubimo::Result<&str> {
+    route_name(pod).ok_or(kubimo::Error::ObjectMetaMissing(WARM_ROUTE_ANNOTATION))
+}
+
+/// The warm pod's own Service. It selects only [`ROUTE_LABEL`], which the pod
+/// is minted without, so it has no endpoints until the claim is acked.
+pub(crate) fn route_service(pod: &Pod) -> kubimo::Result<Service> {
+    let name = require_route_name(pod)?;
+    Ok(Service {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: pod.metadata.namespace.clone(),
+            owner_references: Some(vec![pod.static_controller_owner_ref()?]),
+            ..Default::default()
+        },
+        spec: Some(ServiceSpec {
+            selector: Some(BTreeMap::from([(
+                ROUTE_LABEL.to_string(),
+                name.to_string(),
+            )])),
+            ports: Some(vec![ServicePort {
+                name: Some("marimo".to_string()),
+                port: PORT,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
+/// The warm pod's own Ingress: the minted base-url, routed the way a cold
+/// runner with default ingress settings is, but to the Service's ClusterIP.
+/// ingress-nginx applies endpoint changes in a config sync, at most one every
+/// ~3.3 s by default, and the claim's replacement warm pod has usually just
+/// taken one with its new Ingress. The ClusterIP is programmed at mint, so the
+/// ack's label only has to reach kube-proxy.
+pub(crate) fn route_ingress(config: &Config, pod: &Pod) -> kubimo::Result<Ingress> {
+    let name = require_route_name(pod)?;
+    let path = pod
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(WARM_BASE_URL_ANNOTATION))
+        .ok_or(kubimo::Error::ObjectMetaMissing(WARM_BASE_URL_ANNOTATION))?;
+    let mut ingress = build_ingress(
+        config,
+        IngressParams {
+            name,
+            namespace: pod.metadata.namespace.clone(),
+            owner_reference: pod.static_controller_owner_ref()?,
+            path: path.clone(),
+            service_name: name,
+            port: PORT,
+            ingress: None,
+        },
+    );
+    ingress.metadata.annotations.get_or_insert_default().insert(
+        "nginx.ingress.kubernetes.io/service-upstream".to_string(),
+        "true".to_string(),
+    );
+    Ok(ingress)
+}
+
+/// Create the pod's Service and Ingress where missing. An existing one is
+/// never re-applied: ingress-nginx's validating webhook tests the whole nginx
+/// config on every Ingress write, no-op or not.
+pub(crate) async fn ensure_route(ctx: &Context, pod: &Pod) -> kubimo::Result<()> {
+    let namespace = pod.require_namespace()?;
+    let name = require_route_name(pod)?;
+    // The Service first: ingress-nginx has no ClusterIP to proxy to before.
+    let services = ctx.api_namespaced::<Service>(namespace);
+    if services.get_opt(name).await?.is_none() {
+        services.patch(&route_service(pod)?).await?;
+    }
+    let ingresses = ctx.api_namespaced::<Ingress>(namespace);
+    if ingresses.get_opt(name).await?.is_none() {
+        ingresses.patch(&route_ingress(&ctx.config, pod)?).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controllers::ingress::{IngressParams, build_ingress};
     use kubimo::{PoolSpec, RunnerCommand};
 
     fn config() -> Config {
@@ -387,6 +500,99 @@ mod tests {
 
         let base = pool(PoolSpec::default());
         assert_ne!(template_hash(&off, &base), template_hash(&on, &base));
+    }
+
+    /// A warm pod is routed from birth by its own Service and Ingress, but the
+    /// Service selects a label the pod is minted without, so nothing reaches
+    /// the pod before the claim is acked. Both are owned by the pod.
+    #[test]
+    fn a_warm_pods_service_selects_it_only_once_routed() {
+        let (mut pod, identity) = warm_pod(PoolSpec::default());
+        pod.metadata.uid = Some("66666666-7777-8888-9999-000000000000".into());
+        assert_eq!(route_name(&pod), Some(identity.name.as_str()));
+        assert!(
+            !pod.metadata
+                .labels
+                .as_ref()
+                .unwrap()
+                .contains_key(ROUTE_LABEL)
+        );
+
+        let service = route_service(&pod).unwrap();
+        assert_eq!(
+            service.metadata.name.as_deref(),
+            Some(identity.name.as_str())
+        );
+        let owner = &service.metadata.owner_references.as_ref().unwrap()[0];
+        assert_eq!(
+            (owner.kind.as_str(), owner.name.as_str()),
+            ("Pod", identity.name.as_str())
+        );
+        let spec = service.spec.as_ref().unwrap();
+        assert_eq!(
+            spec.selector.as_ref().unwrap(),
+            &BTreeMap::from([(ROUTE_LABEL.to_string(), identity.name.clone())])
+        );
+        assert_eq!(spec.ports.as_ref().unwrap()[0].port, 80);
+    }
+
+    /// The Ingress is a cold runner's Ingress built from the configured
+    /// defaults, pointed at the route Service, plus `service-upstream`: nginx
+    /// proxies to the ClusterIP it was programmed with at mint, so the ack's
+    /// label reaches the pod through kube-proxy, not an ingress-nginx sync.
+    #[test]
+    fn a_warm_pods_ingress_routes_its_base_url_through_the_service_cluster_ip() {
+        let mut config = config();
+        config.runner_hosts = vec!["kubimo.org".into()];
+        let (mut pod, identity) = warm_pod(PoolSpec::default());
+        pod.metadata.uid = Some("66666666-7777-8888-9999-000000000000".into());
+
+        let ingress = route_ingress(&config, &pod).unwrap();
+        let mut expected = build_ingress(
+            &config,
+            IngressParams {
+                name: &identity.name,
+                namespace: Some("default".into()),
+                owner_reference: pod.static_controller_owner_ref().unwrap(),
+                path: identity.base_url.clone(),
+                service_name: &identity.name,
+                port: 80,
+                ingress: None,
+            },
+        );
+        expected.metadata.annotations.as_mut().unwrap().insert(
+            "nginx.ingress.kubernetes.io/service-upstream".into(),
+            "true".into(),
+        );
+        assert_eq!(ingress, expected);
+    }
+
+    /// A pod minted by an older controller has no route of its own; its
+    /// runner keeps routing it through the runner's Service and Ingress.
+    #[test]
+    fn a_pod_without_the_route_marker_has_no_route() {
+        assert_eq!(route_name(&Pod::default()), None);
+        assert!(route_service(&Pod::default()).is_err());
+    }
+
+    /// The minted Ingress is never re-applied, so a warm pod whose Ingress no
+    /// longer matches the ingress config must be retired instead.
+    #[test]
+    fn the_template_hash_follows_the_ingress_config() {
+        let base = pool(PoolSpec::default());
+        let hash = |config: &Config| template_hash(config, &base);
+        let default = hash(&config());
+        let changes: [fn(&mut Config); 4] = [
+            |c| c.ingress_class_name = "traefik".into(),
+            |c| c.runner_hosts = vec!["kubimo.org".into(), "other.kubimo.org".into()],
+            |c| c.cluster_issuer = Some("letsencrypt".into()),
+            |c| c.runner_proxy_timeout_secs = 60,
+        ];
+        for change in changes {
+            let mut changed = config();
+            change(&mut changed);
+            assert_ne!(hash(&changed), default);
+        }
     }
 
     /// Sidecars read claim-time config from the per-pod Secret volume; the

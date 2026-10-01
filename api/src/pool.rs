@@ -28,6 +28,12 @@ pub const POOL_STATE_CLAIMED: &str = "claimed";
 /// deleted (template drift or excess replicas).
 pub const POOL_STATE_RETIRING: &str = "retiring";
 
+/// The one label a warm pod's own Service selects, set to the route's name
+/// ([`WARM_ROUTE_ANNOTATION`]) once the agent acks the claim. A warm pod is
+/// minted without it, so its Service has no endpoints and its Ingress reaches
+/// nothing until the slot is hydrated.
+pub const ROUTE_LABEL: &str = "kubimo.aqora.io/route";
+
 /// Controller-written annotation carrying a JSON [`PoolClaim`].
 pub const CLAIM_ANNOTATION: &str = "kubimo.aqora.io/claim";
 
@@ -46,6 +52,10 @@ pub const CLAIM_ERROR_ANNOTATION: &str = "kubimo.aqora.io/claim-error";
 /// contract.
 pub const WARM_BASE_URL_ANNOTATION: &str = "kubimo.aqora.io/warm-base-url";
 pub const WARM_TOKEN_ANNOTATION: &str = "kubimo.aqora.io/warm-token";
+/// Names the Service and Ingress minted with a warm pod, both named after the
+/// pod and owned by it. Absent on a pod minted by an older controller, whose
+/// runner routes it through the runner's own Service and Ingress instead.
+pub const WARM_ROUTE_ANNOTATION: &str = "kubimo.aqora.io/warm-route";
 /// Hash of the pool template a warm pod was built from; a mismatch is what
 /// retires it.
 pub const POOL_TEMPLATE_HASH_ANNOTATION: &str = "kubimo.aqora.io/pool-template-hash";
@@ -123,6 +133,7 @@ mod tests {
             POOL_STATE_LABEL,
             KubimoLabel::borrow("pool-state").to_string()
         );
+        assert_eq!(ROUTE_LABEL, KubimoLabel::borrow("route").to_string());
     }
 
     /// The claim annotation payload is a controller↔agent wire format between

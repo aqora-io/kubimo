@@ -14,8 +14,8 @@ use url::Url;
 use crate::selector::Selector;
 use crate::validation::{
     budget_selector_not_empty, log_level, pool_command_not_render, pool_immutable_fields,
-    pool_max_cpu_greater_than_min, pool_max_memory_greater_than_min, runner_immutable_fields,
-    runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
+    pool_max_cpu_greater_than_min, pool_max_memory_greater_than_min, pool_name_is_a_service_name,
+    runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
     workspace_immutable_fields, workspace_restore_from_not_indexer_prefix,
 };
 
@@ -606,6 +606,7 @@ pub struct PoolStatus {
     validation = pool_immutable_fields(),
     validation = pool_max_memory_greater_than_min(),
     validation = pool_max_cpu_greater_than_min(),
+    validation = pool_name_is_a_service_name(),
     validation = log_level(),
 )]
 #[serde(rename_all = "camelCase")]
@@ -984,6 +985,7 @@ mod tests {
         let crd = serde_json::to_string(&Pool::crd()).unwrap();
         assert!(crd.contains("pool command must be Edit or Run"));
         assert!(crd.contains("pool command and pythonRuntime are immutable"));
+        assert!(crd.contains("pool name must be a DNS-1035 label of at most 54 characters"));
 
         let command = include_str!("./validation/pool_command_not_render.cel");
         assert!(command.contains("in [\"Edit\", \"Run\"]"));
