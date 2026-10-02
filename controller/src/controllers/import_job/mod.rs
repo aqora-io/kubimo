@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use futures::prelude::*;
 use kubimo::k8s_openapi::api::batch::v1::Job;
-use kubimo::kube::runtime::{Controller, controller::Action};
+use kubimo::kube::runtime::{Controller, controller::Action, watcher};
 use kubimo::{ImportJob, Workspace, prelude::*};
 
 use crate::backoff::default_error_policy;
@@ -15,6 +15,8 @@ use crate::context::Context;
 use crate::controllers::runner::is_workspace_ready;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
+
+use apply_job::{AppliedJob, IMPORT_JOB_LABEL};
 
 #[derive(Debug, Clone, Copy)]
 struct ImportJobReconciler;
@@ -53,7 +55,15 @@ impl Reconciler for ImportJobReconciler {
             return Ok(Action::requeue(Duration::from_secs(5)));
         }
 
-        let job = self.apply_job(ctx, import_job, &workspace).await?;
+        let job = match self.apply_job(ctx, import_job, &workspace).await? {
+            AppliedJob::Job(job) => job,
+            AppliedJob::Refused { reason, message } => {
+                let condition =
+                    apply_status::failed(reason, message, import_job.metadata.generation);
+                self.patch_condition(ctx, import_job, condition).await?;
+                return Ok(Action::await_change());
+            }
+        };
         // Job status changes come back through `.owns(jobs)`.
         self.apply_status(ctx, import_job, &job).await?;
         Ok(Action::await_change())
@@ -71,7 +81,7 @@ pub async fn run(
     let import_jobs = ctx.api_global::<ImportJob>().kube().clone();
     let jobs = ctx.api_global::<Job>().kube().clone();
     Ok(Controller::new(import_jobs, Default::default())
-        .owns(jobs, Default::default())
+        .owns(jobs, watcher::Config::default().labels(IMPORT_JOB_LABEL))
         .graceful_shutdown_on(shutdown_signal)
         .run(
             ImportJobReconciler.reconcile("controller").await?,

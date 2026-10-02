@@ -14,7 +14,8 @@ use url::Url;
 use crate::selector::Selector;
 use crate::validation::{
     budget_selector_not_empty, import_job_convert_input, import_job_convert_output,
-    import_job_immutable, import_job_input_source, import_job_name_length, import_job_output_path,
+    import_job_immutable, import_job_input_key, import_job_max_cpu_greater_than_min,
+    import_job_max_memory_greater_than_min, import_job_name_length, import_job_output_path,
     import_job_unique_output_paths, log_level, pool_command_not_render, pool_immutable_fields,
     pool_max_cpu_greater_than_min, pool_max_memory_greater_than_min, pool_name_is_a_service_name,
     runner_immutable_fields, runner_max_cpu_greater_than_min, runner_max_memory_greater_than_min,
@@ -514,26 +515,31 @@ impl Workspace {
     }
 }
 
-/// Where an imported file comes from. Exactly one source is set (CEL
-/// enforced); `s3` is the only one so far.
+/// Where an imported file comes from.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportJobInput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub s3: Option<ImportJobS3Input>,
+    pub s3: ImportJobS3Input,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportJobS3Input {
     pub bucket: String,
-    /// Object key, taken verbatim. For a file that is converted, its extension
+    /// Object key. It may not start or end with `/`, or have an empty, `.` or
+    /// `..` segment: the S3 client would fetch a different object than named,
+    /// or none (CEL enforced). For a file that is converted, its extension
     /// picks the input format: `.ipynb`, `.md`, `.qmd` or `.py`.
     #[schemars(length(min = 1, max = 1024))]
     pub key: String,
     /// Secret with the `AWS_*` credentials to fetch the object with, in the
-    /// same shape as the indexer's. Only the fetch step sees it — never the
-    /// importer, which processes the untrusted file.
+    /// same shape as the indexer's. It must exist when the import starts, or
+    /// the import fails. Only the fetch step sees it — never the importer,
+    /// which processes the untrusted file.
+    #[schemars(
+        length(min = 1, max = 253),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+    )]
     pub secret_name: String,
 }
 
@@ -576,7 +582,9 @@ pub struct ImportJobStatus {
 
 /// Import files into a workspace, each copied as-is or converted into a marimo
 /// notebook. All or nothing: a file that fails fails the whole import. Runs
-/// once: the spec is immutable and a finished import is never retried.
+/// once: the spec is immutable and a finished import is never retried. It has
+/// 10 minutes, mounting the workspace included, and the files may take up to
+/// 1 GiB in all.
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, Default)]
 #[kube(
     group = "kubimo.aqora.io",
@@ -587,12 +595,14 @@ pub struct ImportJobStatus {
     namespaced,
     status = "ImportJobStatus",
     validation = import_job_name_length(),
-    validation = import_job_input_source(),
+    validation = import_job_input_key(),
     validation = import_job_output_path(),
     validation = import_job_unique_output_paths(),
     validation = import_job_convert_input(),
     validation = import_job_convert_output(),
     validation = import_job_immutable(),
+    validation = import_job_max_memory_greater_than_min(),
+    validation = import_job_max_cpu_greater_than_min(),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ImportJobSpec {
@@ -1020,11 +1030,11 @@ mod tests {
             workspace: "bmow-x".to_string(),
             files: vec![ImportJobFile {
                 input: ImportJobInput {
-                    s3: Some(ImportJobS3Input {
+                    s3: ImportJobS3Input {
                         bucket: "imports".to_string(),
                         key: "a/b.ipynb".to_string(),
                         secret_name: "s3".to_string(),
-                    }),
+                    },
                 },
                 output: ImportJobOutput {
                     path: "b.py".to_string(),
@@ -1045,7 +1055,13 @@ mod tests {
         let crd = serde_json::to_string(&ImportJob::crd()).unwrap();
         assert!(crd.contains("bmoij"));
         assert!(crd.contains("import job name must be at most 56 characters"));
-        assert!(crd.contains("import job file input must set exactly one source"));
+        assert!(crd.contains("import job input key must not start or end with /"));
+        assert!(crd.contains("import job max memory must be greater than or equal to min memory"));
+        assert!(crd.contains("import job max cpu must be greater than or equal to min cpu"));
+        // A Job's envFrom refuses any other Secret name, and a Job the
+        // apiserver refuses never runs.
+        assert!(crd.contains("\"pattern\":\"^[a-z0-9]([-a-z0-9]*[a-z0-9])?"));
+        assert!(crd.contains("\"maxLength\":253"));
         assert!(crd.contains("import job output path must be a relative file path"));
         assert!(crd.contains("import job output paths must be unique"));
         assert!(crd.contains("import job file to convert must have an input key ending with"));
