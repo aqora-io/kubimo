@@ -1,8 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
+use kubimo::conditions::{IMPORT_JOB_REJECTED, IMPORT_SECRET_NOT_FOUND};
 use kubimo::k8s_openapi::api::batch::v1::{Job, JobSpec};
 use kubimo::k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, PodSpec, PodTemplateSpec,
+    Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, PodSpec, PodTemplateSpec, Secret,
     SecretEnvSource, SecurityContext, Volume, VolumeMount,
 };
 use kubimo::k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -12,6 +14,7 @@ use kubimo::{ImportJob, Workspace, prelude::*};
 use crate::command::cmd;
 use crate::config::Config;
 use crate::context::Context;
+use crate::controllers::runner::is_invalid_request;
 use crate::controllers::runner_pod::sandbox_runtime_class;
 use crate::controllers::slot_volume;
 use crate::controllers::workspace_affinity;
@@ -23,15 +26,36 @@ use super::ImportJobReconciler;
 const INPUT_VOLUME: &str = "input";
 const INPUT_DIR: &str = "/input";
 
-/// The input formats of a converted file, by extension: what `marimo convert`
-/// reads. Must match the `import_job_convert_input` CEL rule and
-/// `/app/kubimo_import.py`.
-const CONVERT_EXTENSIONS: [&str; 4] = [".ipynb", ".md", ".qmd", ".py"];
+/// The workspace's slot volume. A runner's is named after the workspace, but
+/// a workspace may well be named `input`; like a warm pod's, this one has a
+/// fixed name instead.
+const SLOT_VOLUME: &str = "slot";
+
+/// Where each container writes why it failed (kubelet's default
+/// `terminationMessagePath`), for the ImportJob's Failed condition.
+const TERMINATION_LOG: &str = "/dev/termination-log";
+
+/// The container that converts and writes the files; the others fetch them.
+pub(super) const IMPORT_CONTAINER: &str = "import";
+
+/// On every import Job, valued with its ImportJob's name, so the controller
+/// watches those Jobs and no others.
+pub(super) const IMPORT_JOB_LABEL: &str = "kubimo.aqora.io/import-job";
 
 /// Suffixed so it cannot share a name with the CacheJob Job a platform might
 /// create under the same resource name.
 pub(super) fn job_name(name: &str) -> String {
     format!("{name}-import")
+}
+
+/// What became of an import's Job.
+pub(super) enum AppliedJob {
+    Job(Box<Job>),
+    /// It cannot run, ever: the ImportJob fails with this reason and message.
+    Refused {
+        reason: &'static str,
+        message: String,
+    },
 }
 
 impl ImportJobReconciler {
@@ -41,7 +65,7 @@ impl ImportJobReconciler {
         ctx: &Context,
         import_job: &ImportJob,
         workspace: &Workspace,
-    ) -> Result<Job, kubimo::Error> {
+    ) -> Result<AppliedJob, kubimo::Error> {
         let namespace = import_job.require_namespace()?;
         let name = job_name(import_job.name()?);
         let jobs = ctx.api_namespaced::<Job>(namespace);
@@ -53,14 +77,53 @@ impl ImportJobReconciler {
                 oref.controller == Some(true) && Some(&oref.uid) == import_job.metadata.uid.as_ref()
             });
             if !owned {
-                return Err(kubimo::Error::Custom(format!(
-                    "Job {name} exists but is not this ImportJob's"
-                )));
+                return Ok(AppliedJob::Refused {
+                    reason: IMPORT_JOB_REJECTED,
+                    message: format!("Job {name} already exists and is not this import's"),
+                });
             }
-            return Ok(job);
+            return Ok(AppliedJob::Job(Box::new(job)));
         }
-        jobs.patch(&build_job(&ctx.config, import_job, workspace)?)
+
+        // Kubelet would wait for a missing Secret until the Job's deadline,
+        // and only then report a bare DeadlineExceeded.
+        let secrets = ctx.api_namespaced::<Secret>(namespace);
+        let secret_names: BTreeSet<&str> = import_job
+            .spec
+            .files
+            .iter()
+            .map(|file| file.input.s3.secret_name.as_str())
+            .collect();
+        for secret_name in secret_names {
+            if secrets
+                .kube()
+                .get_metadata_opt(secret_name)
+                .await?
+                .is_none()
+            {
+                return Ok(AppliedJob::Refused {
+                    reason: IMPORT_SECRET_NOT_FOUND,
+                    message: format!("Secret {secret_name:?} not found"),
+                });
+            }
+        }
+
+        match jobs
+            .patch(&build_job(&ctx.config, import_job, workspace)?)
             .await
+        {
+            Ok(job) => Ok(AppliedJob::Job(Box::new(job))),
+            // The spec is immutable, so a Job refused once is refused for
+            // good; retrying would leave the ImportJob without a condition.
+            Err(err) if is_invalid_request(&err) => Ok(AppliedJob::Refused {
+                reason: IMPORT_JOB_REJECTED,
+                message: match err {
+                    kubimo::Error::Kube(kubimo::kube::Error::Api(status)) => status.message,
+                    err => err.to_string(),
+                },
+            }),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -86,29 +149,19 @@ pub(super) fn build_job(
         "/app/kubimo_import.py",
         "--root",
         slot_volume::WORKSPACE_DIR,
+        format!("--termination-log={TERMINATION_LOG}"),
         "--",
     ];
     for (index, file) in import_job.spec.files.iter().enumerate() {
-        let Some(s3) = file.input.s3.as_ref() else {
-            return Err(kubimo::Error::Custom(format!(
-                "ImportJob file {index} has no input source"
-            )));
-        };
+        let s3 = &file.input.s3;
         // Staged under its index: only a converted file's extension, which
-        // picks the format, carries over from the key.
-        let source = if file.converts() {
-            let Some(extension) = CONVERT_EXTENSIONS
-                .iter()
-                .find(|extension| s3.key.ends_with(*extension))
-            else {
-                return Err(kubimo::Error::Custom(format!(
-                    "ImportJob file {index} cannot be converted from {:?}",
-                    s3.key
-                )));
-            };
-            format!("{INPUT_DIR}/{index}{extension}")
-        } else {
-            format!("{INPUT_DIR}/{index}")
+        // picks the format (CEL admits only the ones the importer reads),
+        // carries over from the key.
+        let source = match Path::new(&s3.key).extension() {
+            Some(extension) if file.converts() => {
+                format!("{INPUT_DIR}/{index}.{}", extension.to_string_lossy())
+            }
+            _ => format!("{INPUT_DIR}/{index}"),
         };
         // `--flag=value` throughout, so a key starting with `-` is still a value.
         fetches.entry(&s3.secret_name).or_default().extend([
@@ -127,7 +180,13 @@ pub(super) fn build_job(
         .map(|(index, (secret_name, objects))| Container {
             name: format!("fetch-{index}"),
             image: Some(config.agent_image.clone()),
-            args: Some([cmd!["s3-get"], objects].concat()),
+            args: Some(
+                [
+                    cmd!["s3-get", format!("--termination-log={TERMINATION_LOG}")],
+                    objects,
+                ]
+                .concat(),
+            ),
             env_from: Some(vec![EnvFromSource {
                 secret_ref: Some(SecretEnvSource {
                     name: secret_name.to_string(),
@@ -154,7 +213,7 @@ pub(super) fn build_job(
         .collect();
 
     let import = Container {
-        name: "import".into(),
+        name: IMPORT_CONTAINER.into(),
         image: Some(config.marimo_image.clone()),
         command: Some(command),
         // Away from the workspace, so `uv` picks up none of its configuration.
@@ -186,12 +245,22 @@ pub(super) fn build_job(
                 ..Default::default()
             },
             VolumeMount {
-                name: workspace_name.clone(),
+                name: SLOT_VOLUME.into(),
                 mount_path: slot_volume::MOUNT_DIR.into(),
                 ..Default::default()
             },
         ]),
         ..Default::default()
+    };
+
+    let slot = Volume {
+        name: SLOT_VOLUME.into(),
+        ..slot_volume::workspace_volume(
+            workspace_name,
+            // Writes the imported files into the workspace.
+            false,
+            slot_volume::SlotSources::from_workspace(Some(workspace)),
+        )
     };
 
     // Sandboxed like a runner pod (see `runner_pod`), and co-located with any
@@ -204,12 +273,7 @@ pub(super) fn build_job(
         init_containers: Some(fetches),
         containers: vec![import],
         volumes: Some(vec![
-            slot_volume::workspace_volume(
-                workspace_name,
-                // Writes the imported files into the workspace.
-                false,
-                slot_volume::SlotSources::from_workspace(Some(workspace)),
-            ),
+            slot,
             Volume {
                 name: INPUT_VOLUME.into(),
                 empty_dir: Some(EmptyDirVolumeSource {
@@ -227,6 +291,10 @@ pub(super) fn build_job(
         metadata: ObjectMeta {
             name: Some(job_name(import_job.name()?)),
             namespace: Some(namespace.to_string()),
+            labels: Some(BTreeMap::from([(
+                IMPORT_JOB_LABEL.to_string(),
+                import_job.name()?.to_string(),
+            )])),
             owner_references: Some(vec![import_job.static_controller_owner_ref()?]),
             ..Default::default()
         },
@@ -261,11 +329,11 @@ mod tests {
     fn file(key: &str, path: &str, convert: Option<bool>, secret_name: &str) -> ImportJobFile {
         ImportJobFile {
             input: ImportJobInput {
-                s3: Some(ImportJobS3Input {
+                s3: ImportJobS3Input {
                     bucket: "imports".to_string(),
                     key: key.to_string(),
                     secret_name: secret_name.to_string(),
-                }),
+                },
             },
             output: ImportJobOutput {
                 path: path.to_string(),
@@ -275,10 +343,14 @@ mod tests {
     }
 
     fn import_job(files: Vec<ImportJobFile>) -> ImportJob {
+        import_job_into("bmow-x", files)
+    }
+
+    fn import_job_into(workspace: &str, files: Vec<ImportJobFile>) -> ImportJob {
         let mut import_job = ImportJob::new(
             "bmoij-x",
             ImportJobSpec {
-                workspace: "bmow-x".to_string(),
+                workspace: workspace.to_string(),
                 files,
                 ..Default::default()
             },
@@ -391,6 +463,7 @@ mod tests {
             fetches[0].args.as_deref().unwrap(),
             [
                 "s3-get",
+                "--termination-log=/dev/termination-log",
                 "--bucket=imports",
                 "--key=a.ipynb",
                 "--out=/input/0.ipynb",
@@ -404,6 +477,7 @@ mod tests {
             fetches[1].args.as_deref().unwrap(),
             [
                 "s3-get",
+                "--termination-log=/dev/termination-log",
                 "--bucket=imports",
                 "--key=b.csv",
                 "--out=/input/1"
@@ -451,6 +525,7 @@ mod tests {
                 "/app/kubimo_import.py",
                 "--root",
                 "/home/me/workspace",
+                "--termination-log=/dev/termination-log",
                 "--",
                 "convert",
                 "/input/0.ipynb",
@@ -491,14 +566,14 @@ mod tests {
     fn the_importer_writes_into_the_workspace_slot() {
         let job = build(notebook_and_data());
         let (fetches, import) = containers(&job);
-        let slot = mount(import, "bmow-x");
+        let slot = mount(import, SLOT_VOLUME);
         assert_eq!(slot.mount_path, slot_volume::MOUNT_DIR);
         assert_ne!(slot.read_only, Some(true));
         assert!(
             fetches
                 .iter()
                 .flat_map(|fetch| fetch.volume_mounts.iter().flatten())
-                .all(|mount| mount.name != "bmow-x"),
+                .all(|mount| mount.name != SLOT_VOLUME),
             "the fetch containers have no business in the workspace"
         );
         let pod = pod_spec(&job);
@@ -506,11 +581,15 @@ mod tests {
             .volumes
             .iter()
             .flatten()
-            .find(|volume| volume.name == "bmow-x")
+            .find(|volume| volume.name == SLOT_VOLUME)
             .unwrap();
         let csi = volume.csi.as_ref().unwrap();
         assert_eq!(csi.driver, slot_volume::SLOT_CSI_DRIVER);
         assert_eq!(csi.read_only, Some(false));
+        assert_eq!(
+            csi.volume_attributes.as_ref().unwrap()["workspace"],
+            "bmow-x"
+        );
         assert_eq!(
             pod.affinity,
             Some(workspace_affinity::workspace_affinity("bmow-x"))
@@ -522,11 +601,37 @@ mod tests {
         );
     }
 
+    /// Its volumes are named apart from the workspace, which may share a name
+    /// with the staging volume.
+    #[test]
+    fn a_workspace_named_like_a_volume_still_gets_a_valid_pod() {
+        let job = build_job(
+            &Config::test_default(),
+            &import_job_into(INPUT_VOLUME, notebook_and_data()),
+            &workspace(None),
+        )
+        .unwrap();
+        let names: Vec<_> = pod_spec(&job)
+            .volumes
+            .iter()
+            .flatten()
+            .map(|volume| volume.name.as_str())
+            .collect();
+        assert_eq!(names, [SLOT_VOLUME, INPUT_VOLUME]);
+    }
+
     #[test]
     fn the_job_runs_once_and_belongs_to_the_import_job() {
         let job = build(notebook_and_data());
         assert_eq!(job.metadata.name.as_deref(), Some("bmoij-x-import"));
         assert_eq!(job.metadata.namespace.as_deref(), Some("ns"));
+        assert_eq!(
+            job.metadata.labels,
+            Some(BTreeMap::from([(
+                IMPORT_JOB_LABEL.to_string(),
+                "bmoij-x".to_string()
+            )]))
+        );
         let owner = &job.metadata.owner_references.as_ref().unwrap()[0];
         assert_eq!(owner.kind, "ImportJob");
         assert_eq!(owner.uid, "uid-1");
@@ -556,14 +661,24 @@ mod tests {
         }
     }
 
+    /// The extension is the key's own, not a directory's.
     #[test]
-    fn an_unconvertible_or_missing_input_is_refused() {
-        let config = Config::test_default();
-        let build = |files| build_job(&config, &import_job(files), &workspace(None));
-        assert!(build(vec![file("a/b.txt", "b.py", Some(true), "s3")]).is_err());
-        assert!(build(vec![file("a/b.txt", "b.txt", None, "s3")]).is_ok());
-        let mut no_source = file("a/b.ipynb", "b.py", Some(true), "s3");
-        no_source.input.s3 = None;
-        assert!(build(vec![no_source]).is_err());
+    fn a_converted_file_is_staged_with_its_keys_extension() {
+        let job = build(vec![
+            file("v1.2/notes.md", "notes.py", Some(true), "s3"),
+            file("v1.2/data", "data", None, "s3"),
+            file("v1.2/notes.md", "notes.md", None, "s3"),
+        ]);
+        let (fetches, _) = containers(&job);
+        let outs: Vec<_> = fetches[0]
+            .args
+            .iter()
+            .flatten()
+            .filter(|arg| arg.starts_with("--out="))
+            .collect();
+        assert_eq!(
+            outs,
+            ["--out=/input/0.md", "--out=/input/1", "--out=/input/2"]
+        );
     }
 }

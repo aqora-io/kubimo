@@ -628,11 +628,11 @@ async fn test_import_job_admission_rules() {
         let import_jobs = client.api_namespaced::<kubimo::ImportJob>(&ns);
         let file = |key: &str, path: &str, convert: Option<bool>| kubimo::ImportJobFile {
             input: kubimo::ImportJobInput {
-                s3: Some(kubimo::ImportJobS3Input {
+                s3: kubimo::ImportJobS3Input {
                     bucket: "imports".to_string(),
                     key: key.to_string(),
                     secret_name: "import-s3".to_string(),
-                }),
+                },
             },
             output: kubimo::ImportJobOutput {
                 path: path.to_string(),
@@ -735,13 +735,44 @@ async fn test_import_job_admission_rules() {
             "output paths must be unique",
         );
 
-        let mut no_source = file("in/a.ipynb", "out/a.py", Some(true));
-        no_source.input.s3 = None;
+        for key in ["/in/a.csv", "in/", "in//a.csv", "in/./a.csv", "in/../a.csv"] {
+            refused(
+                import_jobs
+                    .patch(&import_job("bad-key", vec![file(key, "a.csv", None)]))
+                    .await,
+                "input key must not start or end with /",
+            );
+        }
+
+        // Refused here, these would be refused as a Job, which never runs.
+        for secret_name in ["Bad_Secret", "", "a..b"] {
+            let mut bad_secret = file("in/a.csv", "a.csv", None);
+            bad_secret.input.s3.secret_name = secret_name.to_string();
+            assert!(
+                import_jobs
+                    .patch(&import_job("bad-secret", vec![bad_secret]))
+                    .await
+                    .is_err(),
+                "secretName {secret_name:?} must be refused"
+            );
+        }
+        let mut min_over_max = import_job("min-over-max", vec![file("in/a.csv", "a.csv", None)]);
+        min_over_max.spec.memory = Some(kubimo::Requirement {
+            min: Some("2Gi".parse().unwrap()),
+            max: Some("1Gi".parse().unwrap()),
+        });
         refused(
-            import_jobs
-                .patch(&import_job("no-source", vec![no_source]))
-                .await,
-            "file input must set exactly one source",
+            import_jobs.patch(&min_over_max).await,
+            "max memory must be greater than or equal to min memory",
+        );
+        let mut min_over_max = import_job("min-over-max", vec![file("in/a.csv", "a.csv", None)]);
+        min_over_max.spec.cpu = Some(kubimo::Requirement {
+            min: Some("2".parse().unwrap()),
+            max: Some("1".parse().unwrap()),
+        });
+        refused(
+            import_jobs.patch(&min_over_max).await,
+            "max cpu must be greater than or equal to min cpu",
         );
 
         assert!(

@@ -154,11 +154,16 @@ enum Command {
     S3Get {
         #[arg(long, required = true)]
         bucket: Vec<String>,
-        /// Object key, verbatim.
+        /// Object key, parsed as an object store path: a leading or trailing
+        /// `/` is dropped, and empty, `.` or `..` segments are refused.
         #[arg(long, required = true)]
         key: Vec<String>,
         #[arg(long, required = true)]
         out: Vec<PathBuf>,
+        /// Write why a download failed here, as one line naming the object
+        /// but not the endpoint: it becomes the ImportJob's Failed message.
+        #[arg(long)]
+        termination_log: Option<PathBuf>,
     },
 }
 
@@ -207,7 +212,12 @@ fn main() {
             Duration::from_secs(poll_interval_secs),
             runner_grace_secs,
         ),
-        Command::S3Get { bucket, key, out } => s3_get(&bucket, &key, &out),
+        Command::S3Get {
+            bucket,
+            key,
+            out,
+            termination_log,
+        } => s3_get(&bucket, &key, &out, termination_log.as_deref()),
     };
     if let Err(err) = result {
         tracing::error!("{err}");
@@ -331,11 +341,16 @@ fn drain_node(
     Ok(())
 }
 
+/// How many objects one `s3-get` downloads at once.
+const S3_GET_CONCURRENCY: usize = 8;
+
 fn s3_get(
     buckets: &[String],
     keys: &[String],
     outs: &[PathBuf],
+    termination_log: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use futures::{StreamExt, TryStreamExt};
     if buckets.len() != keys.len() || keys.len() != outs.len() {
         return Err("s3-get needs one --bucket and one --out per --key".into());
     }
@@ -343,14 +358,47 @@ fn s3_get(
         .enable_all()
         .build()?
         .block_on(async {
-            let client = indexer::s3::S3Client::from_env();
-            for ((bucket, key), out) in buckets.iter().zip(keys).zip(outs) {
-                let file = tokio::fs::File::create(out).await?;
-                let crc32 = client.download_object(bucket, key, file).await?;
-                tracing::info!(bucket, key, out = %out.display(), crc32 = format!("{crc32:08x}"), "downloaded");
+            let client = &indexer::s3::S3Client::from_env();
+            let downloaded = futures::stream::iter(buckets.iter().zip(keys).zip(outs))
+                .map(|((bucket, key), out)| async move {
+                    let crc32 = async {
+                        let file = tokio::fs::File::create(out).await?;
+                        client.download_object(bucket, key, file).await
+                    }
+                    .await
+                    .map_err(|err| (bucket, key, err))?;
+                    tracing::info!(bucket, key, out = %out.display(), crc32 = format!("{crc32:08x}"), "downloaded");
+                    Ok(())
+                })
+                .buffer_unordered(S3_GET_CONCURRENCY)
+                .try_collect::<()>()
+                .await;
+            let Err((bucket, key, err)) = downloaded else {
+                return Ok(());
+            };
+            if let Some(path) = termination_log {
+                let message = format!("fetching s3://{bucket}/{key}: {}", describe(&err));
+                // Best effort: the full error is logged whatever happens here.
+                let _ = std::fs::write(path, message);
             }
-            Ok(())
+            Err(format!("fetching s3://{bucket}/{key}: {err}").into())
         })
+}
+
+/// Why a download failed, without the endpoint URL and response body
+/// `object_store` puts in its errors: this ends up in the ImportJob's status.
+fn describe(err: &indexer::s3::DownloadError) -> String {
+    use indexer::object_store::Error as StoreError;
+    use indexer::s3::DownloadError;
+    match err {
+        DownloadError::S3(StoreError::NotFound { .. }) => "not found".into(),
+        DownloadError::S3(
+            StoreError::PermissionDenied { .. } | StoreError::Unauthenticated { .. },
+        ) => "access denied".into(),
+        DownloadError::Url(_) => "invalid key".into(),
+        DownloadError::Io(err) => err.to_string(),
+        _ => "request failed".into(),
+    }
 }
 
 fn create_slot(
@@ -513,6 +561,7 @@ mod tests {
         let args = Args::try_parse_from([
             "kubimo-agent",
             "s3-get",
+            "--termination-log=/dev/termination-log",
             "--bucket=imports",
             "--key=-odd/My Notebook.ipynb",
             "--out=/input/0.ipynb",
@@ -521,9 +570,16 @@ mod tests {
             "--out=/input/1",
         ])
         .unwrap();
-        let Command::S3Get { bucket, key, out } = args.command else {
+        let Command::S3Get {
+            bucket,
+            key,
+            out,
+            termination_log,
+        } = args.command
+        else {
             panic!("parsed as {:?}", args.command);
         };
+        assert_eq!(termination_log, Some(PathBuf::from("/dev/termination-log")));
         assert_eq!(bucket, ["imports", "data"]);
         assert_eq!(key, ["-odd/My Notebook.ipynb", "a/b.csv"]);
         assert_eq!(
@@ -538,8 +594,54 @@ mod tests {
             &["imports".into()],
             &["a.ipynb".into(), "b.ipynb".into()],
             &[PathBuf::from("/input/0.ipynb")],
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("one --bucket"), "{err}");
+    }
+
+    /// What reaches the ImportJob's status names no endpoint.
+    #[test]
+    fn a_failed_download_is_described_without_the_endpoint() {
+        use indexer::object_store::Error as StoreError;
+        use indexer::s3::DownloadError;
+        let source = || "GET http://minio.internal:9000/imports/a.csv: 404".into();
+        let cases = [
+            (
+                DownloadError::S3(StoreError::NotFound {
+                    path: "a.csv".into(),
+                    source: source(),
+                }),
+                "not found",
+            ),
+            (
+                DownloadError::S3(StoreError::PermissionDenied {
+                    path: "a.csv".into(),
+                    source: source(),
+                }),
+                "access denied",
+            ),
+            (
+                DownloadError::S3(StoreError::Unauthenticated {
+                    path: "a.csv".into(),
+                    source: source(),
+                }),
+                "access denied",
+            ),
+            (
+                DownloadError::S3(StoreError::Generic {
+                    store: "S3",
+                    source: source(),
+                }),
+                "request failed",
+            ),
+            (
+                DownloadError::Io(std::io::Error::other("disk full")),
+                "disk full",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(describe(&err), expected, "{err}");
+        }
     }
 }
