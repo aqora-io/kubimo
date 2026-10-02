@@ -1,0 +1,7 @@
+self.spec.files.all(f,
+  !f.input.s3.key.startsWith("/") &&
+  !f.input.s3.key.endsWith("/") &&
+  !f.input.s3.key.contains("//") &&
+  !f.input.s3.key.matches("(^|/)[.][.]?(/|$)") &&
+  !f.input.s3.key.matches("[[:cntrl:]]")
+)

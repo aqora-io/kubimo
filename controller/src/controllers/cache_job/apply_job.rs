@@ -96,6 +96,16 @@ impl CacheJobReconciler {
             .get_opt(cache_job_name)
             .await?
         {
+            // An ImportJob `x` owns a Job `x-import`, which a CacheJob of that
+            // name must not take for its own.
+            let owned = job.metadata.owner_references.iter().flatten().any(|oref| {
+                oref.controller == Some(true) && Some(&oref.uid) == cache_job.metadata.uid.as_ref()
+            });
+            if !owned {
+                return Err(kubimo::Error::Custom(format!(
+                    "Job {cache_job_name} exists but is not this CacheJob's"
+                )));
+            }
             return Ok(job);
         }
 

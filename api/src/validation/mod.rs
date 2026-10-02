@@ -100,11 +100,15 @@ pub fn import_job_name_length() -> Rule {
         .message("import job name must be at most 56 characters")
 }
 
-/// Exactly one input source per file. `s3` is the only one so far; a new
-/// source joins this rule rather than changing the Rust type.
-pub fn import_job_input_source() -> Rule {
-    Rule::new(include_str!("./import_job_input_source.cel"))
-        .message("import job file input must set exactly one source")
+/// The S3 client parses a key into a path before fetching it: it drops a
+/// leading or trailing `/` (fetching another object than the one named) and
+/// refuses empty, `.` and `..` segments and control characters. Refused here,
+/// such a key never gets as far as a Job.
+pub fn import_job_input_key() -> Rule {
+    Rule::new(include_str!("./import_job_input_key.cel"))
+        .message(
+            "import job input key must not start or end with /, or have empty, . or .. segments or control characters",
+        )
         .field_path(".spec.files")
 }
 
@@ -140,6 +144,21 @@ pub fn import_job_convert_output() -> Rule {
     Rule::new(include_str!("./import_job_convert_output.cel"))
         .message("import job file to convert must have an output path ending with .py")
         .field_path(".spec.files")
+}
+
+/// See [`runner_max_memory_greater_than_min`]: the same rule, since a Job whose
+/// requests exceed its limits is refused and never runs.
+pub fn import_job_max_memory_greater_than_min() -> Rule {
+    Rule::new(include_str!("./runner_max_memory_greater_than_min.cel"))
+        .message("import job max memory must be greater than or equal to min memory")
+        .field_path(".spec.memory.max")
+}
+
+/// See [`import_job_max_memory_greater_than_min`].
+pub fn import_job_max_cpu_greater_than_min() -> Rule {
+    Rule::new(include_str!("./runner_max_cpu_greater_than_min.cel"))
+        .message("import job max cpu must be greater than or equal to min cpu")
+        .field_path(".spec.cpu.max")
 }
 
 /// An import runs once; its Job is never re-created or updated, so an edited
@@ -180,7 +199,9 @@ mod tests {
         test_compiles(pool_max_memory_greater_than_min());
         test_compiles(pool_max_cpu_greater_than_min());
         test_compiles(import_job_name_length());
-        test_compiles(import_job_input_source());
+        test_compiles(import_job_input_key());
+        test_compiles(import_job_max_memory_greater_than_min());
+        test_compiles(import_job_max_cpu_greater_than_min());
         test_compiles(import_job_output_path());
         test_compiles(import_job_unique_output_paths());
         test_compiles(import_job_convert_input());
@@ -212,20 +233,16 @@ mod tests {
     }
 
     /// Whether `rule` admits an ImportJob with `files`, each given as
-    /// `(key, output path, convert)`. `None` leaves the field out.
-    fn admits(rule: &Rule, files: &[(Option<&str>, &str, Option<bool>)]) -> bool {
+    /// `(key, output path, convert)`. `None` leaves `convert` out.
+    fn admits(rule: &Rule, files: &[(&str, &str, Option<bool>)]) -> bool {
         use cel_interpreter::{Context, Value};
         let files: Vec<_> = files
             .iter()
             .map(|(key, path, convert)| {
                 let mut file = serde_json::json!({
-                    "input": {},
+                    "input": {"s3": {"bucket": "b", "key": key, "secretName": "s"}},
                     "output": {"path": path},
                 });
-                if let Some(key) = key {
-                    file["input"]["s3"] =
-                        serde_json::json!({"bucket": "b", "key": key, "secretName": "s"});
-                }
                 if let Some(convert) = convert {
                     file["convert"] = serde_json::json!(convert);
                 }
@@ -238,21 +255,35 @@ mod tests {
         Program::compile(&rule.rule).unwrap().execute(&ctx).unwrap() == Value::Bool(true)
     }
 
+    /// Only keys the S3 client fetches as named.
     #[test]
-    fn import_job_files_need_a_source() {
-        let rule = import_job_input_source();
-        assert!(admits(&rule, &[(Some("a.csv"), "a.csv", None)]));
-        assert!(!admits(
-            &rule,
-            &[(Some("a.csv"), "a.csv", None), (None, "b.csv", None)]
-        ));
+    fn import_job_input_keys_are_fetched_as_named() {
+        let rule = import_job_input_key();
+        for key in [
+            "a.csv",
+            "in/My Notebook.ipynb",
+            "a/.hidden",
+            "-odd",
+            "a..b",
+            "a/b.c/d",
+        ] {
+            assert!(admits(&rule, &[(key, "a", None)]), "{key}");
+        }
+        for key in [
+            "/a.csv", "a/", "a//b", "./a", "a/./b", "a/../b", "..", ".", "a\tb", "a\u{7f}b",
+        ] {
+            assert!(
+                !admits(&rule, &[("ok", "a", None), (key, "b", None)]),
+                "{key:?}"
+            );
+        }
     }
 
     #[test]
     fn import_job_output_paths_stay_relative() {
         let rule = import_job_output_path();
         for path in ["a.py", "data/My File.csv", "a/.hidden", "-odd.txt", "a..b"] {
-            assert!(admits(&rule, &[(Some("k"), path, None)]), "{path}");
+            assert!(admits(&rule, &[("k", path, None)]), "{path}");
         }
         for path in [
             "/abs.py",
@@ -265,23 +296,20 @@ mod tests {
             ".",
             "..",
         ] {
-            assert!(!admits(&rule, &[(Some("k"), path, None)]), "{path}");
+            assert!(!admits(&rule, &[("k", path, None)]), "{path}");
         }
     }
 
     #[test]
     fn import_job_output_paths_are_unique() {
         let rule = import_job_unique_output_paths();
-        assert!(admits(
-            &rule,
-            &[(Some("a"), "a.py", None), (Some("b"), "b.py", None)]
-        ));
+        assert!(admits(&rule, &[("a", "a.py", None), ("b", "b.py", None)]));
         assert!(!admits(
             &rule,
             &[
-                (Some("a"), "a.py", None),
-                (Some("b"), "b.py", None),
-                (Some("c"), "a.py", Some(true)),
+                ("a", "a.py", None),
+                ("b", "b.py", None),
+                ("c", "a.py", Some(true)),
             ]
         ));
     }
@@ -293,16 +321,13 @@ mod tests {
         let input = import_job_convert_input();
         let output = import_job_convert_output();
         for key in ["a.ipynb", "a.md", "a.qmd", "My Script.py"] {
-            assert!(admits(&input, &[(Some(key), "a.py", Some(true))]), "{key}");
+            assert!(admits(&input, &[(key, "a.py", Some(true))]), "{key}");
         }
-        assert!(!admits(&input, &[(Some("a.txt"), "a.py", Some(true))]));
-        assert!(!admits(
-            &output,
-            &[(Some("a.ipynb"), "a.ipynb", Some(true))]
-        ));
+        assert!(!admits(&input, &[("a.txt", "a.py", Some(true))]));
+        assert!(!admits(&output, &[("a.ipynb", "a.ipynb", Some(true))]));
         for convert in [None, Some(false)] {
-            assert!(admits(&input, &[(Some("a.txt"), "a.txt", convert)]));
-            assert!(admits(&output, &[(Some("a.ipynb"), "a.ipynb", convert)]));
+            assert!(admits(&input, &[("a.txt", "a.txt", convert)]));
+            assert!(admits(&output, &[("a.ipynb", "a.ipynb", convert)]));
         }
     }
 

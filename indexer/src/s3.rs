@@ -296,9 +296,11 @@ impl S3Client {
     }
 
     /// Stream a GET of `bucket`/`key` to `output`, returning the crc32 of the
-    /// downloaded bytes. The key is taken verbatim: the `s3://` URL methods
-    /// above only suit our own keys, since a URL path is percent-encoded — a
-    /// user's `My Notebook.ipynb` would be fetched as `My%20Notebook.ipynb`.
+    /// downloaded bytes. The key is parsed as an object store path, not
+    /// percent-decoded: the `s3://` URL methods above only suit our own keys,
+    /// since a URL path is percent-encoded — a user's `My Notebook.ipynb`
+    /// would be fetched as `My%20Notebook.ipynb`. Parsing drops a leading or
+    /// trailing `/` and refuses empty, `.` and `..` segments.
     #[tracing::instrument(skip(self, output))]
     pub async fn download_object(
         &self,

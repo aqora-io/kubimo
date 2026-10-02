@@ -30,5 +30,20 @@ pub const STARTUP_CONDITIONS: [&str; 4] = [PVC_BOUND, WORKSPACE_READY, POD_SCHED
 /// Terminal.
 pub const IMPORT_COMPLETE: &str = "Complete";
 /// An `ImportJob`'s import failed — fetching a file, converting it, writing
-/// it, or running out of time. Terminal; the reason and message are its Job's.
+/// it, or running out of time. Terminal. Its reason is one of the `IMPORT_*`
+/// reasons below, or else Kubernetes' (`DeadlineExceeded`, `Evicted`); its
+/// message says what went wrong.
 pub const IMPORT_FAILED: &str = "Failed";
+
+/// [`IMPORT_FAILED`] reason: a file could not be fetched from S3. The message
+/// names its bucket and key.
+pub const IMPORT_FETCH_FAILED: &str = "FetchFailed";
+/// [`IMPORT_FAILED`] reason: a file could not be converted or written into the
+/// workspace. The message names its output path; nothing was written.
+pub const IMPORT_WRITE_FAILED: &str = "ImportFailed";
+/// [`IMPORT_FAILED`] reason: the apiserver refused the import's Job, so it
+/// never ran. The message is the apiserver's.
+pub const IMPORT_JOB_REJECTED: &str = "JobRejected";
+/// [`IMPORT_FAILED`] reason: a `secretName` names a Secret that does not
+/// exist, so the import never ran.
+pub const IMPORT_SECRET_NOT_FOUND: &str = "SecretNotFound";

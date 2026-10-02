@@ -119,20 +119,26 @@ def test_output_path_refuses_a_symlink_out_of_the_root(tmp_path):
         kubimo_import.output_path(root, "escape/x.py")
 
 
-def test_write_atomic_creates_and_replaces(tmp_path):
-    path = tmp_path / "a" / "b" / "c.py"
-    kubimo_import.write_atomic(path, "first")
-    kubimo_import.write_atomic(path, "second")
+def test_a_file_is_created_then_replaced(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    for text in ["first", "second"]:
+        src = tmp_path / "0"
+        src.write_text(text)
+        kubimo_import.import_files(root, [("copy", src, "a/b/c.py")])
+    path = root / "a" / "b" / "c.py"
     assert path.read_text() == "second"
     assert path.stat().st_mode & 0o777 == 0o644
     assert sorted(p.name for p in path.parent.iterdir()) == ["c.py"]
 
 
-def test_write_atomic_copies_a_file_byte_for_byte(tmp_path):
+def test_a_copy_is_byte_for_byte(tmp_path):
     src = tmp_path / "staged"
     src.write_bytes(b"\x00\xff,not utf-8\r\n")
-    path = tmp_path / "out" / "data.bin"
-    kubimo_import.write_atomic(path, src)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    kubimo_import.import_files(root, [("copy", src, "out/data.bin")])
+    path = root / "out" / "data.bin"
     assert path.read_bytes() == src.read_bytes()
     assert path.stat().st_mode & 0o777 == 0o644
 
@@ -187,6 +193,79 @@ def test_one_bad_file_writes_nothing(tmp_path):
     assert list(root.iterdir()) == []
 
 
+def _tree(root):
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+
+def test_an_output_inside_another_writes_nothing(tmp_path):
+    src = tmp_path / "0"
+    src.write_text("x")
+    root = tmp_path / "workspace"
+    root.mkdir()
+    with pytest.raises(ValueError, match="'pfx/a/b.csv' is inside output path 'pfx/a'"):
+        kubimo_import.import_files(root, [("copy", src, "pfx/a"), ("copy", src, "pfx/a/b.csv")])
+    assert _tree(root) == []
+
+
+def test_an_existing_directory_is_not_replaced(tmp_path):
+    src = tmp_path / "0"
+    src.write_text("x")
+    root = tmp_path / "workspace"
+    (root / "notebooks").mkdir(parents=True)
+    with pytest.raises(ValueError, match="existing directory: 'notebooks'"):
+        kubimo_import.import_files(root, [("copy", src, "data.csv"), ("copy", src, "notebooks")])
+    assert _tree(root) == ["notebooks"]
+
+
+def test_a_file_cannot_hold_an_output(tmp_path):
+    src = tmp_path / "0"
+    src.write_text("x")
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "x").write_text("a file")
+    with pytest.raises(ValueError, match="inside a file: 'x/y.csv'"):
+        kubimo_import.import_files(root, [("copy", src, "data.csv"), ("copy", src, "x/y.csv")])
+    assert _tree(root) == ["x"]
+
+
+def test_a_failed_write_leaves_nothing_behind(tmp_path):
+    src = tmp_path / "0"
+    src.write_text("x")
+    root = tmp_path / "workspace"
+    (root / "old").mkdir(parents=True)
+    with pytest.raises(kubimo_import.ImportFailed, match="new/b/c.csv: cannot write"):
+        kubimo_import.import_files(
+            root,
+            [("copy", src, "old/a.csv"), ("copy", tmp_path / "missing", "new/b/c.csv")],
+        )
+    # Neither the staged file nor the directories made for the second one.
+    assert _tree(root) == ["old"]
+
+
+def test_markdown_gains_the_marimo_import_it_uses(tmp_path):
+    src = tmp_path / "source.md"
+    src.write_text("# Title\n\nSome prose.\n\n```python {.marimo}\nz = 1\n```\n")
+    cells = _cells(convert(src))
+    assert cells[0] == "import marimo as mo"
+    assert any("mo.md" in cell and "Some prose." in cell for cell in cells)
+
+
+def test_markdown_that_imports_marimo_keeps_its_one_import(tmp_path):
+    src = tmp_path / "source.md"
+    src.write_text(
+        "# Title\n\n```python {.marimo}\nimport marimo as mo\n```\n\n"
+        "```python {.marimo}\nz = 1\n```\n"
+    )
+    cells = _cells(convert(src))
+    assert sum("import marimo as mo" in cell for cell in cells) == 1
+
+
+def test_markdown_without_prose_needs_no_import(tmp_path):
+    src = tmp_path / "source.qmd"
+    src.write_text("```{python}\nq = 2\n```\n")
+    assert not any("import marimo" in cell for cell in _cells(convert(src)))
+
+
 def test_the_script_imports_into_the_root(tmp_path):
     src = tmp_path / "0.ipynb"
     src.write_text(_ipynb(("code", "y = 2")))
@@ -223,6 +302,32 @@ def test_the_script_fails_on_a_bad_input(tmp_path):
     )
     assert result.returncode != 0
     assert not (tmp_path / "y.py").exists()
+
+
+def test_the_script_says_why_it_failed(tmp_path):
+    src = tmp_path / "0.ipynb"
+    src.write_text("not json")
+    root = tmp_path / "workspace"
+    root.mkdir()
+    log = tmp_path / "termination-log"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(IMPORT_SCRIPT),
+            "--root",
+            str(root),
+            f"--termination-log={log}",
+            "--",
+            "convert",
+            str(src),
+            "nb/bad.py",
+        ],
+        capture_output=True,
+    )
+    assert result.returncode != 0
+    assert log.read_text().startswith("nb/bad.py: cannot convert: JSONDecodeError: Expecting value")
+    # The traceback still goes to the log.
+    assert b"Traceback" in result.stderr
 
 
 def test_the_script_wants_whole_triples(tmp_path):
