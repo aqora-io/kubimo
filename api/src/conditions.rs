@@ -44,6 +44,6 @@ pub const IMPORT_WRITE_FAILED: &str = "ImportFailed";
 /// [`IMPORT_FAILED`] reason: the apiserver refused the import's Job, so it
 /// never ran. The message is the apiserver's.
 pub const IMPORT_JOB_REJECTED: &str = "JobRejected";
-/// [`IMPORT_FAILED`] reason: a `secretName` names a Secret that does not
-/// exist, so the import never ran.
+/// [`IMPORT_FAILED`] reason: a `secretName` names a Secret that still did not
+/// exist a minute after the ImportJob was created, so the import never ran.
 pub const IMPORT_SECRET_NOT_FOUND: &str = "SecretNotFound";

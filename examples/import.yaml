@@ -19,8 +19,8 @@
 # It runs once: the spec is immutable, and a Complete or Failed condition is
 # final. All or nothing: if one file fails, none is written. A `secretName` is
 # only handed to the step that fetches its files, never to the one importing
-# them, and must exist before the ImportJob does: a missing one fails it with
-# reason SecretNotFound.
+# them, and must exist within a minute of the ImportJob: one still missing then
+# fails it with reason SecretNotFound.
 apiVersion: kubimo.aqora.io/v1
 kind: ImportJob
 metadata:

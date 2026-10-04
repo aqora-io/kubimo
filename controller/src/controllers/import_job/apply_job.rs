@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::time::Duration;
 
 use kubimo::conditions::{IMPORT_JOB_REJECTED, IMPORT_SECRET_NOT_FOUND};
 use kubimo::k8s_openapi::api::batch::v1::{Job, JobSpec};
 use kubimo::k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, PodSpec, PodTemplateSpec, Secret,
-    SecretEnvSource, SecurityContext, Volume, VolumeMount,
+    Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, PodSpec, PodTemplateSpec,
+    ResourceRequirements, Secret, SecretEnvSource, SecurityContext, Volume, VolumeMount,
 };
 use kubimo::k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use kubimo::k8s_openapi::jiff::Timestamp;
 use kubimo::kube::api::ObjectMeta;
 use kubimo::{ImportJob, Workspace, prelude::*};
 
@@ -42,6 +44,14 @@ pub(super) const IMPORT_CONTAINER: &str = "import";
 /// watches those Jobs and no others.
 pub(super) const IMPORT_JOB_LABEL: &str = "kubimo.aqora.io/import-job";
 
+/// How long after the ImportJob's creation a missing Secret may still turn up:
+/// one applied alongside it (`kubectl apply -f dir/`, a GitOps sync) can land
+/// a moment later.
+const SECRET_GRACE_SECS: i64 = 60;
+
+/// How often to look again for a missing Secret within its grace.
+const SECRET_RETRY_SECS: i64 = 5;
+
 /// Suffixed so it cannot share a name with the CacheJob Job a platform might
 /// create under the same resource name.
 pub(super) fn job_name(name: &str) -> String {
@@ -51,6 +61,8 @@ pub(super) fn job_name(name: &str) -> String {
 /// What became of an import's Job.
 pub(super) enum AppliedJob {
     Job(Box<Job>),
+    /// Not yet: a Secret is missing but may still turn up.
+    Waiting(Duration),
     /// It cannot run, ever: the ImportJob fails with this reason and message.
     Refused {
         reason: &'static str,
@@ -86,7 +98,7 @@ impl ImportJobReconciler {
         }
 
         // Kubelet would wait for a missing Secret until the Job's deadline,
-        // and only then report a bare DeadlineExceeded.
+        // and only then report a bare DeadlineExceeded; this waits a minute.
         let secrets = ctx.api_namespaced::<Secret>(namespace);
         let secret_names: BTreeSet<&str> = import_job
             .spec
@@ -101,6 +113,9 @@ impl ImportJobReconciler {
                 .await?
                 .is_none()
             {
+                if let Some(retry) = secret_retry(import_job, Timestamp::now().as_second()) {
+                    return Ok(AppliedJob::Waiting(retry));
+                }
                 return Ok(AppliedJob::Refused {
                     reason: IMPORT_SECRET_NOT_FOUND,
                     message: format!("Secret {secret_name:?} not found"),
@@ -125,6 +140,39 @@ impl ImportJobReconciler {
             Err(err) => Err(err),
         }
     }
+}
+
+/// A fetch container's requests and limits. It only streams objects to disk,
+/// but they are set all the same: a namespace whose ResourceQuota covers
+/// limits refuses a pod with a container that leaves them out, and the Job
+/// would then only fail at its deadline.
+fn fetch_resources() -> ResourceRequirements {
+    let quantities = |cpu: &str, memory: &str| {
+        BTreeMap::from([
+            ("cpu".to_string(), Quantity(cpu.into())),
+            ("memory".to_string(), Quantity(memory.into())),
+        ])
+    };
+    ResourceRequirements {
+        requests: Some(quantities("50m", "64Mi")),
+        // Room for TLS and a few concurrent downloads, which a tight CPU
+        // limit would throttle into the deadline.
+        limits: Some(quantities("1", "256Mi")),
+        ..Default::default()
+    }
+}
+
+/// While the ImportJob is young enough for a missing Secret to still turn up,
+/// how long to wait before looking again; `None` once it is not.
+fn secret_retry(import_job: &ImportJob, now_secs: i64) -> Option<Duration> {
+    let created = import_job
+        .metadata
+        .creation_timestamp
+        .as_ref()?
+        .0
+        .as_second();
+    let left = created + SECRET_GRACE_SECS - now_secs;
+    (left > 0).then(|| Duration::from_secs(left.min(SECRET_RETRY_SECS) as u64))
 }
 
 /// Fetch into an emptyDir with the credentials, then import from it without
@@ -199,6 +247,7 @@ pub(super) fn build_job(
                 mount_path: INPUT_DIR.into(),
                 ..Default::default()
             }]),
+            resources: Some(fetch_resources()),
             // The agent image runs as root for the DaemonSet; fetching needs
             // none of that, and the importer (uid 1000) must read what this
             // writes.
@@ -502,6 +551,44 @@ mod tests {
             assert_eq!(context.run_as_user, Some(1000));
             assert_eq!(context.run_as_non_root, Some(true));
         }
+    }
+
+    /// So a namespace whose quota covers limits admits the pod.
+    #[test]
+    fn the_fetch_containers_set_requests_and_limits() {
+        let job = build(notebook_and_data());
+        let (fetches, _) = containers(&job);
+        for fetch in fetches {
+            let resources = fetch.resources.as_ref().unwrap();
+            for quantities in [&resources.requests, &resources.limits] {
+                let quantities = quantities.as_ref().unwrap();
+                assert!(quantities.contains_key("cpu"), "{}", fetch.name);
+                assert!(quantities.contains_key("memory"), "{}", fetch.name);
+            }
+        }
+    }
+
+    /// A Secret applied a moment after its ImportJob still counts; one still
+    /// missing a minute later does not.
+    #[test]
+    fn a_missing_secret_is_waited_for_a_minute() {
+        let mut import_job = import_job(notebook_and_data());
+        import_job.metadata.creation_timestamp = Some(
+            kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                Timestamp::from_second(1_000).unwrap(),
+            ),
+        );
+        assert_eq!(
+            secret_retry(&import_job, 1_000),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            secret_retry(&import_job, 1_058),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(secret_retry(&import_job, 1_060), None);
+        import_job.metadata.creation_timestamp = None;
+        assert_eq!(secret_retry(&import_job, 1_000), None);
     }
 
     #[test]

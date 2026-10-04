@@ -57,6 +57,7 @@ impl Reconciler for ImportJobReconciler {
 
         let job = match self.apply_job(ctx, import_job, &workspace).await? {
             AppliedJob::Job(job) => job,
+            AppliedJob::Waiting(retry) => return Ok(Action::requeue(retry)),
             AppliedJob::Refused { reason, message } => {
                 let condition =
                     apply_status::failed(reason, message, import_job.metadata.generation);
