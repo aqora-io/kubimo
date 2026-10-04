@@ -533,9 +533,9 @@ pub struct ImportJobS3Input {
     #[schemars(length(min = 1, max = 1024))]
     pub key: String,
     /// Secret with the `AWS_*` credentials to fetch the object with, in the
-    /// same shape as the indexer's. It must exist when the import starts, or
-    /// the import fails. Only the fetch step sees it — never the importer,
-    /// which processes the untrusted file.
+    /// same shape as the indexer's. It must exist within a minute of the
+    /// ImportJob's creation, or the import fails. Only the fetch step sees it
+    /// — never the importer, which processes the untrusted file.
     #[schemars(
         length(min = 1, max = 253),
         regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
