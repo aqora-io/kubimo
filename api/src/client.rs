@@ -1,9 +1,5 @@
-use hyper_util::{client::legacy::Client as HttpClient, rt::TokioExecutor};
 use k8s_openapi::NamespaceResourceScope;
 use kube::Resource;
-use kube::client::ConfigExt as _;
-use tower::ServiceBuilder;
-use tower_http::{BoxError, trace::TraceLayer};
 
 use crate::{Api, ClientBuildError, ResourceNamespaceExt, Result};
 
@@ -41,23 +37,19 @@ impl ClientBuilder {
 
     pub async fn build(&mut self) -> Result<Client, ClientBuildError> {
         let name = self.name.take().unwrap_or_else(|| "kubimo".into());
-        let config = if let Some(config) = self.config.take() {
+        let mut config = if let Some(config) = self.config.take() {
             config
         } else {
             kube::Config::infer().await?
         };
-        let kube_service = ServiceBuilder::new()
-            .layer(config.base_uri_layer())
-            .option_layer(config.auth_layer()?)
-            .layer(TraceLayer::new_for_http())
-            .map_err(BoxError::from)
-            .service(
-                HttpClient::builder(TokioExecutor::new()).build(config.rustls_https_connector()?),
-            );
-        let kube_client = kube::Client::new(
-            kube_service,
-            self.namespace.take().unwrap_or(config.default_namespace),
-        );
+        if let Some(namespace) = self.namespace.take() {
+            config.default_namespace = namespace;
+        }
+        // kube's own builder wraps the connector in its read/connect/write
+        // timeouts. Without the read timeout a watch whose connection dies
+        // silently (e.g. across a control-plane restart) hangs forever instead
+        // of erroring and being re-established.
+        let kube_client = kube::Client::try_from(config)?;
         Ok(Client::new(kube_client, name))
     }
 }
