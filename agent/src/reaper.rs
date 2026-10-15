@@ -154,7 +154,16 @@ async fn sweep(
         // a slot still idle past the TTL (or, for a superseded slot, still
         // flushed at all). `Reclaim::Deleted` needs no such re-check: the
         // workspace is gone and no flush is coming.
-        if why != Reclaim::Deleted {
+        if why == Reclaim::Retired {
+            match store.retired_ago(&namespace, &workspace) {
+                Ok(retired_ago) if idle_expired(retired_ago, idle_ttl) => {}
+                Ok(_) => continue,
+                Err(err) => {
+                    tracing::warn!(%err, workspace, "could not re-read the retired marker; keeping the slot");
+                    continue;
+                }
+            }
+        } else if why != Reclaim::Deleted {
             match store.flushed_ago(&namespace, &workspace) {
                 Ok(flushed_ago)
                     if match why {
@@ -184,6 +193,10 @@ async fn sweep(
                         workspace,
                         "reclaimed a slot superseded on another node; its contents are in S3"
                     ),
+                    Reclaim::Retired => tracing::info!(
+                        workspace,
+                        "reclaimed a slot retired after its workspace moved to another node"
+                    ),
                 }
             }
             Ok(false) => {}
@@ -206,6 +219,9 @@ enum Reclaim {
     /// would serve stale data if a pod ever came back here. No TTL wait: the
     /// copy is already superseded.
     Superseded,
+    /// The copy lost to one on another node while it was published here
+    /// (see `SlotStore::mark_retired`), and the idle TTL has passed since.
+    Retired,
 }
 
 /// Whether `workspace`'s slot can be dropped, and why.
@@ -254,6 +270,20 @@ async fn should_reclaim(
         .and_then(|status| status.slot.as_ref())
         .and_then(|slot| slot.node.as_deref())
         .is_some_and(|node| node != node_name);
+    // A retired copy has no flush marker and is never in S3 as it stands. One
+    // that lost to a copy on another node is kept for the idle TTL from its
+    // retirement, then dropped; one whose workspace still names this node is
+    // its newest copy, and falls through to be kept like any unflushed one.
+    match store.retired_ago(namespace, workspace) {
+        Ok(Some(retired_ago)) if superseded => {
+            return idle_expired(Some(retired_ago), idle_ttl).then_some(Reclaim::Retired);
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(%err, workspace, "could not read the retired marker; keeping the slot");
+            return None;
+        }
+    }
     match store.flushed_ago(namespace, workspace) {
         Ok(flushed_ago) if superseded && flushed_ago.is_some() => Some(Reclaim::Superseded),
         Ok(flushed_ago) => idle_expired(flushed_ago, idle_ttl).then_some(Reclaim::Idle),

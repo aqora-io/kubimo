@@ -58,6 +58,12 @@ impl NamespacedClients {
         }
     }
 
+    /// Whether the agent has cluster access at all; when it does, a `None`
+    /// from [`Self::get`] means the client could not be built.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// A client scoped to `namespace`, writing as the indexer.
     ///
     /// `None` when the agent has no cluster access, or when the scoped client
@@ -71,6 +77,15 @@ impl NamespacedClients {
     /// fields, under a manager the indexer does not share.
     pub async fn get_for_slot_status(&self, namespace: &str) -> Option<kubimo::Client> {
         self.get_as(namespace, AGENT_MANAGER).await
+    }
+
+    /// Serve `client` for `namespace` under every manager, as if built.
+    #[cfg(test)]
+    pub async fn insert(&self, namespace: &str, client: kubimo::Client) {
+        let mut cache = self.cache.lock().await;
+        for manager in [INDEXER_MANAGER, AGENT_MANAGER] {
+            cache.insert((namespace.to_string(), manager), client.clone());
+        }
     }
 
     async fn get_as(&self, namespace: &str, manager: &'static str) -> Option<kubimo::Client> {

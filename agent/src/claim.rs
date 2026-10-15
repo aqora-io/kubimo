@@ -182,8 +182,9 @@ async fn bind(
 
     // The workspace may already hold a slot on this node from an earlier
     // session. A flushed one is a cache — S3 has everything — so it is
-    // superseded by the claim. An unflushed one may be the only copy of the
-    // tenant's newest work and can never be destroyed for a warm start.
+    // superseded by the claim, and so is a retired one that lost to a copy on
+    // another node. An unflushed one may be the only copy of the tenant's
+    // newest work and can never be destroyed for a warm start.
     match store.lookup(pod_namespace, workspace) {
         Ok(Some(_)) => {
             match store.is_published(pod_namespace, workspace) {
@@ -193,14 +194,23 @@ async fn bind(
                 Ok(true) => return Err("the workspace already has a published slot on this node"),
                 Err(_) => return Err("could not check the workspace's publish state"),
             }
-            match store.flushed_ago(pod_namespace, workspace) {
-                Ok(Some(_)) => {
-                    if store.remove_slot(pod_namespace, workspace).is_err() {
-                        return Err("could not drop the workspace's superseded slot");
-                    }
-                }
-                Ok(None) => return Err("the workspace has an unflushed slot on this node"),
+            let droppable = match store.flushed_ago(pod_namespace, workspace) {
+                Ok(Some(_)) => true,
+                Ok(None) => match store.retired_ago(pod_namespace, workspace) {
+                    Ok(Some(_)) => match node.recorded_slot_node(pod_namespace, workspace).await {
+                        Ok(recorded) => recorded.is_some_and(|recorded| recorded != node.node_id()),
+                        Err(_) => return Err("could not check the workspace's retired slot"),
+                    },
+                    Ok(None) => false,
+                    Err(_) => return Err("could not read the workspace's retired marker"),
+                },
                 Err(_) => return Err("could not read the workspace's flush marker"),
+            };
+            if !droppable {
+                return Err("the workspace has an unflushed slot on this node");
+            }
+            if store.remove_slot(pod_namespace, workspace).is_err() {
+                return Err("could not drop the workspace's superseded slot");
             }
         }
         Ok(None) => {}
@@ -333,8 +343,20 @@ async fn bind(
         Ok(None) => return Err("the anonymous slot vanished mid-claim"),
         Err(_) => return Err("could not adopt the slot"),
     };
+    // Two runners of one workspace can each claim a warm pod. The controller
+    // deletes every claimed pod but one, and only that survivor may name its
+    // node in `status.slot`: a loser that wrote last would point the
+    // workspace's ownership at a node about to lose its pod, and the
+    // survivor's watcher and final flush would then stand down for good.
+    // Bow out instead; a failed claim is deleted and cold-started anyway,
+    // which is what conceding means.
+    if !wins_claim(node, pod_namespace, workspace, pod_name).await {
+        return Err("another claimed pod holds this workspace, or the claim could not be checked");
+    }
     // No made-up quota: absent `limit_bytes` means the slot keeps the pool's
-    // interim quota, whose exact value this claim does not know.
+    // interim quota, whose exact value this claim does not know. Required, as
+    // on the publish path: it is the fence against a node this workspace moved
+    // away from flushing over this copy.
     node.publish_slot_status(
         workspace,
         pod_namespace,
@@ -342,7 +364,11 @@ async fn bind(
         claim.limit_bytes,
         archive.as_ref(),
     )
-    .await;
+    .await
+    .map_err(|err| {
+        tracing::warn!(%err, workspace, "could not record the slot status");
+        "could not record the slot status"
+    })?;
     write_marker(&dir, pod_uid).map_err(|err| {
         tracing::warn!(%err, workspace, "could not write the claim marker");
         "could not write the claim marker"
@@ -358,6 +384,43 @@ async fn bind(
         .await;
     }
     Ok(dir)
+}
+
+/// Whether `pod_name` is the claimed pod of `workspace` that survives a
+/// double-claim, by the controller's own rule ([`kubimo::pool::claim_winner`]).
+///
+/// A failed list fails the claim: `status.slot` is a fence, and a loser that
+/// published it would make the survivor stand down. Losing a claim only costs
+/// a cold start. Without cluster access at all there is no status to write,
+/// so the claim goes ahead.
+async fn wins_claim(
+    node: &Arc<KubimoNode>,
+    pod_namespace: &str,
+    workspace: &str,
+    pod_name: &str,
+) -> bool {
+    let Some(client) = node.client_for(pod_namespace).await else {
+        return true;
+    };
+    let label = (
+        kubimo::KubimoLabel::borrow("workspace").to_string(),
+        workspace.to_string(),
+    );
+    let pods = match client
+        .api_namespaced::<Pod>(pod_namespace)
+        .kube()
+        .list(&kubimo::kube::api::ListParams::from(
+            &FilterParams::new().with_labels(label),
+        ))
+        .await
+    {
+        Ok(pods) => pods.items,
+        Err(err) => {
+            tracing::warn!(%err, workspace, "could not list the workspace's pods; conceding the claim");
+            return false;
+        }
+    };
+    kubimo::pool::claim_winner(&pods).is_none_or(|winner| winner == pod_name)
 }
 
 /// The slot this claim already bound before a restart or a lost ack: the

@@ -13,11 +13,14 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use indexer::object_store;
 use indexer::restore::{RestoreError, RestoreOptions, restore};
 use indexer::s3::{DownloadError, S3Client};
 use kubimo::WorkspaceRestoreSecrets;
+use tokio::time::Instant;
 
 /// Notebook directory inside a slot.
 ///
@@ -45,6 +48,8 @@ pub enum HydrateError {
     Restore(#[from] RestoreError),
     #[error("building archive urls: {0}")]
     ArchiveUrl(#[from] kubimo::url::ParseError),
+    #[error("reading the workspace's directory listings: {0}")]
+    ExistingDirs(#[from] kubimo::Error),
 }
 
 /// Where a workspace's archive lives.
@@ -143,7 +148,7 @@ async fn upload_inputs(
         &mut previous.names,
         &mut previous.urls,
     )
-    .await;
+    .await?;
     // Extend rather than replace: this client is shared by every slot on the
     // node, so replacing would drop every other slot's markers.
     s3.extend_cache(cache_markers).await;
@@ -152,60 +157,263 @@ async fn upload_inputs(
     Ok((options, keys, previous))
 }
 
-/// Continuously sync a bound slot to S3 until the returned task is aborted.
+/// Continuously sync a bound slot to S3 until the returned task is aborted,
+/// or the workspace is deleted or moves to another node.
 ///
 /// Only *bound* slots get a watcher — an idle slot has no runner and cannot
 /// change — so the number of watchers on a node equals the number of running
 /// runners, which is what one indexer pod per active workspace already costs
 /// today.
-pub async fn spawn_watcher(
+///
+/// The returned clock is when the task last confirmed that this node holds the
+/// workspace; the final flush goes by it when it cannot confirm that itself.
+pub fn spawn_watcher(
     slot_dir: &Path,
     workspace: &str,
     archive: &ArchiveLocation,
     client: kubimo::Client,
     s3: indexer::s3::S3Client,
-) -> Result<tokio::task::JoinHandle<()>, HydrateError> {
-    let (options, keys, previous) =
-        upload_inputs(slot_dir, workspace, archive, true, &client, &s3).await?;
+    node: &str,
+) -> (tokio::task::JoinHandle<()>, OwnershipClock) {
+    // The publish starting this watcher has just written this node into
+    // `status.slot`, which confirms it as well as any read.
+    let clock = OwnershipClock::confirmed_now();
+    let slot_dir = slot_dir.to_path_buf();
+    let archive = archive.clone();
     let name = workspace.to_string();
-    Ok(tokio::spawn(async move {
-        // Racing the watcher against the workspace's disappearance, rather than
-        // relying on the unpublish to stop it. Deleting a workspace purges its
-        // S3 prefix, but the runner pod lingers for its termination grace
-        // period — and a shutting-down marimo still writes files. Any upload in
-        // that window recreates the prefix the platform just emptied, with no
-        // CR left to find it by. The final flush is guarded separately.
-        tokio::select! {
-            () = indexer::upload::watch(
-                &options, &client, &s3, &keys, previous.names, previous.urls,
-            ) => {}
-            () = wait_until_deleted(&client, &name) => {
-                tracing::info!(workspace = %name, "workspace deleted; stopping watcher");
+    let node = node.to_string();
+    let task_clock = clock.clone();
+    let handle = tokio::spawn(async move {
+        let clock = task_clock;
+        loop {
+            // Read afresh at the start and after every pause: a paused watch's
+            // view of what it last uploaded is gone with it. A failed read is
+            // retried rather than worked around, since a watch started from a
+            // partial one re-uploads everything it missed under new keys.
+            let (options, keys, previous) = loop {
+                match upload_inputs(&slot_dir, &name, &archive, true, &client, &s3).await {
+                    Ok(inputs) => break inputs,
+                    Err(err) => {
+                        tracing::warn!(%err, workspace = %name, "could not prepare to sync the slot; retrying");
+                    }
+                }
+                tokio::time::sleep(OWNERSHIP_POLL).await;
+            };
+            // Racing the watcher against the workspace's disappearance, rather
+            // than relying on the unpublish to stop it. Deleting a workspace
+            // purges its S3 prefix, but the runner pod lingers for its
+            // termination grace period — and a shutting-down marimo still
+            // writes files. Any upload in that window recreates the prefix the
+            // platform just emptied, with no CR left to find it by. The final
+            // flush is guarded separately.
+            //
+            // Likewise its move to another node: once this node's pods were
+            // force-deleted off it, the workspace is hydrated and written to
+            // elsewhere, and this watcher — which re-uploads the manifest
+            // every cycle, changed or not — would overwrite that node's archive
+            // with this stale copy for as long as it ran. Every pass checks
+            // first; the poll below only catches a move or an unreachable API
+            // server between passes. A failed check lets the pass go ahead:
+            // only ownership unconfirmed for the whole grace pauses sync,
+            // through the poll.
+            let may_upload = || async {
+                match ownership(&client, &name, &node).await {
+                    Some(Ownership::Held) => {
+                        clock.confirm();
+                        true
+                    }
+                    Some(Ownership::Lost(lost)) => {
+                        clock.lose();
+                        stopping(&name, &lost);
+                        false
+                    }
+                    None => true,
+                }
+            };
+            let lost = tokio::select! {
+                () = indexer::upload::watch(
+                    &options, &client, &s3, &keys, previous.names, previous.urls, may_upload,
+                ) => return,
+                lost = watch_ownership(&client, &name, &node, &clock) => lost,
+            };
+            if let Some(lost) = lost {
+                stopping(&name, &lost);
+                return;
             }
+            tracing::warn!(
+                workspace = %name,
+                "cannot confirm with the API server that this node still holds the \
+                 workspace; pausing sync until it can"
+            );
+            loop {
+                tokio::time::sleep(OWNERSHIP_POLL).await;
+                match ownership(&client, &name, &node).await {
+                    Some(Ownership::Held) => break,
+                    Some(Ownership::Lost(lost)) => {
+                        clock.lose();
+                        stopping(&name, &lost);
+                        return;
+                    }
+                    None => {}
+                }
+            }
+            clock.confirm();
+            tracing::info!(workspace = %name, "ownership confirmed; resuming sync");
         }
-    }))
+    });
+    (handle, clock)
 }
 
-/// How often to re-check that a watched workspace still exists.
+fn stopping(workspace: &str, lost: &Lost) {
+    match lost {
+        Lost::Deleted => tracing::info!(workspace, "workspace deleted; stopping watcher"),
+        Lost::Moved(current) => tracing::warn!(
+            workspace,
+            current_node = %current,
+            "workspace has moved to another node; stopping watcher"
+        ),
+    }
+}
+
+/// What one read of the workspace says about this node's hold on it.
+pub(crate) enum Ownership {
+    Held,
+    Lost(Lost),
+}
+
+/// Why this node no longer holds a workspace.
+pub(crate) enum Lost {
+    /// The workspace is deleted or being deleted.
+    Deleted,
+    /// `status.slot.node` names this other node.
+    Moved(String),
+}
+
+/// When this node last confirmed, from the API server, that it holds a
+/// workspace.
 ///
-/// Bounds how long an upload can keep recreating a purged archive. Short enough
+/// Kept current by the slot's watcher, and cleared once it sees the workspace
+/// deleted or moved. The final flush reads it when its own check fails: a
+/// confirmation within [`OWNERSHIP_GRACE`] is what lets a watcher pass go
+/// ahead on a failed check, and the final flush is one more pass.
+#[derive(Clone)]
+pub struct OwnershipClock(Arc<Mutex<Option<Instant>>>);
+
+impl OwnershipClock {
+    pub(crate) fn confirmed_now() -> Self {
+        Self(Arc::new(Mutex::new(Some(Instant::now()))))
+    }
+
+    fn confirm(&self) {
+        *self.lock() = Some(Instant::now());
+    }
+
+    fn lose(&self) {
+        *self.lock() = None;
+    }
+
+    /// Whether ownership was confirmed within [`OWNERSHIP_GRACE`].
+    pub fn is_recent(&self) -> bool {
+        self.lock()
+            .is_some_and(|confirmed| confirmed.elapsed() < OWNERSHIP_GRACE)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<Instant>> {
+        match self.0.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+/// How often to re-check that a watched workspace still exists and still
+/// lives on this node.
+///
+/// Bounds how long an upload can keep recreating a purged archive, or
+/// overwriting the archive of the node the workspace moved to. Short enough
 /// to land inside a pod's termination grace period, long enough that a node's
 /// worth of slots is a negligible request rate.
-const DELETION_POLL: std::time::Duration = std::time::Duration::from_secs(10);
+const OWNERSHIP_POLL: Duration = Duration::from_secs(10);
 
-/// Resolve once `workspace` is gone or has been marked for deletion.
+/// How long a read of the workspace's ownership may take before it counts as
+/// failed.
 ///
-/// Never resolves on API errors: losing the API server briefly must not look
-/// like a deletion and silently stop syncing a live workspace.
-async fn wait_until_deleted(client: &kubimo::Client, workspace: &str) {
+/// The client's own read timeout is kube's, close to five minutes: a read
+/// that hangs that long, on a node cut off from the API server without a
+/// reset, would run out the whole of [`OWNERSHIP_GRACE`] on its own.
+const OWNERSHIP_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long ownership may go unconfirmed before uploads pause, counted from
+/// the last read that confirmed it.
+///
+/// A node the API server cannot reach may have had its pods force-deleted,
+/// and its workspace hydrated and written to elsewhere — but never sooner
+/// than the unreachable taint's eviction (300 s) plus the pod's grace period
+/// plus the controller's margin (60 s). Pausing well inside that window means
+/// a node cut off from the API but not from S3 has stopped uploading before
+/// any replacement exists, while a short API blip on a healthy node does not
+/// interrupt its sync at all.
+const OWNERSHIP_GRACE: Duration = Duration::from_secs(60);
+
+/// Read this node's hold on `workspace`. `None` when the API server could not
+/// say within [`OWNERSHIP_READ_TIMEOUT`].
+pub(crate) async fn ownership(
+    client: &kubimo::Client,
+    workspace: &str,
+    node: &str,
+) -> Option<Ownership> {
+    let read = tokio::time::timeout(
+        OWNERSHIP_READ_TIMEOUT,
+        client.api::<kubimo::Workspace>().get_opt(workspace),
+    )
+    .await;
+    let found = match read {
+        Ok(Ok(found)) => found,
+        Ok(Err(err)) => {
+            tracing::warn!(%err, workspace, "could not check whether this node still holds the workspace");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(
+                workspace,
+                "timed out checking whether this node still holds the workspace"
+            );
+            return None;
+        }
+    };
+    Some(match found {
+        Some(found) if found.metadata.deletion_timestamp.is_none() => match found
+            .status
+            .and_then(|status| status.slot)
+            .and_then(|slot| slot.node)
+            .filter(|current| current != node)
+        {
+            Some(current) => Ownership::Lost(Lost::Moved(current)),
+            None => Ownership::Held,
+        },
+        _ => Ownership::Lost(Lost::Deleted),
+    })
+}
+
+/// Resolve once `workspace` is gone, has been marked for deletion, or its
+/// `status.slot` names a node other than `node` (`Some`), or once `clock` has
+/// gone unconfirmed for [`OWNERSHIP_GRACE`] (`None`).
+async fn watch_ownership(
+    client: &kubimo::Client,
+    workspace: &str,
+    node: &str,
+    clock: &OwnershipClock,
+) -> Option<Lost> {
     loop {
-        tokio::time::sleep(DELETION_POLL).await;
-        match client.api::<kubimo::Workspace>().get_opt(workspace).await {
-            Ok(Some(found)) if found.metadata.deletion_timestamp.is_none() => {}
-            Ok(_) => return,
-            Err(err) => {
-                tracing::warn!(%err, workspace, "could not check whether the workspace still exists")
+        tokio::time::sleep(OWNERSHIP_POLL).await;
+        match ownership(client, workspace, node).await {
+            Some(Ownership::Held) => clock.confirm(),
+            Some(Ownership::Lost(lost)) => {
+                clock.lose();
+                return Some(lost);
             }
+            None if !clock.is_recent() => return None,
+            None => {}
         }
     }
 }
@@ -320,8 +528,139 @@ pub async fn hydrate_slot(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A client whose every request is answered by `respond`.
+    pub(crate) fn client_answering(
+        respond: impl Fn() -> Option<kubimo::Workspace> + Clone + Send + 'static,
+    ) -> kubimo::Client {
+        let service = tower::service_fn(move |_req: http::Request<kubimo::kube::client::Body>| {
+            let respond = respond.clone();
+            async move {
+                let response = match respond() {
+                    Some(workspace) => http::Response::builder().status(200).body(
+                        kubimo::kube::client::Body::from(serde_json::to_vec(&workspace).unwrap()),
+                    ),
+                    None => http::Response::builder().status(404).body(
+                        kubimo::kube::client::Body::from(
+                            serde_json::to_vec(&serde_json::json!({
+                                "kind": "Status",
+                                "apiVersion": "v1",
+                                "status": "Failure",
+                                "reason": "NotFound",
+                                "code": 404,
+                            }))
+                            .unwrap(),
+                        ),
+                    ),
+                };
+                Ok::<_, std::io::Error>(response.unwrap())
+            }
+        });
+        kubimo::Client::new(
+            kubimo::kube::Client::new(service, "default"),
+            "kubimo-indexer",
+        )
+    }
+
+    /// A client whose every request fails outright.
+    pub(crate) fn failing_client() -> kubimo::Client {
+        let service = tower::service_fn(|_req: http::Request<kubimo::kube::client::Body>| async {
+            Err::<http::Response<kubimo::kube::client::Body>, std::io::Error>(
+                std::io::Error::other("no cluster in tests"),
+            )
+        });
+        kubimo::Client::new(
+            kubimo::kube::Client::new(service, "default"),
+            "kubimo-indexer",
+        )
+    }
+
+    /// A client whose every request hangs, as across a partition that drops
+    /// packets rather than resetting connections.
+    pub(crate) fn hanging_client() -> kubimo::Client {
+        let service = tower::service_fn(|_req: http::Request<kubimo::kube::client::Body>| {
+            std::future::pending::<Result<http::Response<kubimo::kube::client::Body>, std::io::Error>>(
+            )
+        });
+        kubimo::Client::new(
+            kubimo::kube::Client::new(service, "default"),
+            "kubimo-indexer",
+        )
+    }
+
+    pub(crate) fn workspace_on(node: Option<&str>) -> kubimo::Workspace {
+        let mut workspace = kubimo::Workspace::new("bmow-x", Default::default());
+        workspace.status = Some(kubimo::WorkspaceStatus {
+            slot: Some(kubimo::WorkspaceSlotStatus {
+                node: node.map(str::to_string),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        workspace
+    }
+
+    #[tokio::test]
+    async fn ownership_reads_held_moved_and_deleted() {
+        let on = |node: Option<&'static str>| client_answering(move || Some(workspace_on(node)));
+        assert!(matches!(
+            ownership(&on(Some("node-a")), "bmow-x", "node-a").await,
+            Some(Ownership::Held)
+        ));
+        // Nothing recorded yet is no rival either.
+        assert!(matches!(
+            ownership(&on(None), "bmow-x", "node-a").await,
+            Some(Ownership::Held)
+        ));
+        assert!(matches!(
+            ownership(&on(Some("node-b")), "bmow-x", "node-a").await,
+            Some(Ownership::Lost(Lost::Moved(node))) if node == "node-b"
+        ));
+        assert!(matches!(
+            ownership(&client_answering(|| None), "bmow-x", "node-a").await,
+            Some(Ownership::Lost(Lost::Deleted))
+        ));
+    }
+
+    /// kube's own read timeout is close to five minutes, longer than the
+    /// whole grace; a read that hangs must count as failed long before that.
+    #[tokio::test(start_paused = true)]
+    async fn a_hanging_ownership_read_fails_within_its_timeout() {
+        let started = Instant::now();
+        assert!(
+            ownership(&hanging_client(), "bmow-x", "node-a")
+                .await
+                .is_none()
+        );
+        assert_eq!(started.elapsed(), OWNERSHIP_READ_TIMEOUT);
+    }
+
+    /// The grace runs from the last confirmation, not from the first failed
+    /// read: reads that hang from the start pause sync once the grace is out,
+    /// not a read timeout or more later.
+    #[tokio::test(start_paused = true)]
+    async fn unconfirmed_ownership_pauses_sync_once_the_grace_runs_out() {
+        let clock = OwnershipClock::confirmed_now();
+        let started = Instant::now();
+        let lost = watch_ownership(&hanging_client(), "bmow-x", "node-a", &clock).await;
+        assert!(lost.is_none(), "unverified, not lost");
+        assert!(started.elapsed() >= OWNERSHIP_GRACE);
+        assert!(started.elapsed() <= OWNERSHIP_GRACE + OWNERSHIP_READ_TIMEOUT);
+        assert!(!clock.is_recent());
+    }
+
+    /// A move is final: the clock is cleared, so a final flush whose own check
+    /// fails cannot go ahead on a confirmation from before the move.
+    #[tokio::test(start_paused = true)]
+    async fn a_move_clears_the_ownership_clock() {
+        let clock = OwnershipClock::confirmed_now();
+        let moved = client_answering(|| Some(workspace_on(Some("node-b"))));
+        let lost = watch_ownership(&moved, "bmow-x", "node-a", &clock).await;
+        assert!(matches!(lost, Some(Lost::Moved(node)) if node == "node-b"));
+        assert!(!clock.is_recent());
+    }
 
     /// A slot with no `workspace` subdirectory has had nothing pushed to S3,
     /// and saying otherwise is what lets the reaper evict it. Reporting `Ok` on
