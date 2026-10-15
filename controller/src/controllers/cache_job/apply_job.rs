@@ -62,8 +62,9 @@ impl CacheJobReconciler {
         // flushed when it unpublishes it, and that flush writes the archive
         // *and* the `WorkspaceDirectory` CRs. The workspace affinity already
         // co-locates this with any live runner, so the two share one slot
-        // rather than racing from different nodes.
-        let affinity = Some(workspace_affinity::workspace_affinity(workspace_name));
+        // rather than racing from different nodes. Built only when the Job is
+        // created, so the slot-node preference is safe here.
+        let affinity = Some(workspace_affinity::new_pod_affinity(workspace));
         PodSpec {
             containers: vec![self.cache_container(config, cache_job, workspace)],
             affinity,
