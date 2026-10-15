@@ -309,8 +309,12 @@ impl SlotStore {
         let Some(id) = self.lookup_slot_id(namespace, workspace)? else {
             return Ok(None);
         };
-        let Ok(meta) = std::fs::metadata(self.retired_path(&id)) else {
-            return Ok(None);
+        // Only a missing marker means "not retired": reading one that cannot
+        // be read as absent would serve a retired copy unchecked.
+        let meta = match std::fs::metadata(self.retired_path(&id)) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io_err(format!("reading retired marker for {id}"))(err)),
         };
         Ok(Some(
             meta.modified()
@@ -1743,5 +1747,18 @@ mod tests {
         );
         store.clear_retired("platform", "bmow-stayed").unwrap();
         assert_eq!(store.retired_ago("platform", "bmow-stayed").unwrap(), None);
+    }
+
+    /// Only a missing marker means "not retired". One that is there but cannot
+    /// be read is an error, so the publish fails rather than serving a copy
+    /// that may have lost to another node unchecked.
+    #[test]
+    fn an_unreadable_retired_marker_is_an_error() {
+        let (_dir, store) = store();
+        let slot = store.resolve_or_create("platform", "bmow-loop").unwrap();
+        let marker = store.retired_path(&slot.id);
+        // A symlink to itself: `metadata` fails with ELOOP, not NotFound.
+        std::os::unix::fs::symlink(&marker, &marker).unwrap();
+        assert!(store.retired_ago("platform", "bmow-loop").is_err());
     }
 }
