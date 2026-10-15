@@ -205,6 +205,13 @@ impl SlotStore {
         self.index_dir().join(format!("flushed-{id}"))
     }
 
+    /// Marker recording that this slot may have been superseded by a copy on
+    /// another node, and must not be served or uploaded again unless the
+    /// workspace's status shows it was not.
+    fn retired_path(&self, id: &SlotId) -> PathBuf {
+        self.index_dir().join(format!("retired-{id}"))
+    }
+
     fn counter_path(&self) -> PathBuf {
         self.index_dir().join("next-project-id")
     }
@@ -263,6 +270,68 @@ impl SlotStore {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(io_err(format!("clearing flush marker for {id}"))(err)),
+        }
+    }
+
+    /// Record that `workspace`'s slot on this node may have been superseded
+    /// while it was published here: the workspace moved to another node (its
+    /// pods were force-deleted off this one) and has been written to there
+    /// since, or this node could not confirm that it had not.
+    ///
+    /// The copy is served again only if the workspace's status still names
+    /// this node, so that nothing took it over; otherwise the next publish here
+    /// drops it for a fresh hydration, and the reaper drops it once the idle
+    /// TTL has passed since now. Until then it stays on disk, the only place
+    /// whatever this node never synced still exists.
+    pub fn mark_retired(&self, namespace: &str, workspace: &str) -> Result<(), StoreError> {
+        validate_workspace_name(namespace)?;
+        validate_workspace_name(workspace)?;
+        let Some(id) = self.lookup_slot_id(namespace, workspace)? else {
+            return Ok(());
+        };
+        let path = self.retired_path(&id);
+        std::fs::write(&path, b"").map_err(io_err(format!("writing {}", path.display())))?;
+        Ok(())
+    }
+
+    /// How long ago `workspace`'s slot was retired by [`Self::mark_retired`];
+    /// `None` if it never was. Unlike a flush, a retirement must never be
+    /// forgotten over a clock step: a marker whose age cannot be read counts as
+    /// retired just now, which delays reaping but never serves the copy
+    /// unchecked.
+    pub fn retired_ago(
+        &self,
+        namespace: &str,
+        workspace: &str,
+    ) -> Result<Option<Duration>, StoreError> {
+        validate_workspace_name(namespace)?;
+        validate_workspace_name(workspace)?;
+        let Some(id) = self.lookup_slot_id(namespace, workspace)? else {
+            return Ok(None);
+        };
+        let Ok(meta) = std::fs::metadata(self.retired_path(&id)) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            meta.modified()
+                .ok()
+                .and_then(|at| std::time::SystemTime::now().duration_since(at).ok())
+                .unwrap_or_default(),
+        ))
+    }
+
+    /// Undo [`Self::mark_retired`], for a copy shown to be its workspace's
+    /// newest after all.
+    pub fn clear_retired(&self, namespace: &str, workspace: &str) -> Result<(), StoreError> {
+        validate_workspace_name(namespace)?;
+        validate_workspace_name(workspace)?;
+        let Some(id) = self.lookup_slot_id(namespace, workspace)? else {
+            return Ok(());
+        };
+        match std::fs::remove_file(self.retired_path(&id)) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(io_err(format!("clearing retired marker for {id}"))(err)),
         }
     }
 
@@ -739,6 +808,7 @@ impl SlotStore {
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_file(self.project_id_path(&id));
         let _ = std::fs::remove_file(self.flushed_path(&id));
+        let _ = std::fs::remove_file(self.retired_path(&id));
         Ok(true)
     }
 
@@ -961,6 +1031,7 @@ impl SlotStore {
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_file(self.project_id_path(&id));
         let _ = std::fs::remove_file(self.flushed_path(&id));
+        let _ = std::fs::remove_file(self.retired_path(&id));
         Ok(true)
     }
 
@@ -1624,5 +1695,53 @@ mod tests {
         // never-flushed and the slot is likewise kept.
         store.clear_flushed("platform", "bmow-reflush").unwrap();
         assert_eq!(store.flushed_ago("platform", "bmow-reflush").unwrap(), None);
+    }
+
+    /// A retired slot is never forgotten: its marker survives a clock step
+    /// (a future mtime reads as retired just now, not as never retired), and
+    /// it goes with the slot, so a fresh slot for the same workspace starts
+    /// out unretired.
+    #[test]
+    fn a_retired_marker_survives_a_clock_step_and_dies_with_its_slot() {
+        let (_dir, store) = store();
+        let slot = store.resolve_or_create("platform", "bmow-moved").unwrap();
+        assert_eq!(store.retired_ago("platform", "bmow-moved").unwrap(), None);
+
+        store.mark_retired("platform", "bmow-moved").unwrap();
+        let future = std::time::SystemTime::now() + Duration::from_secs(60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(store.retired_path(&slot.id))
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+        assert_eq!(
+            store.retired_ago("platform", "bmow-moved").unwrap(),
+            Some(Duration::ZERO)
+        );
+
+        assert!(store.remove_slot("platform", "bmow-moved").unwrap());
+        let fresh = store.resolve_or_create("platform", "bmow-moved").unwrap();
+        assert!(fresh.created);
+        assert_eq!(store.retired_ago("platform", "bmow-moved").unwrap(), None);
+    }
+
+    /// A retired copy shown to be the newest is served again, and clearing its
+    /// marker is what says so. Clearing one never set is not an error.
+    #[test]
+    fn clearing_a_retired_marker_unretires_the_slot() {
+        let (_dir, store) = store();
+        store.resolve_or_create("platform", "bmow-stayed").unwrap();
+        store.clear_retired("platform", "bmow-stayed").unwrap();
+
+        store.mark_retired("platform", "bmow-stayed").unwrap();
+        assert!(
+            store
+                .retired_ago("platform", "bmow-stayed")
+                .unwrap()
+                .is_some()
+        );
+        store.clear_retired("platform", "bmow-stayed").unwrap();
+        assert_eq!(store.retired_ago("platform", "bmow-stayed").unwrap(), None);
     }
 }

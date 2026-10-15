@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use tonic::{Request, Response, Status};
 
+use crate::hydrate::{Lost, Ownership, OwnershipClock};
 use crate::quota;
 use crate::store::SlotStore;
 
@@ -180,9 +181,25 @@ pub struct KubimoNode {
     watchers: std::sync::Mutex<std::collections::HashMap<String, Watcher>>,
 }
 
+/// Whether an unpublished slot gets its final flush.
+enum FlushVerdict {
+    Flush,
+    /// The workspace is deleted or being deleted.
+    GoingAway,
+    /// The workspace's slot is now on the named node.
+    Superseded(String),
+    /// Whether this node still holds the workspace could not be read.
+    Unverified,
+}
+
+/// How many times [`KubimoNode::flush_verdict`] reads the workspace before
+/// giving up on a final flush.
+const FLUSH_VERDICT_ATTEMPTS: u32 = 3;
+
 /// A slot's sync task and the published volumes keeping it alive.
 struct Watcher {
     handle: tokio::task::JoinHandle<()>,
+    ownership: OwnershipClock,
     volumes: std::collections::HashSet<String>,
 }
 
@@ -397,46 +414,30 @@ impl KubimoNode {
             return;
         };
         let key = Self::slot_key(namespace, workspace);
-        // Deliberately scoped: `spawn_watcher` awaits (it reads the workspace's
-        // existing directory CRs to recover its key layout), and this is a std
-        // mutex whose guard cannot be held across that.
-        {
-            let mut watchers = self.lock_watchers();
-            if let Some(watcher) = watchers.get_mut(&key) {
-                watcher.volumes.insert(volume_id.to_string());
-                return;
-            }
-        }
-        let handle = match crate::hydrate::spawn_watcher(
-            dir,
-            workspace,
-            archive,
-            client.clone(),
-            s3,
-        )
-        .await
-        {
-            Ok(handle) => handle,
-            Err(err) => {
-                tracing::warn!(%err, workspace, "could not start watcher; \
-                     the slot will only be flushed when its runner stops");
-                return;
-            }
-        };
         let mut watchers = self.lock_watchers();
-        // Re-check: dropping the lock above leaves room for another publish of
-        // the same workspace to have won the race. Keep the incumbent, since two
-        // watchers on one slot would upload it twice over.
-        if let Some(watcher) = watchers.get_mut(&key) {
+        // A watcher that stopped on its own — the workspace was deleted or
+        // moved off this node — is replaced rather than joined: this publish
+        // has just recorded this node in `status.slot` again, so its volumes
+        // would otherwise go unsynced until the last of them unpublishes.
+        if let Some(watcher) = watchers.get_mut(&key)
+            && !watcher.handle.is_finished()
+        {
             watcher.volumes.insert(volume_id.to_string());
-            handle.abort();
             return;
         }
+        let (handle, ownership) =
+            crate::hydrate::spawn_watcher(dir, workspace, archive, client, s3, &self.node_id);
+        let mut volumes = watchers
+            .remove(&key)
+            .map(|stopped| stopped.volumes)
+            .unwrap_or_default();
+        volumes.insert(volume_id.to_string());
         watchers.insert(
             key,
             Watcher {
                 handle,
-                volumes: std::iter::once(volume_id.to_string()).collect(),
+                ownership,
+                volumes,
             },
         );
         tracing::info!(workspace, "watching slot for changes");
@@ -451,43 +452,74 @@ impl KubimoNode {
         }
     }
 
-    /// Release one volume's claim on a workspace's watcher.
+    /// Release one volume's claim on a workspace's watcher, returning the
+    /// watcher's ownership clock for the final flush.
     ///
     /// The watcher is aborted rather than gracefully stopped once the last
     /// claim goes: a final flush follows immediately, so anything it was midway
     /// through is redone.
-    fn stop_watcher(&self, volume_id: &str, namespace: &str, workspace: &str) {
+    fn stop_watcher(
+        &self,
+        volume_id: &str,
+        namespace: &str,
+        workspace: &str,
+    ) -> Option<OwnershipClock> {
         let key = Self::slot_key(namespace, workspace);
         let mut watchers = self.lock_watchers();
-        let Some(watcher) = watchers.get_mut(&key) else {
-            return;
-        };
+        let watcher = watchers.get_mut(&key)?;
         watcher.volumes.remove(volume_id);
+        let ownership = watcher.ownership.clone();
         if watcher.volumes.is_empty()
             && let Some(watcher) = watchers.remove(&key)
         {
             watcher.handle.abort();
         }
+        Some(ownership)
     }
 
-    /// Whether the workspace this slot belongs to is deleted or on its way out.
+    /// Whether this node's copy of the slot may be flushed back to S3.
     ///
     /// Deleting a workspace tears down its runners, and the resulting unpublish
     /// would otherwise flush the slot straight back into the S3 prefix the
     /// platform had just purged — recreating a full copy of data that was meant
     /// to be erased, with no CR left to find it by.
     ///
-    /// Errors count as "still there": failing to reach the API server must not
-    /// turn into silently dropping a legitimate flush.
-    async fn workspace_is_going_away(&self, client: &kubimo::Client, workspace: &str) -> bool {
-        match client.api::<kubimo::Workspace>().get_opt(workspace).await {
-            Ok(Some(found)) => found.metadata.deletion_timestamp.is_some(),
-            Ok(None) => true,
-            Err(err) => {
-                tracing::warn!(%err, workspace, "could not check whether the workspace still exists; flushing anyway");
-                false
+    /// A workspace whose `status.slot` names another node has moved on: its
+    /// pods were force-deleted off this node while it was unreachable and the
+    /// workspace was hydrated elsewhere, where it has been written to since.
+    /// Flushing this copy now would overwrite that newer work in S3.
+    ///
+    /// The read is retried briefly. One that keeps failing still flushes if
+    /// the slot's watcher confirmed ownership recently (`ownership`), since
+    /// the watcher would have made one more pass on the same terms. Otherwise
+    /// it is `Unverified`: this node cannot tell a copy it still holds from a
+    /// stale one, and flushing a stale one would overwrite newer work.
+    async fn flush_verdict(
+        &self,
+        client: &kubimo::Client,
+        workspace: &str,
+        ownership: Option<&OwnershipClock>,
+    ) -> FlushVerdict {
+        for attempt in 1..=FLUSH_VERDICT_ATTEMPTS {
+            if attempt > 1 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            match crate::hydrate::ownership(client, workspace, &self.node_id).await {
+                Some(Ownership::Held) => return FlushVerdict::Flush,
+                Some(Ownership::Lost(Lost::Deleted)) => return FlushVerdict::GoingAway,
+                Some(Ownership::Lost(Lost::Moved(node))) => return FlushVerdict::Superseded(node),
+                None => {}
             }
         }
+        if ownership.is_some_and(OwnershipClock::is_recent) {
+            tracing::warn!(
+                workspace,
+                "could not check the workspace before its final flush, but its watcher \
+                 confirmed this node holds it moments ago; flushing"
+            );
+            return FlushVerdict::Flush;
+        }
+        FlushVerdict::Unverified
     }
 
     /// Push a published slot's tracked files to S3.
@@ -495,7 +527,11 @@ impl KubimoNode {
     /// Never fails the unpublish. The slot keeps its data on disk either way, so
     /// a failed flush is recoverable — whereas refusing to unmount would leave
     /// the pod stuck Terminating and block the node from draining.
-    async fn flush_published_slot(&self, published: &crate::store::PublishedSlot) {
+    async fn flush_published_slot(
+        &self,
+        published: &crate::store::PublishedSlot,
+        ownership: Option<&OwnershipClock>,
+    ) {
         // A record written before the namespace was part of one, or one whose
         // namespace line was lost. Every lookup below is namespaced, and an
         // empty namespace builds a client that asks for `/namespaces//...`:
@@ -532,12 +568,41 @@ impl KubimoNode {
             );
             return;
         };
-        if self.workspace_is_going_away(&client, workspace).await {
-            tracing::info!(
-                workspace,
-                "workspace is deleted or terminating; skipping flush"
-            );
-            return;
+        match self.flush_verdict(&client, workspace, ownership).await {
+            FlushVerdict::Flush => {}
+            FlushVerdict::GoingAway => {
+                tracing::info!(
+                    workspace,
+                    "workspace is deleted or terminating; skipping flush"
+                );
+                return;
+            }
+            FlushVerdict::Superseded(node) => {
+                tracing::warn!(
+                    workspace,
+                    slot = %published.slot,
+                    current_node = node,
+                    "workspace has moved to another node; skipping the final flush so this \
+                     copy cannot overwrite newer work, and retiring it"
+                );
+                self.retire_slot(published);
+                return;
+            }
+            // Retired as well: served as it stands, this copy could be a stale
+            // one, uploading over the newer work of a node that took the
+            // workspace over. The next use of it on this node checks, and
+            // serves it again if nothing did.
+            FlushVerdict::Unverified => {
+                tracing::error!(
+                    workspace,
+                    slot = %published.slot,
+                    "could not confirm this node still holds the workspace, so its final \
+                     flush is being skipped and the slot retired until that can be checked; \
+                     changes since the last sync exist only on this node"
+                );
+                self.retire_slot(published);
+                return;
+            }
         }
         // `NodeUnpublishVolume` carries no secrets, so this is the credential
         // set remembered when the volume was published. Losing it — an agent
@@ -613,13 +678,42 @@ impl KubimoNode {
         );
     }
 
+    /// Retire a slot whose final flush was skipped because this node may no
+    /// longer hold its workspace (see `SlotStore::mark_retired`).
+    ///
+    /// The copy is the only place whatever this node never synced still
+    /// exists, so it stays on disk. A flush marker from an earlier unpublish is
+    /// cleared, or the reaper would read it as "in S3" and drop the copy at
+    /// once — but only once the retirement is on disk: if retiring fails, that
+    /// marker still gets a superseded copy dropped rather than served.
+    fn retire_slot(&self, published: &crate::store::PublishedSlot) {
+        let workspace = published.workspace.as_str();
+        if let Err(err) = self.store.mark_retired(&published.namespace, workspace) {
+            tracing::error!(
+                %err,
+                workspace,
+                "could not retire the slot; a later publish on this node may serve it \
+                 unless it was flushed before"
+            );
+            return;
+        }
+        if let Err(err) = self.store.clear_flushed(&published.namespace, workspace) {
+            tracing::warn!(%err, workspace, "could not clear the flush marker");
+        }
+    }
+
     /// Record where a pooled workspace actually lives, on the CR.
     ///
     /// Without this, the only way to find out which node holds a workspace's
     /// slot, what its id is, or where its archive sits, is to read agent logs on
     /// every node — which is exactly what debugging pooled mode has meant so
-    /// far. Best-effort: this is diagnostics, and failing it must never fail a
-    /// mount that is otherwise fine.
+    /// far.
+    ///
+    /// Not best-effort: `status.slot.node` is also the fence that stops a node
+    /// the workspace has moved away from flushing its stale copy over this
+    /// one's (see `flush_verdict`). A mount whose ownership is not on record
+    /// fails, and kubelet retries it. Only an agent with no cluster access at
+    /// all skips the write, and it has no fence to keep anyway.
     ///
     /// `lastSyncedAt` is deliberately not set here. It means "this content
     /// reached S3", which is only true after a flush, and claiming it at publish
@@ -635,7 +729,7 @@ impl KubimoNode {
         slot: &crate::store::ResolvedSlot,
         limit_bytes: Option<u64>,
         archive: Option<&crate::hydrate::ArchiveLocation>,
-    ) {
+    ) -> Result<(), Status> {
         // A manager of its own, not the indexer's. Server-side apply gives a
         // manager exactly the fields its last apply contained, so the indexer's
         // `status.storage` patches — which never mention slot or archive —
@@ -643,7 +737,15 @@ impl KubimoNode {
         // here moments earlier. No error is reported on either side; the fields
         // simply stay empty, which is what they did.
         let Some(client) = self.clients.get_for_slot_status(namespace).await else {
-            return;
+            // A client that could not be built is not the same as no cluster
+            // access: the mount would go ahead with its ownership unrecorded.
+            return if self.clients.enabled() {
+                Err(Status::unavailable(
+                    "no Kubernetes client to record the slot status with",
+                ))
+            } else {
+                Ok(())
+            };
         };
         let mut patch = kubimo::Workspace::new(workspace, Default::default());
         patch.status = Some(kubimo::WorkspaceStatus {
@@ -658,9 +760,12 @@ impl KubimoNode {
             }),
             ..Default::default()
         });
-        if let Err(err) = client.api::<kubimo::Workspace>().patch_status(&patch).await {
-            tracing::warn!(%err, workspace, "could not record slot status");
-        }
+        client
+            .api::<kubimo::Workspace>()
+            .patch_status(&patch)
+            .await
+            .map(|_| ())
+            .map_err(|err| Status::unavailable(format!("recording slot status: {err}")))
     }
 
     /// Fill a freshly created slot from the workspace's own archive, falling
@@ -742,8 +847,38 @@ impl KubimoNode {
         // claims land wherever their warm pod happens to be, so this is now
         // routine rather than rare. A flushed copy is a cache and is dropped
         // for a fresh hydration; an unflushed one may hold the only copy of
-        // the tenant's newest work and is always served as-is.
-        if !resolved.created && self.slot_is_superseded(namespace, workspace).await {
+        // the tenant's newest work and, unless retired, is always served as-is.
+        //
+        // A retired copy (see `SlotStore::mark_retired`) is checked whatever its
+        // flush marker says, and never served on a guess: a marker or status
+        // that cannot be read fails the publish, and kubelet retries it. One
+        // whose status names another node lost to the copy there.
+        let retired = !resolved.created
+            && self
+                .store
+                .retired_ago(namespace, workspace)
+                .map_err(|err| Status::unavailable(format!("reading the retired marker: {err}")))?
+                .is_some();
+        let superseded = if retired {
+            self.recorded_slot_node(namespace, workspace)
+                .await?
+                .is_some_and(|node| node != self.node_id)
+        } else {
+            !resolved.created && self.slot_is_superseded(namespace, workspace).await
+        };
+        if retired && !superseded {
+            // Nothing took the workspace over since this node last served it,
+            // so this is its newest copy after all.
+            self.store
+                .clear_retired(namespace, workspace)
+                .map_err(|err| Status::internal(format!("clearing the retired marker: {err}")))?;
+            tracing::info!(
+                workspace,
+                slot = %resolved.id,
+                "serving a retired slot: its workspace never moved off this node"
+            );
+        }
+        if superseded {
             // Never out from under a live mount: a sibling volume published on
             // this node is actively serving this copy however stale the status
             // makes it look — a claim that raced onto another node does exactly
@@ -884,22 +1019,42 @@ impl KubimoNode {
         if !flushed {
             return false;
         }
-        let Some(client) = self.client_for(namespace).await else {
-            return false;
-        };
-        let slot_node = match client.api::<kubimo::Workspace>().get_opt(workspace).await {
-            Ok(Some(found)) => found
-                .status
-                .as_ref()
-                .and_then(|status| status.slot.as_ref())
-                .and_then(|slot| slot.node.clone()),
-            Ok(None) => None,
+        match self.recorded_slot_node(namespace, workspace).await {
+            Ok(node) => node.is_some_and(|node| node != self.node_id),
             Err(err) => {
                 tracing::warn!(%err, workspace, "could not check the workspace's slot status; keeping the local copy");
-                None
+                false
             }
+        }
+    }
+
+    /// The node `workspace`'s `status.slot` names, read fresh.
+    ///
+    /// `Ok(None)` when it names none, or when the agent has no cluster access
+    /// at all, and so no status to go by.
+    pub(crate) async fn recorded_slot_node(
+        &self,
+        namespace: &str,
+        workspace: &str,
+    ) -> Result<Option<String>, Status> {
+        let Some(client) = self.client_for(namespace).await else {
+            return if self.clients.enabled() {
+                Err(Status::unavailable(
+                    "no Kubernetes client to read the slot status with",
+                ))
+            } else {
+                Ok(None)
+            };
         };
-        slot_node.is_some_and(|node| node != self.node_id)
+        let found = client
+            .api::<kubimo::Workspace>()
+            .get_opt(workspace)
+            .await
+            .map_err(|err| Status::unavailable(format!("reading the slot status: {err}")))?;
+        Ok(found
+            .and_then(|found| found.status)
+            .and_then(|status| status.slot)
+            .and_then(|slot| slot.node))
     }
 
     /// The identity-free half of provisioning: project quota, ownership, and
@@ -1248,7 +1403,7 @@ impl Node for KubimoNode {
             Some(limit_bytes),
             archive.as_ref(),
         )
-        .await;
+        .await?;
         if let Err(err) = self.store.record_publish(
             &request.volume_id,
             &crate::store::PublishedSlot {
@@ -1340,7 +1495,7 @@ impl Node for KubimoNode {
             // volume published for this workspace on this node — a cache job
             // co-located with a live runner — so it only actually stops once the
             // last of them is gone.
-            self.stop_watcher(
+            let ownership = self.stop_watcher(
                 &request.volume_id,
                 &published.namespace,
                 &published.workspace,
@@ -1374,7 +1529,8 @@ impl Node for KubimoNode {
                     );
                 }
                 Ok(false) => {
-                    self.flush_published_slot(published).await;
+                    self.flush_published_slot(published, ownership.as_ref())
+                        .await;
                     // Nothing on this node mounts the workspace any more and its
                     // final flush has run, so drop the cached credentials — the
                     // one thing that still needed them is done. Held longer they
@@ -1387,7 +1543,8 @@ impl Node for KubimoNode {
                         workspace = %published.workspace,
                         "could not check for sibling volumes; flushing to be safe"
                     );
-                    self.flush_published_slot(published).await;
+                    self.flush_published_slot(published, ownership.as_ref())
+                        .await;
                     self.forget_credentials(&published.namespace, &published.workspace);
                 }
             }
@@ -1512,6 +1669,113 @@ mod tests {
         )
     }
 
+    /// A test node whose clients for `tenant-a` all go to `client`.
+    async fn node_with_client(client: kubimo::Client) -> (tempfile::TempDir, KubimoNode) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SlotStore::new(crate::slot::SlotLayout::new(dir.path()));
+        let node = KubimoNode::new("test-node".into(), store, 1024, true, Some(client.clone()));
+        node.clients.insert("tenant-a", client).await;
+        (dir, node)
+    }
+
+    /// The final flush goes by the same rule as a watcher pass: a check that
+    /// keeps failing still flushes on a recent confirmation, and retires the
+    /// copy without one. A check that answers decides either way.
+    #[tokio::test(start_paused = true)]
+    async fn the_final_flush_follows_the_ownership_fence() {
+        use crate::hydrate::tests::{client_answering, hanging_client, workspace_on};
+        let (_dir, node) = node();
+        let recent = OwnershipClock::confirmed_now();
+        let hanging = hanging_client();
+        assert!(matches!(
+            node.flush_verdict(&hanging, "bmow-x", Some(&recent)).await,
+            FlushVerdict::Flush
+        ));
+        assert!(matches!(
+            node.flush_verdict(&hanging, "bmow-x", None).await,
+            FlushVerdict::Unverified
+        ));
+        let moved = client_answering(|| Some(workspace_on(Some("node-b"))));
+        assert!(matches!(
+            node.flush_verdict(&moved, "bmow-x", Some(&recent)).await,
+            FlushVerdict::Superseded(current) if current == "node-b"
+        ));
+        let held = client_answering(|| Some(workspace_on(Some("test-node"))));
+        assert!(matches!(
+            node.flush_verdict(&held, "bmow-x", None).await,
+            FlushVerdict::Flush
+        ));
+    }
+
+    /// A retired copy is served again only where its workspace never moved
+    /// off, is dropped where it did, and is never served on a guess.
+    #[tokio::test]
+    async fn a_retired_slot_is_served_only_once_its_status_is_checked() {
+        use crate::hydrate::tests::{client_answering, failing_client, workspace_on};
+        if quotas_would_be_enforced() {
+            return;
+        }
+        let retired = |node: &KubimoNode| {
+            let slot = node
+                .store()
+                .resolve_or_create("tenant-a", "bmow-x")
+                .unwrap();
+            node.store().mark_retired("tenant-a", "bmow-x").unwrap();
+            slot.id
+        };
+
+        let (_dir, node) =
+            node_with_client(client_answering(|| Some(workspace_on(Some("test-node"))))).await;
+        let id = retired(&node);
+        let (served, _) = node
+            .prepare_slot("tenant-a", "bmow-x", 1024, None, None)
+            .await
+            .unwrap();
+        assert_eq!(served.id, id, "nothing took it over: it is the newest copy");
+        assert_eq!(
+            node.store().retired_ago("tenant-a", "bmow-x").unwrap(),
+            None
+        );
+
+        let (_dir, node) = node_with_client(failing_client()).await;
+        let id = retired(&node);
+        let err = node
+            .prepare_slot("tenant-a", "bmow-x", 1024, None, None)
+            .await
+            .expect_err("an unreadable status must not serve a retired copy");
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            node.store()
+                .lookup("tenant-a", "bmow-x")
+                .unwrap()
+                .map(|slot| slot.id),
+            Some(id)
+        );
+        assert!(
+            node.store()
+                .retired_ago("tenant-a", "bmow-x")
+                .unwrap()
+                .is_some()
+        );
+
+        let (_dir, node) =
+            node_with_client(client_answering(|| Some(workspace_on(Some("node-b"))))).await;
+        let id = retired(&node);
+        // Re-provisioning the replacement may fail here (its chown needs
+        // privileges); either way the retired copy is gone.
+        let _ = node
+            .prepare_slot("tenant-a", "bmow-x", 1024, None, None)
+            .await;
+        assert_ne!(
+            node.store()
+                .lookup("tenant-a", "bmow-x")
+                .unwrap()
+                .map(|slot| slot.id),
+            Some(id),
+            "a copy that lost to another node is dropped"
+        );
+    }
+
     /// A workspace's watcher is shared by every volume published for it on this
     /// node — a cache job is deliberately co-located with a live runner — and
     /// must outlive all but the last of them. Two watchers on one slot would
@@ -1526,13 +1790,18 @@ mod tests {
             key.clone(),
             Watcher {
                 handle,
+                ownership: OwnershipClock::confirmed_now(),
                 volumes: ["vol-runner".to_string(), "vol-cache".to_string()]
                     .into_iter()
                     .collect(),
             },
         );
 
-        node.stop_watcher("vol-cache", "platform", "bmow-shared");
+        assert!(
+            node.stop_watcher("vol-cache", "platform", "bmow-shared")
+                .is_some_and(|ownership| ownership.is_recent()),
+            "the final flush gets the watcher's ownership clock"
+        );
         let watchers = node.lock_watchers();
         let watcher = watchers
             .get(&key)
@@ -1549,7 +1818,10 @@ mod tests {
     #[tokio::test]
     async fn stopping_an_unknown_volume_is_a_no_op() {
         let (_dir, node) = node();
-        node.stop_watcher("vol-unknown", "platform", "bmow-absent");
+        assert!(
+            node.stop_watcher("vol-unknown", "platform", "bmow-absent")
+                .is_none()
+        );
         assert!(node.lock_watchers().is_empty());
     }
 
@@ -1585,6 +1857,7 @@ mod tests {
             key.clone(),
             Watcher {
                 handle: tokio::spawn(std::future::pending::<()>()),
+                ownership: OwnershipClock::confirmed_now(),
                 volumes: ["csi-runner".to_string(), "csi-cache".to_string()]
                     .into_iter()
                     .collect(),

@@ -7,6 +7,7 @@
 //! labels, annotations or volume attributes — never as CLI flags, which older
 //! pinned images reject where unknown metadata is simply ignored.
 
+use k8s_openapi::api::core::v1::Pod;
 use serde::{Deserialize, Serialize};
 
 use crate::crd::WorkspaceRestoreSecrets;
@@ -118,6 +119,46 @@ pub struct PoolClaim {
     pub limit_bytes: Option<u64>,
 }
 
+/// The one claimed pod of a workspace every observer agrees should survive a
+/// double-claim, out of the workspace's `pods`: the oldest contender, by name
+/// on a timestamp tie. Racers may see different subsets for a moment, but any
+/// pod whose owner observes a rival and loses this comparison is deleted, so
+/// the set only ever shrinks toward a single survivor.
+///
+/// Contenders are the pods carrying [`POOL_LABEL`] that are neither being
+/// deleted nor finished. The filter is part of the rule: two observers that
+/// counted contenders differently could elect different survivors.
+///
+/// Shared with the agent, which applies it before recording a claimed slot
+/// as the workspace's: only the survivor may name its node in
+/// `status.slot`, or a loser that bound last would leave the workspace's
+/// ownership pointing at a node about to lose its pod.
+pub fn claim_winner(pods: &[Pod]) -> Option<&str> {
+    pods.iter()
+        .filter(|pod| is_claim_contender(pod))
+        .min_by_key(|pod| {
+            (
+                pod.metadata.creation_timestamp.clone(),
+                pod.metadata.name.clone(),
+            )
+        })
+        .and_then(|pod| pod.metadata.name.as_deref())
+}
+
+fn is_claim_contender(pod: &Pod) -> bool {
+    pod.metadata
+        .labels
+        .as_ref()
+        .is_some_and(|labels| labels.contains_key(POOL_LABEL))
+        && pod.metadata.deletion_timestamp.is_none()
+        && !matches!(
+            pod.status
+                .as_ref()
+                .and_then(|status| status.phase.as_deref()),
+            Some("Succeeded" | "Failed")
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +210,73 @@ mod tests {
         };
         let json = serde_json::to_string(&claim).unwrap();
         assert!(!json.contains("null"), "claim had a null: {json}");
+    }
+
+    /// Every observer of a double-claim must elect the same survivor, whatever
+    /// subset it sees: oldest first, name as the tie-break.
+    #[test]
+    fn double_claims_agree_on_one_winner() {
+        let pod = |name: &str, seconds: i64| claimed_pod(name, seconds);
+        let older = pod("editors-bbbb", 100);
+        let newer = pod("editors-aaaa", 200);
+        let tied = pod("editors-cccc", 100);
+
+        assert_eq!(claim_winner(&[]), None);
+        assert_eq!(
+            claim_winner(std::slice::from_ref(&newer)),
+            Some("editors-aaaa")
+        );
+        // Age beats name…
+        assert_eq!(
+            claim_winner(&[newer.clone(), older.clone()]),
+            Some("editors-bbbb")
+        );
+        // …and a timestamp tie falls back to the name, in either order.
+        assert_eq!(
+            claim_winner(&[tied.clone(), older.clone()]),
+            claim_winner(&[older, tied]),
+        );
+    }
+
+    /// Only pods still holding a claim contend: the oldest pod of the
+    /// workspace loses to a younger claimed one if it is unlabelled, being
+    /// deleted, or finished.
+    #[test]
+    fn only_live_claimed_pods_contend() {
+        use k8s_openapi::api::core::v1::PodStatus;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        use k8s_openapi::jiff::Timestamp;
+        let survivor = claimed_pod("editors-young", 200);
+
+        let mut unlabelled = claimed_pod("runner", 100);
+        unlabelled.metadata.labels = None;
+        let mut deleting = claimed_pod("editors-deleting", 100);
+        deleting.metadata.deletion_timestamp = Some(Time(Timestamp::new(300, 0).unwrap()));
+        let mut finished = claimed_pod("editors-finished", 100);
+        finished.status = Some(PodStatus {
+            phase: Some("Failed".to_string()),
+            ..Default::default()
+        });
+
+        for older in [unlabelled, deleting, finished] {
+            assert_eq!(
+                claim_winner(&[older, survivor.clone()]),
+                Some("editors-young")
+            );
+        }
+    }
+
+    fn claimed_pod(name: &str, created: i64) -> Pod {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
+        use k8s_openapi::jiff::Timestamp;
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                creation_timestamp: Some(Time(Timestamp::new(created, 0).unwrap())),
+                labels: Some([(POOL_LABEL.to_string(), "editors".to_string())].into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 }

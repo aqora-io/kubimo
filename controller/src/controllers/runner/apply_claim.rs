@@ -220,18 +220,13 @@ impl RunnerReconciler {
         // only ever shrink the set, and the requeue loop re-runs this until
         // one pod remains.
         let pods = ctx.api_namespaced::<Pod>(namespace);
-        let mut claimed = list_pods(
+        let workspace_pods = list_pods(
             &pods,
             &FilterParams::new()
                 .with_labels(workspace_affinity::workspace_label(&runner.spec.workspace)),
         )
         .await?;
-        claimed.retain(|other| {
-            has_label(other, POOL_LABEL)
-                && other.metadata.deletion_timestamp.is_none()
-                && may_hold_a_slot(other)
-        });
-        if let Some(winner) = claim_winner(&claimed)
+        if let Some(winner) = kubimo::pool::claim_winner(&workspace_pods)
             && winner != pod.name()?
         {
             tracing::warn!(
@@ -430,23 +425,6 @@ fn minted_from_template(pod: &Pod, template_hash: &str) -> bool {
         .as_ref()
         .and_then(|annotations| annotations.get(POOL_TEMPLATE_HASH_ANNOTATION))
         .is_some_and(|hash| hash == template_hash)
-}
-
-/// The one claimed pod of a workspace every observer agrees should survive a
-/// double-claim: the oldest, by name on a timestamp tie. Racers may see
-/// different subsets for a moment, but any pod whose owner observes a rival
-/// and loses this comparison is deleted, so the set only ever shrinks toward
-/// a single survivor.
-fn claim_winner(claimed: &[Pod]) -> Option<&str> {
-    claimed
-        .iter()
-        .min_by_key(|pod| {
-            (
-                pod.metadata.creation_timestamp.clone(),
-                pod.metadata.name.clone(),
-            )
-        })
-        .and_then(|pod| pod.metadata.name.as_deref())
 }
 
 fn has_label(pod: &Pod, key: &str) -> bool {
@@ -979,41 +957,6 @@ mod tests {
                 "{differing:?}"
             );
         }
-    }
-
-    /// Every observer of a double-claim must elect the same survivor, whatever
-    /// subset it sees: oldest first, name as the tie-break.
-    #[test]
-    fn double_claims_agree_on_one_winner() {
-        use kubimo::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
-        use kubimo::k8s_openapi::jiff::Timestamp;
-        let pod = |name: &str, seconds: i64| Pod {
-            metadata: kubimo::kube::api::ObjectMeta {
-                name: Some(name.to_string()),
-                creation_timestamp: Some(Time(Timestamp::new(seconds, 0).unwrap())),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let older = pod("editors-bbbb", 100);
-        let newer = pod("editors-aaaa", 200);
-        let tied = pod("editors-cccc", 100);
-
-        assert_eq!(claim_winner(&[]), None);
-        assert_eq!(
-            claim_winner(std::slice::from_ref(&newer)),
-            Some("editors-aaaa")
-        );
-        // Age beats name…
-        assert_eq!(
-            claim_winner(&[newer.clone(), older.clone()]),
-            Some("editors-bbbb")
-        );
-        // …and a timestamp tie falls back to the name, in either order.
-        assert_eq!(
-            claim_winner(&[tied.clone(), older.clone()]),
-            claim_winner(&[older, tied]),
-        );
     }
 
     /// Both reference styles the platform uses must be found, deduplicated.

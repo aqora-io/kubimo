@@ -573,6 +573,12 @@ pub fn process(
     rx
 }
 
+/// Seed the key sets from the workspace's existing `WorkspaceDirectory` CRs.
+///
+/// A failed list fails the whole call. It ends the list stream, so carrying
+/// on would leave the sets partial, and every path a partial read misses gets
+/// a fresh random key: re-uploaded, its old object orphaned, and a second
+/// directory CR made for it.
 pub async fn process_existing_dirs(
     client: &kubimo::Client,
     name: &str,
@@ -581,18 +587,12 @@ pub async fn process_existing_dirs(
     cache_markers: &mut CacheMarkers,
     previous_names: &mut BTreeSet<String>,
     previous_urls: &mut BTreeSet<Url>,
-) {
+) -> Result<(), kubimo::Error> {
     let mut workspace_dirs = client
         .api::<WorkspaceDir>()
         .list(&FilterParams::new().with_fields((WorkspaceDirField::Workspace, name)));
     while let Some(workspace_dir) = workspace_dirs.next().await {
-        let workspace_dir = match workspace_dir {
-            Ok(dir) => dir.item,
-            Err(err) => {
-                tracing::error!("Error listing workspace dirs: {}", err);
-                continue;
-            }
-        };
+        let workspace_dir = workspace_dir?.item;
         let name = match workspace_dir.name() {
             Ok(name) => name,
             Err(err) => {
@@ -687,6 +687,7 @@ pub async fn process_existing_dirs(
             }
         }
     }
+    Ok(())
 }
 
 async fn clean_url(client: &S3Client, url: Url) {
@@ -1370,14 +1371,24 @@ async fn update_workspace_status(
     }
 }
 
-pub async fn watch(
+/// Upload `args.directory` and keep it uploaded as it changes, until
+/// `may_upload` says otherwise or the watch is interrupted.
+///
+/// `may_upload` is awaited before every pass, so a caller can fence each
+/// upload on something only it knows — the agent checks that its node still
+/// holds the workspace — rather than catching up with it between passes.
+pub async fn watch<F, Fut>(
     args: &UploadOptions,
     client: &kubimo::Client,
     s3: &S3Client,
     keys: &WorkspaceKeys,
     mut previous_names: BTreeSet<String>,
     mut previous_urls: BTreeSet<Url>,
-) {
+    may_upload: F,
+) where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
     // Lives for the whole watch, which is what makes the fingerprint useful:
     // a per-run cache would be empty on every event and skip nothing.
     let content_cache = ContentCache::new();
@@ -1388,6 +1399,9 @@ pub async fn watch(
     )
     .expect("Could not create watcher");
     loop {
+        if !may_upload().await {
+            break;
+        }
         let res = run(
             args,
             &content_cache,
