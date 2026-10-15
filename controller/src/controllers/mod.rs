@@ -3,6 +3,7 @@ pub mod cache_job;
 pub mod import_job;
 
 pub(crate) mod ingress;
+pub(crate) mod lost_node;
 pub mod pool;
 pub mod runner;
 pub(crate) mod runner_pod;

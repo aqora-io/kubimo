@@ -318,7 +318,7 @@ pub(super) fn build_job(
         runtime_class_name: sandbox_runtime_class(),
         automount_service_account_token: Some(false),
         enable_service_links: Some(false),
-        affinity: Some(workspace_affinity::workspace_affinity(workspace_name)),
+        affinity: Some(workspace_affinity::new_pod_affinity(workspace)),
         init_containers: Some(fetches),
         containers: vec![import],
         volumes: Some(vec![

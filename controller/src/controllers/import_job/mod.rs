@@ -12,6 +12,7 @@ use kubimo::{ImportJob, Workspace, prelude::*};
 
 use crate::backoff::default_error_policy;
 use crate::context::Context;
+use crate::controllers::lost_node::{LostNodeSweep, recheck_while_running, release_stranded_pods};
 use crate::controllers::runner::is_workspace_ready;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
@@ -27,6 +28,24 @@ impl Reconciler for ImportJobReconciler {
     type Error = kubimo::Error;
 
     async fn apply(&self, ctx: &Context, import_job: &ImportJob) -> Result<Action, Self::Error> {
+        // A job-only workspace has no runner to release its pods from a lost
+        // node, and a stranded pod pins this job's pod to that node too.
+        let namespace = import_job.require_namespace()?;
+        let sweep = release_stranded_pods(ctx, namespace, &import_job.spec.workspace).await;
+        if sweep == LostNodeSweep::Released {
+            return Ok(sweep.settle(Action::await_change()));
+        }
+        let action = self.apply_job_resources(ctx, import_job).await?;
+        Ok(sweep.settle(action))
+    }
+}
+
+impl ImportJobReconciler {
+    async fn apply_job_resources(
+        &self,
+        ctx: &Context,
+        import_job: &ImportJob,
+    ) -> Result<Action, kubimo::Error> {
         // An import runs once. Finished is final, even if its Job is later
         // deleted: re-running it would overwrite whatever the workspace has
         // done with the files since.
@@ -67,7 +86,7 @@ impl Reconciler for ImportJobReconciler {
         };
         // Job status changes come back through `.owns(jobs)`.
         self.apply_status(ctx, import_job, &job).await?;
-        Ok(Action::await_change())
+        Ok(recheck_while_running(&job))
     }
 }
 

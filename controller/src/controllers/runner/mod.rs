@@ -22,6 +22,7 @@ use kubimo::{
 
 use crate::backoff::default_error_policy;
 use crate::context::Context;
+use crate::controllers::lost_node::{LostNodeSweep, release_stranded_pods};
 use crate::controllers::pool::warm_pod;
 use crate::controllers::workspace_affinity;
 use crate::error::ControllerResult;
@@ -51,6 +52,24 @@ impl Reconciler for RunnerReconciler {
     type Error = kubimo::Error;
 
     async fn apply(&self, ctx: &Context, runner: &Runner) -> Result<Action, Self::Error> {
+        // A pod stranded on a lost node keeps the runner's pod name taken and,
+        // through the workspace affinity, pins any replacement to that node.
+        let namespace = runner.require_namespace()?;
+        let sweep = release_stranded_pods(ctx, namespace, &runner.spec.workspace).await;
+        if sweep == LostNodeSweep::Released {
+            return Ok(sweep.settle(Action::await_change()));
+        }
+        let action = self.apply_resources(ctx, runner).await?;
+        Ok(sweep.settle(action))
+    }
+}
+
+impl RunnerReconciler {
+    async fn apply_resources(
+        &self,
+        ctx: &Context,
+        runner: &Runner,
+    ) -> Result<Action, kubimo::Error> {
         let namespace = runner.require_namespace()?;
         let workspace = ctx
             .api_namespaced::<Workspace>(namespace)

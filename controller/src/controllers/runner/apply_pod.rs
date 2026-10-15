@@ -14,9 +14,9 @@ use super::RunnerReconciler;
 ///
 /// `Replaced` and `AwaitingTermination` are both outcomes the caller has to
 /// act on rather than wait for a change: a drifted pod has either just been
-/// deleted, or was already deleted by an earlier reconcile and hasn't finished
-/// terminating yet. Either way nothing has recreated it, so the reconcile has
-/// to come back.
+/// deleted, or the live pod is already terminating — deleted by an earlier
+/// reconcile, an eviction or the lost-node sweep — and hasn't gone yet. Either
+/// way nothing has recreated it, so the reconcile has to come back.
 pub(crate) enum PodApply {
     Applied,
     Replaced,
@@ -45,6 +45,21 @@ impl RunnerReconciler {
             }) => TokenSource::SecretEnv(secret_ref),
             _ => TokenSource::None,
         };
+        // Affinity is immutable on a live pod, and the slot node it prefers is
+        // only written once the first pod has published its volume, so it is
+        // decided once, at creation: a live pod keeps the affinity it has.
+        let live = ctx
+            .api_namespaced::<Pod>(namespace)
+            .get_opt(runner.name()?)
+            .await?;
+        if live.as_ref().is_some_and(is_terminating) {
+            // Nothing to apply to a pod on its way out, and its affinity must
+            // not outlive it: the replacement is decided afresh once it's gone.
+            return Ok(PodApply::AwaitingTermination);
+        }
+        let live_affinity = live.map(|live| live.spec.and_then(|spec| spec.affinity));
+        let affinity =
+            live_affinity.unwrap_or_else(|| Some(workspace_affinity::new_pod_affinity(workspace)));
         let image = ctx.config.marimo_image.clone();
         let pod = build_runner_pod(RunnerPodParams {
             name: runner.name()?.to_string(),
@@ -65,9 +80,7 @@ impl RunnerReconciler {
             memory: runner.spec.memory.clone(),
             env: runner.spec.env.clone().unwrap_or_default(),
             env_from: runner.spec.env_from.clone(),
-            affinity: Some(workspace_affinity::workspace_affinity(
-                &runner.spec.workspace,
-            )),
+            affinity,
             slot_volume: slot_volume::workspace_volume(
                 &runner.spec.workspace,
                 // Render never mutates user data, so give it a read-only
@@ -197,9 +210,8 @@ fn runner_env<'a>(pod: &'a Pod, name: &str) -> Option<&'a str> {
         .as_deref()
 }
 
-/// Whether the live pod has already been asked to terminate — i.e. an
-/// earlier reconcile already deleted it for one of the drifts above, and it
-/// just hasn't finished going away yet.
+/// Whether the live pod has already been asked to terminate and just hasn't
+/// finished going away yet.
 fn is_terminating(pod: &Pod) -> bool {
     pod.metadata.deletion_timestamp.is_some()
 }

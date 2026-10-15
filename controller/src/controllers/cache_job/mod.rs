@@ -11,6 +11,7 @@ use kubimo::{CacheJob, Workspace, prelude::*};
 
 use crate::backoff::default_error_policy;
 use crate::context::Context;
+use crate::controllers::lost_node::{LostNodeSweep, recheck_while_running, release_stranded_pods};
 use crate::controllers::runner::is_workspace_ready;
 use crate::error::ControllerResult;
 use crate::reconciler::{ReconcileError, Reconciler, ReconcilerExt};
@@ -24,6 +25,24 @@ impl Reconciler for CacheJobReconciler {
     type Error = kubimo::Error;
 
     async fn apply(&self, ctx: &Context, cache_job: &CacheJob) -> Result<Action, Self::Error> {
+        // A job-only workspace has no runner to release its pods from a lost
+        // node, and a stranded pod pins this job's pod to that node too.
+        let namespace = cache_job.require_namespace()?;
+        let sweep = release_stranded_pods(ctx, namespace, &cache_job.spec.workspace).await;
+        if sweep == LostNodeSweep::Released {
+            return Ok(sweep.settle(Action::await_change()));
+        }
+        let action = self.apply_job_resources(ctx, cache_job).await?;
+        Ok(sweep.settle(action))
+    }
+}
+
+impl CacheJobReconciler {
+    async fn apply_job_resources(
+        &self,
+        ctx: &Context,
+        cache_job: &CacheJob,
+    ) -> Result<Action, kubimo::Error> {
         let namespace = cache_job.require_namespace()?;
         let workspace = ctx
             .api_namespaced::<Workspace>(namespace)
@@ -59,8 +78,8 @@ impl Reconciler for CacheJobReconciler {
             }
         }
 
-        self.apply_job(ctx, cache_job).await?;
-        Ok(Action::await_change())
+        let job = self.apply_job(ctx, cache_job).await?;
+        Ok(recheck_while_running(&job))
     }
 }
 
