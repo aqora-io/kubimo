@@ -243,7 +243,7 @@ fn held_by_finalizers(pod: &Pod) -> bool {
             .is_some_and(|finalizers| !finalizers.is_empty())
 }
 
-fn is_ready(node: &Node) -> bool {
+pub(crate) fn is_ready(node: &Node) -> bool {
     node.status
         .as_ref()
         .and_then(|status| status.conditions.as_ref())

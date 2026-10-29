@@ -141,7 +141,8 @@ impl Reconciler for PoolReconciler {
         }
 
         let mut patched = pool.clone();
-        patched.status = Some(pool_status(pool, &kept, claimed));
+        let ready_nodes = warm_pod::ready_nodes(ctx, kept.iter().copied()).await;
+        patched.status = Some(pool_status(pool, &kept, claimed, &ready_nodes));
         ctx.api_namespaced::<Pool>(namespace)
             .patch_status(&patched)
             .await?;
@@ -157,10 +158,15 @@ impl Reconciler for PoolReconciler {
     // down a notebook someone is sitting in.
 }
 
-fn pool_status(pool: &Pool, kept: &[&Pod], claimed: u32) -> PoolStatus {
+fn pool_status(
+    pool: &Pool,
+    kept: &[&Pod],
+    claimed: u32,
+    ready_nodes: &std::collections::BTreeSet<String>,
+) -> PoolStatus {
     let ready = kept
         .iter()
-        .filter(|pod| warm_pod::runner_is_ready(pod))
+        .filter(|pod| warm_pod::runner_is_ready(pod) && warm_pod::on_ready_node(pod, ready_nodes))
         .count() as u32;
     PoolStatus {
         conditions: Some(vec![ready_condition(pool, ready == pool.spec.replicas)]),
@@ -272,6 +278,7 @@ mod tests {
         let mut pool = Pool::new("viewers", Default::default());
         pool.spec.replicas = 2;
         let ready: Pod = serde_json::from_value(serde_json::json!({
+            "spec": { "nodeName": "healthy" },
             "status": {
                 "phase": "Running",
                 "conditions": [{ "type": "Ready", "status": "False" }],
@@ -290,7 +297,8 @@ mod tests {
             .as_mut()
             .unwrap()[0]
             .ready = false;
-        let status = pool_status(&pool, &[&ready, &starting], 3);
+        let nodes = ["healthy".to_string()].into();
+        let status = pool_status(&pool, &[&ready, &starting], 3, &nodes);
         assert_eq!(status.warm, Some(1));
         assert_eq!(status.claimed, Some(3));
         let condition = &status.conditions.unwrap()[0];
@@ -298,11 +306,15 @@ mod tests {
             (condition.status.as_str(), condition.reason.as_str()),
             ("False", "Filling")
         );
-        let complete = pool_status(&pool, &[&ready, &ready], 3);
+        let complete = pool_status(&pool, &[&ready, &ready], 3, &nodes);
         assert_eq!(complete.warm, Some(2));
         assert_eq!(complete.conditions.unwrap()[0].status, "True");
+        assert_eq!(
+            pool_status(&pool, &[&ready], 3, &Default::default()).warm,
+            Some(0)
+        );
         pool.spec.replicas = 0;
-        let disabled = pool_status(&pool, &[], 3);
+        let disabled = pool_status(&pool, &[], 3, &nodes);
         assert_eq!(disabled.warm, Some(0));
         assert_eq!(disabled.conditions.unwrap()[0].status, "True");
     }

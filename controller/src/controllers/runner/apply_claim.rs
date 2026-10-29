@@ -123,7 +123,9 @@ impl RunnerReconciler {
         )
         .await?;
         let template_hash = crate::controllers::pool::warm_pod::template_hash(&ctx.config, &pool);
-        let warm = claim_candidates(warm, &template_hash);
+        let mut warm = claim_candidates(warm, &template_hash);
+        let ready_nodes = crate::controllers::pool::warm_pod::ready_nodes(ctx, &warm).await;
+        warm.retain(|pod| crate::controllers::pool::warm_pod::on_ready_node(pod, &ready_nodes));
 
         let claim = pool_claim(runner, workspace);
         let claim_json = serde_json::to_string(&claim)?;

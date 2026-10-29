@@ -10,10 +10,14 @@
 //! ingress-nginx has long programmed the route by the time the pod is claimed.
 //! The Service selects a label the pod only gets once the claim is acked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::time::Duration;
+
+use futures::{StreamExt, stream};
 
 use kubimo::k8s_openapi::api::core::v1::{
-    EnvVar, Pod, Secret, SecretVolumeSource, Service, ServicePort, ServiceSpec, Volume,
+    EnvVar, Node, Pod, Secret, SecretVolumeSource, Service, ServicePort, ServiceSpec, Volume,
 };
 use kubimo::k8s_openapi::api::networking::v1::Ingress;
 use kubimo::kube::api::ObjectMeta;
@@ -315,11 +319,145 @@ pub(crate) fn runner_is_ready(pod: &Pod) -> bool {
         })
 }
 
+/// Corroborate kubelet readiness: container status can remain stale on a lost node.
+/// Unavailable probes leave the reserve unready and claims fall back to cold creation.
+pub(crate) async fn ready_nodes<'a>(
+    ctx: &Context,
+    pods: impl IntoIterator<Item = &'a Pod>,
+) -> BTreeSet<String> {
+    let names = pods
+        .into_iter()
+        .filter(|pod| runner_is_ready(pod))
+        .filter_map(|pod| pod.spec.as_ref()?.node_name.clone())
+        .collect();
+    let nodes = ctx.api_global::<Node>();
+    probe_nodes(names, |name| {
+        let nodes = &nodes;
+        async move { nodes.get_opt(&name).await }
+    })
+    .await
+}
+
+async fn probe_nodes<F, Fut, E>(names: BTreeSet<String>, get: F) -> BTreeSet<String>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<Option<Node>, E>>,
+{
+    let probes = stream::iter(names)
+        .map(|name| {
+            let response = get(name.clone());
+            async move { (name, response.await) }
+        })
+        .buffer_unordered(8);
+    futures::pin_mut!(probes);
+    // One budget for the entire pass, never one timeout per pod or node.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+    let mut ready = BTreeSet::new();
+    while let Ok(Some((name, response))) = tokio::time::timeout_at(deadline, probes.next()).await {
+        if response.ok().flatten().is_some_and(|node| {
+            node.metadata.deletion_timestamp.is_none()
+                && !node
+                    .spec
+                    .as_ref()
+                    .is_some_and(|spec| spec.unschedulable == Some(true))
+                && crate::controllers::lost_node::is_ready(&node)
+        }) {
+            ready.insert(name);
+        }
+    }
+    ready
+}
+
+pub(crate) fn on_ready_node(pod: &Pod, ready: &BTreeSet<String>) -> bool {
+    pod.spec
+        .as_ref()
+        .and_then(|spec| spec.node_name.as_ref())
+        .is_some_and(|name| ready.contains(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::controllers::ingress::{IngressParams, build_ingress};
     use kubimo::{PoolSpec, RunnerCommand};
+
+    fn node(status: &str) -> Node {
+        serde_json::from_value(serde_json::json!({
+            "status": { "conditions": [{ "type": "Ready", "status": status }] }
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn node_probes_reject_unavailable_nodes_and_probe_each_name_once() {
+        use std::sync::Mutex;
+        let mut cordoned = node("True");
+        cordoned.spec = Some(kubimo::k8s_openapi::api::core::v1::NodeSpec {
+            unschedulable: Some(true),
+            ..Default::default()
+        });
+        let mut deleting = node("True");
+        deleting.metadata.deletion_timestamp =
+            Some(serde_json::from_str("\"2026-10-29T00:00:00Z\"").unwrap());
+        let responses = BTreeMap::from([
+            ("healthy", Ok(Some(node("True")))),
+            ("cordoned", Ok(Some(cordoned))),
+            ("deleting", Ok(Some(deleting))),
+            ("unknown", Ok(Some(node("Unknown")))),
+            ("unready", Ok(Some(node("False")))),
+            ("no-status", Ok(Some(Node::default()))),
+            ("missing", Ok(None)),
+            ("error", Err(())),
+        ]);
+        let calls = Mutex::new(Vec::new());
+        let names = responses
+            .keys()
+            .chain(["healthy"].iter())
+            .map(|name| name.to_string())
+            .collect();
+        let ready = probe_nodes(names, |name| {
+            calls.lock().unwrap().push(name.clone());
+            std::future::ready(responses[name.as_str()].clone())
+        })
+        .await;
+        assert_eq!(ready, ["healthy".to_string()].into());
+        assert_eq!(calls.lock().unwrap().len(), responses.len());
+        assert!(!on_ready_node(&Pod::default(), &ready));
+        assert!(
+            probe_nodes(BTreeSet::new(), |_| {
+                calls.lock().unwrap().push("unexpected".into());
+                std::future::ready(Ok::<_, ()>(None))
+            })
+            .await
+            .is_empty()
+        );
+        assert_eq!(calls.lock().unwrap().len(), responses.len());
+    }
+
+    #[tokio::test]
+    async fn node_probes_keep_completed_results_with_one_budget_for_all_nodes() {
+        let names: BTreeSet<_> = (0..20).map(|i| format!("node-{i:02}")).collect();
+        let all_ready =
+            probe_nodes(names.clone(), |_| async { Ok::<_, ()>(Some(node("True"))) }).await;
+        assert_eq!(
+            all_ready, names,
+            "concurrency limit must not truncate candidates"
+        );
+        let started = tokio::time::Instant::now();
+        let ready = tokio::time::timeout(
+            Duration::from_secs(2),
+            probe_nodes(names, |name| async move {
+                if name != "node-00" {
+                    std::future::pending::<()>().await;
+                }
+                Ok::<_, ()>(Some(node("True")))
+            }),
+        )
+        .await
+        .expect("probes must share one deadline");
+        assert_eq!(ready, ["node-00".to_string()].into());
+        assert!(started.elapsed() >= Duration::from_millis(250));
+    }
 
     fn config() -> Config {
         Config::test_default()
