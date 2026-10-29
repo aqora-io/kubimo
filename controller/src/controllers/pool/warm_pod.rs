@@ -298,6 +298,23 @@ pub(crate) async fn ensure_route(ctx: &Context, pod: &Pod) -> kubimo::Result<()>
     Ok(())
 }
 
+/// The API proxy waits for claim credentials, so PodReady is false even
+/// after marimo and its anonymous slot have finished booting.
+pub(crate) fn runner_is_ready(pod: &Pod) -> bool {
+    pod.metadata.deletion_timestamp.is_none()
+        && pod.status.as_ref().is_some_and(|status| {
+            status.phase.as_deref() == Some("Running")
+                && status
+                    .container_statuses
+                    .as_ref()
+                    .is_some_and(|containers| {
+                        containers
+                            .iter()
+                            .any(|container| container.name == "runner" && container.ready)
+                    })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

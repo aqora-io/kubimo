@@ -113,7 +113,7 @@ impl RunnerReconciler {
             );
         }
 
-        let mut warm: Vec<Pod> = list_pods(
+        let warm: Vec<Pod> = list_pods(
             &pods,
             &FilterParams::new().with_labels(
                 [(POOL_LABEL, pool_name), (POOL_STATE_LABEL, POOL_STATE_WARM)]
@@ -122,14 +122,8 @@ impl RunnerReconciler {
             ),
         )
         .await?;
-        warm.retain(|pod| pod.metadata.deletion_timestamp.is_none());
-        // The pool controller retires drifted warm pods only on its next pass;
-        // until then one minted from an old template (the previous image, say)
-        // still reads as warm, and claiming it would serve the old pod.
         let template_hash = crate::controllers::pool::warm_pod::template_hash(&ctx.config, &pool);
-        warm.retain(|pod| minted_from_template(pod, &template_hash));
-        // Oldest first: most likely to be fully booted.
-        warm.sort_by_key(|pod| pod.metadata.creation_timestamp.clone());
+        let warm = claim_candidates(warm, &template_hash);
 
         let claim = pool_claim(runner, workspace);
         let claim_json = serde_json::to_string(&claim)?;
@@ -417,6 +411,16 @@ fn may_hold_a_slot(pod: &Pod) -> bool {
     )
 }
 
+fn claim_candidates(mut pods: Vec<Pod>, template_hash: &str) -> Vec<Pod> {
+    // A replacement may still be booting, or carry an older image's template.
+    pods.retain(|pod| {
+        crate::controllers::pool::warm_pod::runner_is_ready(pod)
+            && minted_from_template(pod, template_hash)
+    });
+    pods.sort_by_key(|pod| pod.metadata.creation_timestamp.clone());
+    pods
+}
+
 /// Whether a warm pod was minted from the pool template hashing to
 /// `template_hash`; a pod without the annotation never is.
 fn minted_from_template(pod: &Pod, template_hash: &str) -> bool {
@@ -671,6 +675,85 @@ mod tests {
     use kubimo::k8s_openapi::api::core::v1::{
         EnvFromSource, EnvVar, EnvVarSource, SecretEnvSource, SecretKeySelector,
     };
+
+    fn candidate(name: &str, created: &str, runner_ready: bool) -> Pod {
+        serde_json::from_value(serde_json::json!({
+            "metadata": {
+                "name": name,
+                "creationTimestamp": created,
+                "annotations": { POOL_TEMPLATE_HASH_ANNOTATION: "current" }
+            },
+            "status": {
+                "phase": "Running",
+                "conditions": [{ "type": "Ready", "status": "False" }],
+                "containerStatuses": [
+                    { "name": "runner", "ready": runner_ready, "image": "marimo", "imageID": "", "restartCount": 0 },
+                    { "name": "aqora-api-proxy", "ready": false, "image": "nginx", "imageID": "", "restartCount": 0 }
+                ]
+            }
+        })).unwrap()
+    }
+
+    #[test]
+    fn claim_candidates_skip_booting_pods_and_keep_ready_pods_oldest_first() {
+        let candidates = claim_candidates(
+            vec![
+                candidate("oldest-booting", "2026-10-29T10:00:00Z", false),
+                candidate("newest-ready", "2026-10-29T10:02:00Z", true),
+                candidate("oldest-ready", "2026-10-29T10:01:00Z", true),
+            ],
+            "current",
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|pod| pod.name().unwrap())
+                .collect::<Vec<_>>(),
+            ["oldest-ready", "newest-ready"]
+        );
+    }
+
+    #[test]
+    fn claim_candidates_refuse_missing_pending_terminated_or_stale_readiness() {
+        let ready = candidate("ready", "2026-10-29T10:00:00Z", true);
+        let mut missing_status = ready.clone();
+        missing_status.status = None;
+        let mut missing_runner = ready.clone();
+        missing_runner
+            .status
+            .as_mut()
+            .unwrap()
+            .container_statuses
+            .as_mut()
+            .unwrap()
+            .remove(0);
+        let mut pending = ready.clone();
+        pending.status.as_mut().unwrap().phase = Some("Pending".into());
+        let mut terminated = ready.clone();
+        terminated.metadata.deletion_timestamp = terminated.metadata.creation_timestamp.clone();
+        let mut stale_template = ready.clone();
+        stale_template
+            .metadata
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert(POOL_TEMPLATE_HASH_ANNOTATION.into(), "previous".into());
+        assert!(
+            claim_candidates(
+                vec![
+                    missing_status,
+                    missing_runner,
+                    pending,
+                    terminated,
+                    stale_template
+                ],
+                "current"
+            )
+            .is_empty()
+        );
+        // The unassigned API proxy deliberately keeps PodReady false.
+        assert_eq!(claim_candidates(vec![ready], "current").len(), 1);
+    }
 
     /// The claim patch's opening `test` is the whole mutual-exclusion story;
     /// the ownerReference replacement is what moves the pod's lifetime from

@@ -124,6 +124,8 @@ impl Reconciler for PoolReconciler {
             warm_pod::ensure_route(ctx, pod).await?;
         }
 
+        // Starting pods occupy reserve capacity too; readiness must not
+        // cause the controller to mint unbounded replacements.
         let deficit = (pool.spec.replicas as usize).saturating_sub(kept.len());
         for _ in 0..deficit {
             let identity = warm_pod::mint_identity(name);
@@ -139,13 +141,7 @@ impl Reconciler for PoolReconciler {
         }
 
         let mut patched = pool.clone();
-        patched.status = Some(PoolStatus {
-            // Ready means the fleet was already at size before this pass —
-            // pods minted just now report on the next one, once they exist.
-            conditions: Some(vec![ready_condition(pool, deficit == 0)]),
-            warm: Some(kept.len() as u32),
-            claimed: Some(claimed),
-        });
+        patched.status = Some(pool_status(pool, &kept, claimed));
         ctx.api_namespaced::<Pool>(namespace)
             .patch_status(&patched)
             .await?;
@@ -159,6 +155,18 @@ impl Reconciler for PoolReconciler {
     // pods). Claimed pods are deliberately left alone: their ownerReference
     // was swapped to the Runner at claim time, so deleting a Pool never takes
     // down a notebook someone is sitting in.
+}
+
+fn pool_status(pool: &Pool, kept: &[&Pod], claimed: u32) -> PoolStatus {
+    let ready = kept
+        .iter()
+        .filter(|pod| warm_pod::runner_is_ready(pod))
+        .count() as u32;
+    PoolStatus {
+        conditions: Some(vec![ready_condition(pool, ready == pool.spec.replicas)]),
+        warm: Some(ready),
+        claimed: Some(claimed),
+    }
 }
 
 /// Withdraw a warm pod from the claimable set, then delete it.
@@ -196,9 +204,13 @@ async fn retire(pods: &Api<Pod>, name: &str) -> Result<(), kubimo::Error> {
 /// is unchanged (cf. `budget::exceeded_condition`).
 fn ready_condition(pool: &Pool, ready: bool) -> Condition {
     let (status, reason, message) = if ready {
-        ("True", "Ready", "All warm pods are minted")
+        ("True", "Ready", "All warm runners are ready")
     } else {
-        ("False", "Filling", "Minting warm pods up to replicas")
+        (
+            "False",
+            "Filling",
+            "Waiting for warm runners to become ready",
+        )
     };
     let previous = pool
         .status
@@ -254,6 +266,46 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pool_status_counts_ready_runners_without_waiting_for_claim_sidecars() {
+        let mut pool = Pool::new("viewers", Default::default());
+        pool.spec.replicas = 2;
+        let ready: Pod = serde_json::from_value(serde_json::json!({
+            "status": {
+                "phase": "Running",
+                "conditions": [{ "type": "Ready", "status": "False" }],
+                "containerStatuses": [
+                    { "name": "runner", "ready": true, "image": "marimo", "imageID": "", "restartCount": 0 },
+                    { "name": "aqora-api-proxy", "ready": false, "image": "nginx", "imageID": "", "restartCount": 0 }
+                ]
+            }
+        })).unwrap();
+        let mut starting = ready.clone();
+        starting
+            .status
+            .as_mut()
+            .unwrap()
+            .container_statuses
+            .as_mut()
+            .unwrap()[0]
+            .ready = false;
+        let status = pool_status(&pool, &[&ready, &starting], 3);
+        assert_eq!(status.warm, Some(1));
+        assert_eq!(status.claimed, Some(3));
+        let condition = &status.conditions.unwrap()[0];
+        assert_eq!(
+            (condition.status.as_str(), condition.reason.as_str()),
+            ("False", "Filling")
+        );
+        let complete = pool_status(&pool, &[&ready, &ready], 3);
+        assert_eq!(complete.warm, Some(2));
+        assert_eq!(complete.conditions.unwrap()[0].status, "True");
+        pool.spec.replicas = 0;
+        let disabled = pool_status(&pool, &[], 3);
+        assert_eq!(disabled.warm, Some(0));
+        assert_eq!(disabled.conditions.unwrap()[0].status, "True");
+    }
 
     /// The retire patch must lead with the `test` op — that is the whole
     /// mutual-exclusion mechanism against a concurrent claim.
