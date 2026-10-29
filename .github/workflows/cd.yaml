@@ -9,9 +9,15 @@ on:
   pull_request:
   merge_group:
   workflow_dispatch:
+    inputs:
+      publish_marimo_qa:
+        description: Test and publish only a commit-tagged marimo QA image
+        type: boolean
+        default: false
 
 jobs:
   build:
+    if: github.event_name != 'workflow_dispatch' || !inputs.publish_marimo_qa
     strategy:
       fail-fast: false
       matrix:
@@ -91,6 +97,53 @@ jobs:
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
+
+  marimo-qa:
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish_marimo_qa &&
+      github.repository == 'aqora-io/kubimo' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      QA_IMAGE: ghcr.io/aqora-io/kubimo-marimo:qa-${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and test the marimo image
+        uses: docker/bake-action@v7
+        with:
+          source: .
+          files: docker-bake.hcl
+          targets: marimo-test
+          set: |
+            *.platform=linux/amd64
+            *.cache-from=type=gha,scope=marimo-amd64
+      - name: Docker login
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the tested QA image
+        uses: docker/bake-action@v7
+        with:
+          source: .
+          files: docker-bake.hcl
+          targets: marimo
+          set: |
+            *.platform=linux/amd64
+            *.tags=${{ env.QA_IMAGE }}
+            *.output=type=registry
+            *.cache-to=type=gha,scope=marimo-amd64,mode=max
+      - name: Report the QA image
+        run: |
+          echo "QA image (linux/amd64): $QA_IMAGE" >> "$GITHUB_STEP_SUMMARY"
 
   merge:
     if: startsWith(github.ref, 'refs/tags/')
