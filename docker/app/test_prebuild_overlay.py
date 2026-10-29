@@ -123,3 +123,43 @@ def test_a_sync_past_its_share_gives_up(monkeypatch, one_second_share):
         kubimo_prebuild_overlay.prebuild("uv")
 
     assert time.monotonic() - start < 4
+
+
+def test_prebuild_prepares_uv_3_12_and_3_13_without_leaving_notebooks(
+    tmp_path, monkeypatch
+):
+    notebook = tmp_path / "readme.py"
+    seed = tmp_path / "seed.py"
+    seed.write_text('# /// script\n# requires-python = "==3.12.*"\n# ///\n')
+    monkeypatch.setattr(kubimo_prebuild_overlay, "NOTEBOOK", notebook)
+    monkeypatch.setattr(kubimo_prebuild_overlay, "SEED_NOTEBOOK", seed)
+    monkeypatch.setattr(kubimo_prebuild_overlay, "drop_privileges", lambda: None)
+    prepared = []
+
+    def prepare(backend, notebook):
+        prepared.append((backend, notebook.read_text()))
+
+    monkeypatch.setattr(kubimo_prebuild_overlay, "prebuild", prepare)
+
+    assert kubimo_prebuild_overlay.main() == 0
+    assert prepared == [
+        ("uv", '# /// script\n# requires-python = "==3.12.*"\n# ///\n'),
+        ("uv", '# /// script\n# requires-python = "==3.13.*"\n# ///\n'),
+        ("pixi", '# /// script\n# requires-python = "==3.12.*"\n# ///\n'),
+    ]
+    assert not notebook.exists()
+    assert not notebook.with_name("readme-3.13.py").exists()
+
+
+def test_prebuild_does_not_overwrite_an_existing_compatibility_notebook(
+    tmp_path, monkeypatch
+):
+    notebook = tmp_path / "readme.py"
+    existing = notebook.with_name("readme-3.13.py")
+    existing.write_text("user data")
+    monkeypatch.setattr(kubimo_prebuild_overlay, "NOTEBOOK", notebook)
+    monkeypatch.setattr(kubimo_prebuild_overlay, "drop_privileges", lambda: None)
+
+    assert kubimo_prebuild_overlay.main() == 1
+    assert existing.read_text() == "user data"
+    assert not notebook.exists()

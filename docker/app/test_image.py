@@ -315,15 +315,34 @@ def test_seeded_environment_is_reused_offline(monkeypatch, backend):
     # canonical notebook goes where the seed step synced it.
     notebook = Path("/home/me/workspace/readme.py")
     notebook.write_text(HEADER + NOTEBOOK)
+    cache = Path.home() / ".cache"
+    prefixes = (
+        (cache / "uv/environments-v2").glob("*")
+        if backend == "uv"
+        else (cache / "rattler/cache/cached-envs-v0").glob("*/envs/default")
+    )
+    before = {
+        str(prefix.resolve()): (
+            prefix.stat().st_ino,
+            (prefix / "bin/python").lstat().st_ino,
+        )
+        for prefix in prefixes
+        if (prefix / "bin/python").is_file()
+    }
     for name, value in CUT_NETWORK.items():
         monkeypatch.setenv(name, value)
     try:
         start = time.monotonic()
-        _sync(notebook, backend)
+        environment = _sync(notebook, backend, timeout=15)
         elapsed = time.monotonic() - start
     finally:
         notebook.unlink()
-    assert elapsed < 5
+    prefix = Path(environment.root)
+    assert before[str(prefix.resolve())] == (
+        prefix.stat().st_ino,
+        (prefix / "bin/python").lstat().st_ino,
+    )
+    print(f"{backend} reused its seeded environment offline in {elapsed:.2f}s")
     if backend != "pixi":
         return
 
@@ -389,6 +408,34 @@ def test_a_new_uv_notebook_syncs_offline(tmp_path, monkeypatch):
     data = _run_json(environment, CHECK_FORK, "uv")
 
     assert "/opt/marimo/dist" in data["direct_url"]["url"]
+
+
+def test_a_new_python_3_13_uv_notebook_syncs_offline(tmp_path, monkeypatch):
+    prebuild = subprocess.run(
+        [sys.executable, str(Path(__file__).parent / "kubimo_prebuild_overlay.py")],
+        capture_output=True, text=True, timeout=300, check=False,
+    )
+    assert prebuild.returncode == 0, prebuild.stderr
+    notebook = tmp_path / "nb.py"
+    notebook.write_text(HEADER.replace("==3.12.*", ">=3.13") + NOTEBOOK)
+    for name, value in CUT_NETWORK.items():
+        monkeypatch.setenv(name, value)
+
+    environment = _sync(notebook, "uv", timeout=15)
+    environments = Path.home() / ".cache/uv/environments-v2"
+    before = {path for path in environments.glob("*/*") if path.is_symlink()}
+    data = _run_json(
+        environment,
+        CHECK_FORK + "\nimport sys; assert sys.version_info[:2] == (3, 13)\n",
+        "uv",
+        extra_env=CUT_NETWORK,
+    )
+
+    assert "/opt/marimo/dist" in data["direct_url"]["url"]
+    assert (
+        {path for path in environments.glob("*/*") if path.is_symlink()}
+        == before
+    )
 
 
 def test_an_uncached_package_fails_the_uv_sync_cleanly(tmp_path, monkeypatch):

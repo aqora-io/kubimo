@@ -28,7 +28,7 @@ FROM pixi-${TARGETARCH} AS pixi-release
 # marimo source, in a stage of its own so a local checkout can replace it:
 # docker buildx bake marimo --allow=fs.read=<dir> --set marimo.contexts.marimo-src=<dir>
 FROM scratch AS marimo-src
-ARG MARIMO_GIT=https://github.com/aqora-io/marimo.git#93806c84cffc7f29c1ab79dfec4b983a26a46a0f
+ARG MARIMO_GIT=https://github.com/aqora-io/marimo.git#68ce2d55fc4614ae5349e7b3e8c9e84806111a05
 ADD ${MARIMO_GIT} /
 
 # build marimo
@@ -210,10 +210,22 @@ for env in /home/${USER}/.cache/uv/environments-v2/*/*; do
 done
 rm -r /home/${USER}/.cache/uv/environments-v2
 uv cache clean marimo
+# Keep the default 3.12 environment and cache the compatible 3.13 packages too.
+# The node pre-build prepares both fork overlays after the wheel is unpacked.
 /usr/local/bin/python3 - <<'PY'
 import asyncio
+from pathlib import Path
 from marimo._environments import backends
-asyncio.run(backends.sync_notebook_async("/home/me/workspace/readme.py", backend="uv"))
+notebook = Path("/home/me/workspace/readme.py")
+compatibility_notebook = notebook.with_name("readme-3.13.py")
+compatibility_notebook.write_bytes(
+    notebook.read_bytes().replace(b"==3.12.*", b"==3.13.*", 1)
+)
+try:
+    for path in (notebook, compatibility_notebook):
+        asyncio.run(backends.sync_notebook_async(str(path), backend="uv"))
+finally:
+    compatibility_notebook.unlink()
 PY
 rm readme.py
 du -shc /home/${USER}/.cache/*
@@ -235,4 +247,4 @@ USER me
 # -p no:cacheprovider: /app is root-owned (COPY above, unchanged for the
 # shipped image), so me cannot write .pytest_cache there, and a one-shot
 # build has no later run to reuse it anyway.
-RUN pytest -q -p no:cacheprovider /app
+RUN pytest -q -p no:cacheprovider --durations=20 /app
