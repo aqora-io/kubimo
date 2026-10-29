@@ -300,7 +300,7 @@ async fn bind(
             forget_adopted();
             "hydration failed"
         })?;
-    if restored && crate::csi::chown_tree(&dir).is_err() {
+    if restored && node.chown_restored_workspace(&dir).is_err() {
         forget_adopted();
         return Err("could not chown the hydrated files");
     }

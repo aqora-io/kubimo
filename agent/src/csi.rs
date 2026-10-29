@@ -122,6 +122,9 @@ pub struct KubimoNode {
     node_id: String,
     store: SlotStore,
     default_limit_bytes: u64,
+    /// The root-protected, immutable template was checked once at node startup.
+    /// cp --archive preserves these owners when seeding fresh or anonymous slots.
+    template_owned_by_runner: bool,
     /// Permit slots on a filesystem without project-quota enforcement.
     ///
     /// Off by default and deliberately explicit: an unquota'd slot has no
@@ -242,6 +245,12 @@ fn unquotaed_refusal(root: &Path) -> Status {
 /// Deliberately does not follow symlinks: the tree contains tenant-controlled
 /// paths, and following a planted link would chown something outside the slot.
 fn walkdir(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    if !std::fs::symlink_metadata(dir)?.file_type().is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ownership root must be a directory, not a symlink",
+        ));
+    }
     let mut found = vec![dir.to_path_buf()];
     let mut stack = vec![dir.to_path_buf()];
     while let Some(next) = stack.pop() {
@@ -257,6 +266,24 @@ fn walkdir(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+/// Validate the node-private template once, never following tenant-style links.
+/// An old, absent or malformed template keeps the defensive whole-slot repair.
+fn template_owned_by_runner(data_root: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let template = data_root.join(crate::venv::TEMPLATE_SUBDIR);
+    let workspace = template.join(crate::hydrate::WORKSPACE_SUBDIR);
+    if !std::fs::symlink_metadata(&workspace)?.file_type().is_dir() {
+        return Ok(false);
+    }
+    for entry in walkdir(&template)? {
+        let metadata = std::fs::symlink_metadata(entry)?;
+        if metadata.uid() != SLOT_UID || metadata.gid() != SLOT_GID {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 impl KubimoNode {
     pub fn new(
         node_id: String,
@@ -265,7 +292,13 @@ impl KubimoNode {
         allow_unquotaed_slots: bool,
         client: Option<kubimo::Client>,
     ) -> Self {
+        let template_owned_by_runner = template_owned_by_runner(store.layout().root())
+            .unwrap_or_else(|err| {
+                tracing::debug!(%err, "template ownership unverified; repairing whole hydrated slots");
+                false
+            });
         Self {
+            template_owned_by_runner,
             node_id,
             store,
             default_limit_bytes,
@@ -275,6 +308,26 @@ impl KubimoNode {
             s3_clients: Default::default(),
             clients: crate::clients::NamespacedClients::new(client.is_some()),
             watchers: Default::default(),
+        }
+    }
+
+    /// Hydration only writes workspace/. Everything else was copied with its
+    /// validated template ownership, or created by the uid-1000 warm runner.
+    /// These callers run before publishing/acking a user session, as hydration does.
+    pub(crate) fn chown_restored_workspace(&self, dir: &Path) -> std::io::Result<()> {
+        // Do not follow a replaced slot root either.
+        if !std::fs::symlink_metadata(dir)?.file_type().is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "slot root must be a directory",
+            ));
+        }
+        crate::hydrate::validate_workspace_root(&dir.join(crate::hydrate::WORKSPACE_SUBDIR))?;
+        if self.template_owned_by_runner {
+            std::os::unix::fs::lchown(dir, Some(SLOT_UID), Some(SLOT_GID))?;
+            chown_tree(&dir.join(crate::hydrate::WORKSPACE_SUBDIR))
+        } else {
+            chown_tree(dir)
         }
     }
 
@@ -999,7 +1052,7 @@ impl KubimoNode {
             .await?;
         if restored {
             // Restored files land as root; the runner is uid 1000.
-            chown_tree(dir)
+            self.chown_restored_workspace(dir)
                 .map_err(|err| Status::internal(format!("chowning hydrated slot: {err}")))?;
         }
         Ok(())
@@ -2087,6 +2140,129 @@ mod tests {
             "the error should name the CSIDriver setting that supplies it, got: {}",
             status.message()
         );
+    }
+
+    #[test]
+    fn ownership_walk_rejects_a_symlink_or_file_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"untouched").unwrap();
+        let link = dir.path().join("root-link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        assert_eq!(
+            walkdir(&link).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert_eq!(
+            walkdir(&file).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    /// Also executed explicitly with sudo in CI: normal test runs may lack chown.
+    #[tokio::test]
+    async fn ownership_repairs_with_root_privileges() {
+        use std::os::unix::fs::MetadataExt;
+        let is_root = rustix::process::geteuid().as_raw() == 0;
+        if std::env::var_os("KUBIMO_TEST_REQUIRE_ROOT").is_some() {
+            assert!(is_root, "the ownership CI test must run as root");
+        }
+        if !is_root {
+            return;
+        }
+        fn owner_and_change_time(path: &Path) -> (u32, u32, i64, i64) {
+            let m = std::fs::symlink_metadata(path).unwrap();
+            (m.uid(), m.gid(), m.ctime(), m.ctime_nsec())
+        }
+        fn node(root: &Path) -> KubimoNode {
+            KubimoNode::new(
+                "ownership-test".into(),
+                SlotStore::new(crate::slot::SlotLayout::new(root)),
+                1024,
+                true,
+                None,
+            )
+        }
+        let root = tempfile::tempdir().unwrap();
+        let template = root.path().join(crate::venv::TEMPLATE_SUBDIR);
+        std::fs::create_dir_all(template.join("workspace")).unwrap();
+        std::fs::create_dir_all(template.join(".cache/deep")).unwrap();
+        std::fs::write(template.join(".cache/deep/seed"), b"cached").unwrap();
+        chown_tree(&template).unwrap();
+        let node = node(root.path());
+        assert!(node.template_owned_by_runner);
+        let slot = root.path().join("slot");
+        std::fs::create_dir_all(slot.join("workspace/subdir")).unwrap();
+        std::fs::create_dir_all(slot.join(".cache/deep")).unwrap();
+        std::fs::write(slot.join(".cache/deep/seed"), b"cached").unwrap();
+        chown_tree(&slot.join(".cache")).unwrap();
+        let restored = slot.join("workspace/subdir/notebook.py");
+        std::fs::write(&restored, b"restored as root").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, b"host file").unwrap();
+        let escape = slot.join("workspace/escape");
+        std::os::unix::fs::symlink(outside.path(), &escape).unwrap();
+        let cache_before = owner_and_change_time(&slot.join(".cache/deep/seed"));
+        let cache_dir_before = owner_and_change_time(&slot.join(".cache"));
+        let outside_before = owner_and_change_time(&secret);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        node.chown_restored_workspace(&slot).unwrap();
+        assert_eq!(
+            (
+                owner_and_change_time(&slot).0,
+                owner_and_change_time(&slot).1
+            ),
+            (SLOT_UID, SLOT_GID)
+        );
+        assert_eq!(
+            owner_and_change_time(&slot.join("workspace/subdir")).0,
+            SLOT_UID
+        );
+        assert_eq!(owner_and_change_time(&restored).0, SLOT_UID);
+        assert_eq!(owner_and_change_time(&restored).1, SLOT_GID);
+        assert_eq!(owner_and_change_time(&escape).0, SLOT_UID);
+        assert_eq!(owner_and_change_time(&secret), outside_before);
+        assert_eq!(
+            owner_and_change_time(&slot.join(".cache/deep/seed")),
+            cache_before
+        );
+        assert_eq!(
+            owner_and_change_time(&slot.join(".cache")),
+            cache_dir_before
+        );
+
+        // A template with even one wrong owner must retain full-slot repair.
+        std::os::unix::fs::lchown(template.join(".cache/deep/seed"), Some(0), Some(0)).unwrap();
+        let defensive = KubimoNode::new(
+            "fallback-test".into(),
+            SlotStore::new(crate::slot::SlotLayout::new(root.path())),
+            1024,
+            true,
+            None,
+        );
+        assert!(!defensive.template_owned_by_runner);
+        let cached = slot.join(".cache/deep/seed");
+        std::os::unix::fs::lchown(&cached, Some(0), Some(0)).unwrap();
+        defensive.chown_restored_workspace(&slot).unwrap();
+        assert_eq!(
+            (
+                owner_and_change_time(&cached).0,
+                owner_and_change_time(&cached).1
+            ),
+            (SLOT_UID, SLOT_GID)
+        );
+
+        // Refuse the workspace root itself before making any ownership changes.
+        std::fs::remove_dir_all(slot.join("workspace")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), slot.join("workspace")).unwrap();
+        let slot_before = owner_and_change_time(&slot);
+        assert!(node.chown_restored_workspace(&slot).is_err());
+        assert!(defensive.chown_restored_workspace(&slot).is_err());
+        assert_eq!(owner_and_change_time(&secret), outside_before);
+        assert_eq!(owner_and_change_time(&slot), slot_before);
     }
 
     /// The traversal half of the symlink defence: a symlinked *directory* must

@@ -483,6 +483,20 @@ pub struct Flushed {
     pub content_bytes: u64,
 }
 
+/// Refuse an existing symlink or non-directory before any archive writes.
+/// Fresh publishes and pre-ack warm claims have no tenant writers yet.
+pub(crate) fn validate_workspace_root(directory: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "workspace root must be a directory, not a symlink",
+        )),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 /// Restore `archive` into `slot_dir/workspace`.
 ///
 /// Returns `false` when the workspace has no archive yet — a brand-new
@@ -495,6 +509,10 @@ pub async fn hydrate_slot(
     secrets: WorkspaceRestoreSecrets,
 ) -> Result<bool, HydrateError> {
     let directory: PathBuf = slot_dir.join(WORKSPACE_SUBDIR);
+    validate_workspace_root(&directory).map_err(|source| HydrateError::CreateDir {
+        path: directory.display().to_string(),
+        source,
+    })?;
     tokio::fs::create_dir_all(&directory)
         .await
         .map_err(|source| HydrateError::CreateDir {
@@ -529,6 +547,42 @@ pub async fn hydrate_slot(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[tokio::test]
+    async fn hydration_rejects_workspace_root_links_before_restore() {
+        let slot = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"unchanged").unwrap();
+        let workspace = slot.path().join(super::WORKSPACE_SUBDIR);
+        std::os::unix::fs::symlink(outside.path(), &workspace).unwrap();
+        let archive = super::ArchiveLocation {
+            bucket: "unused".into(),
+            key_prefix: Some("unused".into()),
+        };
+        let result = super::hydrate_slot(
+            slot.path(),
+            &archive,
+            &indexer::s3::S3Client::from_env(),
+            kubimo::WorkspaceRestoreSecrets::default(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(super::HydrateError::CreateDir { source, .. }) if source.kind() == std::io::ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            std::fs::read(outside.path().join("secret")).unwrap(),
+            b"unchanged"
+        );
+        std::fs::remove_file(&workspace).unwrap();
+        std::fs::write(&workspace, b"not a directory").unwrap();
+        assert_eq!(
+            super::validate_workspace_root(&workspace)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        std::fs::remove_file(workspace).unwrap();
+        assert!(super::validate_workspace_root(&slot.path().join(super::WORKSPACE_SUBDIR)).is_ok());
+    }
     use super::*;
 
     /// A client whose every request is answered by `respond`.

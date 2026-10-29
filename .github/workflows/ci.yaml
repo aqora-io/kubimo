@@ -37,6 +37,15 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Test restored ownership as root
+        # Reuse the exact artifact Cargo built, and elevate only this tmpdir test.
+        # Ordinary cargo tests cannot verify uid/gid repair on GitHub's runner uid.
+        run: |
+          test_binary="$(cargo test -p agent --no-run --message-format=json | jq -r 'select(.reason == "compiler-artifact" and .target.name == "agent" and .profile.test == true) | .executable // empty')"
+          test -x "$test_binary"
+          test_name=csi::tests::ownership_repairs_with_root_privileges
+          "$test_binary" "$test_name" --exact --list | grep -Fx "$test_name: test"
+          sudo env -i KUBIMO_TEST_REQUIRE_ROOT=1 "$test_binary" "$test_name" --exact --nocapture
   helm:
     runs-on: ubuntu-latest
     permissions:
