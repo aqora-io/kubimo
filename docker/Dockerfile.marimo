@@ -1,26 +1,26 @@
 # syntax=docker/dockerfile:1.17
 
 FROM scratch AS nodejs-arm64
-ARG NODE_VERSION=24.11.1
-ARG NODE_CHKSUM=sha256:0dc93ec5c798b0d347f068db6d205d03dea9a71765e6a53922b682b91265d71f
+ARG NODE_VERSION=24.22.2
+ARG NODE_CHKSUM=sha256:95c264150aceb7f3437a29fd6984924f5f8d1511ea3cbd6c508b83f6c555dae2
 ADD --checksum=${NODE_CHKSUM} https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.gz /mnt/node.tar.gz
 
 FROM scratch AS nodejs-amd64
-ARG NODE_VERSION=24.11.1
-ARG NODE_CHKSUM=sha256:58a5ff5cc8f2200e458bea22e329d5c1994aa1b111d499ca46ec2411d58239ca
+ARG NODE_VERSION=24.22.2
+ARG NODE_CHKSUM=sha256:361718c444e49af2ca5a110c83ba6a8901143f23ab285ebbef0341f391f482a9
 ADD --checksum=${NODE_CHKSUM} https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz /mnt/node.tar.gz
 
 FROM nodejs-${TARGETARCH} AS nodejs
 
 # download pixi
 FROM scratch AS pixi-arm64
-ARG PIXI_VERSION=v0.81.0
-ARG PIXI_CHKSUM=sha256:7fcd20f7c18339f13552a6767ab146ce6b439ce29db46cc03ece005ca9696bb1
+ARG PIXI_VERSION=v0.83.0
+ARG PIXI_CHKSUM=sha256:5fbcbb3feff294da4d285d72efeb76eb598fd8fc94a1d9283d44c62dab9d640b
 ADD --checksum=${PIXI_CHKSUM} --chmod=u=rwx,go=rx https://github.com/prefix-dev/pixi/releases/download/${PIXI_VERSION}/pixi-aarch64-unknown-linux-musl /mnt/pixi
 
 FROM scratch AS pixi-amd64
-ARG PIXI_VERSION=v0.81.0
-ARG PIXI_CHKSUM=sha256:248510f5f75460a2ae4ec62d761e15c0191dc35db3b1da6f82d9f17c6017051d
+ARG PIXI_VERSION=v0.83.0
+ARG PIXI_CHKSUM=sha256:50571451e96f4a82cf675cd83baaf66fff9b718f0aaf153900b9faf4c29bd401
 ADD --checksum=${PIXI_CHKSUM} --chmod=u=rwx,go=rx https://github.com/prefix-dev/pixi/releases/download/${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl /mnt/pixi
 
 FROM pixi-${TARGETARCH} AS pixi-release
@@ -28,11 +28,11 @@ FROM pixi-${TARGETARCH} AS pixi-release
 # marimo source, in a stage of its own so a local checkout can replace it:
 # docker buildx bake marimo --allow=fs.read=<dir> --set marimo.contexts.marimo-src=<dir>
 FROM scratch AS marimo-src
-ARG MARIMO_GIT=https://github.com/aqora-io/marimo.git#05e8bc887ba7d083212421e57f0017039582e450
+ARG MARIMO_GIT=https://github.com/aqora-io/marimo.git#93806c84cffc7f29c1ab79dfec4b983a26a46a0f
 ADD ${MARIMO_GIT} /
 
 # build marimo
-FROM ghcr.io/astral-sh/uv:0.12.19-python3.12-trixie-slim AS build-marimo
+FROM ghcr.io/astral-sh/uv:0.13.6-python3.12-trixie-slim AS build-marimo
 SHELL ["/bin/bash", "-xeuo", "pipefail", "-c"]
 
 RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -66,10 +66,10 @@ EOF
 
 # pixi's generic name for each architecture, pinned for the seeded
 # environment's sake (see CONDA_OVERRIDE_LINUX below)
-FROM ghcr.io/astral-sh/uv:0.12.19-python3.12-trixie-slim AS base-amd64
+FROM ghcr.io/astral-sh/uv:0.13.6-python3.12-trixie-slim AS base-amd64
 ENV CONDA_OVERRIDE_ARCHSPEC=x86_64
 
-FROM ghcr.io/astral-sh/uv:0.12.19-python3.12-trixie-slim AS base-arm64
+FROM ghcr.io/astral-sh/uv:0.13.6-python3.12-trixie-slim AS base-arm64
 ENV CONDA_OVERRIDE_ARCHSPEC=aarch64
 
 # actual image deployed to production
@@ -148,6 +148,7 @@ ENV MARIMO_RUNTIME_WHEEL=/opt/marimo/dist \
     MARIMO_PIXI_UV=/usr/local/bin/kubimo-uv \
     MARIMO_UV=/usr/local/bin/kubimo-uv \
     MARIMO_DEFAULT_REQUIRES_PYTHON="==3.12.*" \
+    UV_PYTHON_PREFERENCE=system \
     PIXI_CACHE_DIR=/home/${USER}/.cache/rattler/cache \
     UV_CACHE_DIR=/home/${USER}/.cache/uv \
     UV_TOOL_BIN_DIR=
@@ -159,6 +160,21 @@ ENV MARIMO_RUNTIME_WHEEL=/opt/marimo/dist \
 # architecture (set per architecture above) and kernel 4.19, which newer
 # kernels stay compatible with. glibc is the image's own everywhere.
 ENV CONDA_OVERRIDE_LINUX=4.19
+
+# A notebook requiring >=3.13 cannot use the system's 3.12. Seed a compatible
+# interpreter outside the per-workspace managed installations and expose it
+# on PATH. Preferring system interpreters lets uv choose it even if a slot
+# previously downloaded 3.15, while explicit newer requirements still fall
+# back to a compatible managed interpreter or download. Keep UV_PYTHON unset.
+# The server, header-less notebooks and default headers retain Python 3.12.
+ARG NOTEBOOK_PYTHON_VERSION=3.13.18
+RUN <<EOF
+# Root must not create the runtime user's .cache directory while installing.
+export UV_CACHE_DIR=/root/.cache/uv
+uv python install --install-dir /opt/python --no-bin --compile-bytecode ${NOTEBOOK_PYTHON_VERSION}
+notebook_python=$(UV_PYTHON_INSTALL_DIR=/opt/python UV_PYTHON_PREFERENCE=only-managed uv python find --no-python-downloads ${NOTEBOOK_PYTHON_VERSION})
+ln -s "$notebook_python" /usr/local/bin/python3.13
+EOF
 
 USER ${USER}
 WORKDIR /home/${USER}/workspace
