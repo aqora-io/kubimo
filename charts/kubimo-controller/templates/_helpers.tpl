@@ -68,6 +68,35 @@ is about to detach. Refusing to render beats discovering it during an upgrade.
 {{- end }}
 
 {{/*
+Whether runners are routed by Ingresses: `controller.ingressEnabled`, default true.
+`hasKey`, because `default` treats an explicit false as unset. Renders "true" or
+nothing, for use in `if`.
+*/}}
+{{- define "kubimo-controller.ingressEnabled" -}}
+{{- $controller := .Values.controller | default dict -}}
+{{- if or (not (hasKey $controller "ingressEnabled")) $controller.ingressEnabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Fail the render on routing the controller would refuse to start with: Ingresses off
+with no Gateway (the controller would delete every runner's Ingress and route it
+nowhere), or a Gateway without both a name and a namespace.
+*/}}
+{{- define "kubimo-controller.validateRouting" -}}
+{{- $controller := .Values.controller | default dict -}}
+{{- $gateway := $controller.gateway | default dict -}}
+{{- if $gateway -}}
+{{- if not (and $gateway.name $gateway.namespace) -}}
+{{- fail "controller.gateway needs both a name and a namespace" -}}
+{{- end -}}
+{{- else if not (include "kubimo-controller.ingressEnabled" .) -}}
+{{- fail "controller.ingressEnabled=false needs controller.gateway, or no runner would be routed" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 The marimo image: what runners are started with, and what the agent stages its node
 template from.
 

@@ -6,8 +6,13 @@ rules:
   - apiGroups: ["kubimo.aqora.io"]
     resources: ["*"]
     verbs: ["*"]
+  # Kept with Ingresses off: the controller deletes the ones it wrote.
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
+    verbs: ["*"]
+  # HTTPRoutes for runners and warm pods, when controller.gateway is set.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
     verbs: ["*"]
   - apiGroups: ["batch"]
     resources: ["jobs"]

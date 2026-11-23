@@ -115,3 +115,82 @@ tests:
           content:
             name: KUBIMO__AGENT_IMAGE
             value: "example.com/agent:pinned"
+
+  - it: should route by Ingress only by default, setting no routing env
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__INGRESS_ENABLED
+            value: "false"
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].env[*].name
+          pattern: ^KUBIMO__GATEWAY__
+
+  - it: should pass the gateway through and keep Ingresses on in dual mode
+    set:
+      controller:
+        gateway:
+          name: kubimo
+          namespace: envoy-gateway-system
+          sectionName: https
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__GATEWAY__NAME
+            value: "kubimo"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__GATEWAY__NAMESPACE
+            value: "envoy-gateway-system"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__GATEWAY__SECTION_NAME
+            value: "https"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__INGRESS_ENABLED
+            value: "false"
+
+  - it: should turn Ingresses off with an explicit false, and leave the section unset when omitted
+    set:
+      controller:
+        ingressEnabled: false
+        gateway:
+          name: kubimo
+          namespace: envoy-gateway-system
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__INGRESS_ENABLED
+            value: "false"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KUBIMO__GATEWAY__SECTION_NAME
+            value: ""
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].env[*].name
+          pattern: ^KUBIMO__GATEWAY__SECTION_NAME$
+
+  - it: should refuse Ingresses off without a gateway
+    set:
+      controller:
+        ingressEnabled: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "ingressEnabled=false needs controller.gateway"
+
+  - it: should refuse a gateway without a namespace
+    set:
+      controller:
+        gateway:
+          name: kubimo
+    asserts:
+      - failedTemplate:
+          errorPattern: "controller.gateway needs both a name and a namespace"

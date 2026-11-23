@@ -1,0 +1,87 @@
+suite: static assets
+templates:
+  - static-assets.yaml
+
+tests:
+  - it: should route by Ingress only by default
+    set:
+      staticAssets:
+        enabled: true
+      controller:
+        runnerHosts:
+          - kubimo.org
+    asserts:
+      - containsDocument:
+          kind: Ingress
+          apiVersion: networking.k8s.io/v1
+          any: true
+      - containsDocument:
+          kind: HTTPRoute
+          apiVersion: gateway.networking.k8s.io/v1
+          any: true
+        not: true
+
+  - it: should render both routes in dual mode, the HTTPRoute on the same hosts and Gateway
+    set:
+      staticAssets:
+        enabled: true
+      controller:
+        runnerHosts:
+          - kubimo.org
+          - extra.kubimo.org
+        gateway:
+          name: kubimo
+          namespace: envoy-gateway-system
+          sectionName: https
+    asserts:
+      - containsDocument:
+          kind: Ingress
+          apiVersion: networking.k8s.io/v1
+          any: true
+      - equal:
+          path: spec
+          value:
+            parentRefs:
+              - name: kubimo
+                namespace: envoy-gateway-system
+                sectionName: https
+            hostnames:
+              - extra.kubimo.org
+              - kubimo.org
+            rules:
+              - matches:
+                  - path:
+                      type: PathPrefix
+                      value: /marimo-assets
+                backendRefs:
+                  - name: RELEASE-NAME-kubimo-controller-static-assets
+                    port: 80
+        documentSelector:
+          path: kind
+          value: HTTPRoute
+
+  - it: should render only the HTTPRoute with Ingresses off, without hostnames when none are configured
+    set:
+      staticAssets:
+        enabled: true
+      controller:
+        ingressEnabled: false
+        gateway:
+          name: kubimo
+          namespace: envoy-gateway-system
+    asserts:
+      - containsDocument:
+          kind: Ingress
+          apiVersion: networking.k8s.io/v1
+          any: true
+        not: true
+      - notExists:
+          path: spec.hostnames
+        documentSelector:
+          path: kind
+          value: HTTPRoute
+      - notExists:
+          path: spec.parentRefs[0].sectionName
+        documentSelector:
+          path: kind
+          value: HTTPRoute

@@ -10,6 +10,7 @@ use kubimo::{Runner, RunnerIngress, prelude::*};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use crate::Config;
+use crate::context::Context;
 
 #[inline]
 pub(crate) fn ingress_path_from_name(name: &str) -> String {
@@ -47,7 +48,10 @@ pub fn effective_ingress_path(runner: &Runner) -> kubimo::Result<String> {
     ingress_path(runner)
 }
 
-pub(crate) struct IngressParams<'a> {
+/// Where a runner (or warm pod) is routed: shared by its Ingress and its
+/// HTTPRoute, which route the same path on the same hosts to the same Service.
+#[derive(Clone)]
+pub(crate) struct RouteParams<'a> {
     pub name: &'a str,
     pub namespace: Option<String>,
     pub owner_reference: OwnerReference,
@@ -59,9 +63,22 @@ pub(crate) struct IngressParams<'a> {
     pub ingress: Option<&'a RunnerIngress>,
 }
 
+/// The hosts a route answers on: the configured runner hosts plus a runner's
+/// own `spec.ingress.tls.hosts`, sorted and deduplicated. Empty means any host.
+pub(crate) fn route_hosts(config: &Config, ingress: Option<&RunnerIngress>) -> BTreeSet<String> {
+    let mut hosts = config.runner_hosts.iter().cloned().collect::<BTreeSet<_>>();
+    if let Some(spec_hosts) = ingress
+        .and_then(|ingress| ingress.tls.as_ref())
+        .and_then(|tls| tls.hosts.as_ref())
+    {
+        hosts.extend(spec_hosts.iter().cloned());
+    }
+    hosts
+}
+
 /// The Ingress routing `path` to a runner's Service, shaped by the controller
 /// config and, for a runner, its `spec.ingress`.
-pub(crate) fn build_ingress(config: &Config, params: IngressParams) -> Ingress {
+pub(crate) fn build_ingress(config: &Config, params: &RouteParams) -> Ingress {
     let ingress_class_name = params
         .ingress
         .and_then(|ingress| ingress.class_name.clone())
@@ -92,12 +109,7 @@ pub(crate) fn build_ingress(config: &Config, params: IngressParams) -> Ingress {
             cluster_issuer.clone(),
         );
     }
-    let mut hosts = config.runner_hosts.iter().cloned().collect::<BTreeSet<_>>();
-    if let Some(spec_hosts) = spec_tls.and_then(|tls| tls.hosts.as_ref()) {
-        for host in spec_hosts {
-            hosts.insert(host.clone());
-        }
-    }
+    let hosts = route_hosts(config, params.ingress);
     let (tls, hosts) = if hosts.is_empty() {
         (None, vec![None])
     } else {
@@ -151,8 +163,8 @@ pub(crate) fn build_ingress(config: &Config, params: IngressParams) -> Ingress {
     Ingress {
         metadata: ObjectMeta {
             name: Some(params.name.to_string()),
-            namespace: params.namespace,
-            owner_references: Some(vec![params.owner_reference]),
+            namespace: params.namespace.clone(),
+            owner_references: Some(vec![params.owner_reference.clone()]),
             annotations: Some(annotations),
             ..Default::default()
         },
@@ -166,13 +178,29 @@ pub(crate) fn build_ingress(config: &Config, params: IngressParams) -> Ingress {
     }
 }
 
+/// Converge a route's Ingress: apply it while Ingresses are enabled, delete
+/// it once they are not (a 404 is success), so turning them off cleans up.
+pub(crate) async fn apply_or_delete_ingress(
+    ctx: &Context,
+    namespace: &str,
+    params: &RouteParams<'_>,
+) -> kubimo::Result<()> {
+    let ingresses = ctx.api_namespaced::<Ingress>(namespace);
+    if ctx.config.ingress_enabled {
+        ingresses.patch(&build_ingress(&ctx.config, params)).await?;
+    } else {
+        ingresses.delete_opt(params.name).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kubimo::RunnerTls;
 
-    fn params<'a>(ingress: Option<&'a RunnerIngress>) -> IngressParams<'a> {
-        IngressParams {
+    fn params<'a>(ingress: Option<&'a RunnerIngress>) -> RouteParams<'a> {
+        RouteParams {
             name: "bmor-x",
             namespace: Some("platform".into()),
             owner_reference: OwnerReference {
@@ -203,7 +231,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let ingress = build_ingress(&config, params(Some(&spec)));
+        let ingress = build_ingress(&config, &params(Some(&spec)));
 
         let annotations = ingress.metadata.annotations.as_ref().unwrap();
         assert_eq!(annotations["kubernetes.io/ingress.class"], "nginx");
@@ -252,7 +280,7 @@ mod tests {
     #[test]
     fn hostless_and_named_tls_ingresses() {
         let config = Config::test_default();
-        let ingress = build_ingress(&config, params(None));
+        let ingress = build_ingress(&config, &params(None));
         let spec = ingress.spec.as_ref().unwrap();
         assert!(spec.tls.is_none());
         assert_eq!(spec.rules.as_ref().unwrap()[0].host, None);
@@ -265,7 +293,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let ingress = build_ingress(&config, params(Some(&named)));
+        let ingress = build_ingress(&config, &params(Some(&named)));
         assert_eq!(
             ingress.spec.unwrap().tls.unwrap()[0].secret_name.as_deref(),
             Some("wildcard-tls")

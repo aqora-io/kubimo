@@ -1,7 +1,7 @@
 mod apply_claim;
-mod apply_ingress;
 mod apply_owner_reference;
 mod apply_pod;
+mod apply_routes;
 mod apply_service;
 
 pub(crate) use apply_pod::runner_port;
@@ -22,6 +22,7 @@ use kubimo::{
 
 use crate::backoff::default_error_policy;
 use crate::context::Context;
+use crate::controllers::http_route::HTTPRoute;
 use crate::controllers::lost_node::{LostNodeSweep, release_stranded_pods};
 use crate::controllers::pool::warm_pod;
 use crate::controllers::workspace_affinity;
@@ -107,22 +108,25 @@ impl RunnerReconciler {
                 // pool name and its warm-slot volume, and must never be
                 // measured against — or replaced by — the cold pod shape.
                 //
-                // A pod minted with its own Service and Ingress is reached
+                // A pod minted with its own Service and routes is reached
                 // through them; only one claimed under an older controller
-                // gets the runner's Ingress. Never both: ingress-nginx
-                // refuses a second Ingress for the same host and path.
+                // gets the runner's routes. Never both: ingress-nginx refuses
+                // a second Ingress for the same host and path, and Gateway API
+                // silently lets the oldest of two matching HTTPRoutes win.
                 let route = async {
                     match warm_pod::route_name(&pod) {
                         Some(route) => self.route_claimed_pod(ctx, &pod, route).await,
-                        None => self.apply_ingress(ctx, runner).await.map(|_| ()),
+                        None => self.apply_routes(ctx, runner).await,
                     }
                 };
-                futures::future::try_join_all([
+                futures::future::join_all([
                     self.apply_owner_reference(ctx, runner).boxed(),
                     self.apply_service(ctx, runner).map_ok(|_| ()).boxed(),
                     route.boxed(),
                 ])
-                .await?;
+                .await
+                .into_iter()
+                .collect::<Result<Vec<()>, _>>()?;
                 return Ok(Action::await_change());
             }
             apply_claim::ClaimOutcome::ColdPath => {
@@ -137,7 +141,10 @@ impl RunnerReconciler {
             }
         }
 
-        let applied = futures::future::try_join_all([
+        // join_all, not try_join_all: a fast route error must not cancel the
+        // pod or Service apply in flight. The first error by position wins,
+        // so a pod 409 still reads as one below.
+        let applied = futures::future::join_all([
             self.apply_owner_reference(ctx, runner)
                 .map_ok(|_| false)
                 .boxed(),
@@ -150,9 +157,11 @@ impl RunnerReconciler {
                 })
                 .boxed(),
             self.apply_service(ctx, runner).map_ok(|_| false).boxed(),
-            self.apply_ingress(ctx, runner).map_ok(|_| false).boxed(),
+            self.apply_routes(ctx, runner).map_ok(|_| false).boxed(),
         ])
-        .await;
+        .await
+        .into_iter()
+        .collect::<Result<Vec<bool>, _>>();
 
         // Recreating the pod while the previous one is still Terminating is a 409, and a
         // transient one: the name frees up as soon as it finishes. Left to propagate, it
@@ -226,11 +235,20 @@ pub fn controller(ctx: &Context) -> Controller<Runner> {
     let bmors = ctx.api_global::<Runner>().kube().clone();
     let pods = ctx.api_global::<Pod>().kube().clone();
     let svcs = ctx.api_global::<Service>().kube().clone();
-    let ings = ctx.api_global::<Ingress>().kube().clone();
-    Controller::new(bmors, Default::default())
+    let mut controller = Controller::new(bmors, Default::default())
         .owns(pods, Default::default())
-        .owns(svcs, Default::default())
-        .owns(ings, Default::default())
+        .owns(svcs, Default::default());
+    // Each route kind is watched only while it is written, so a cluster
+    // without the Gateway API CRDs runs as before when no Gateway is set.
+    if ctx.config.ingress_enabled {
+        let ings = ctx.api_global::<Ingress>().kube().clone();
+        controller = controller.owns(ings, Default::default());
+    }
+    if ctx.config.gateway.is_some() {
+        let routes = ctx.api_global::<HTTPRoute>().kube().clone();
+        controller = controller.owns(routes, Default::default());
+    }
+    controller
 }
 
 #[allow(clippy::result_large_err)]
