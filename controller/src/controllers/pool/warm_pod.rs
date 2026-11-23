@@ -6,9 +6,10 @@
 //! change them once serving — and recorded as annotations, which is what the
 //! runner reconciler reads back at claim time.
 //!
-//! Each warm pod also gets its own Service and Ingress at mint, so that
-//! ingress-nginx has long programmed the route by the time the pod is claimed.
-//! The Service selects a label the pod only gets once the claim is acked.
+//! Each warm pod also gets its own Service and routes (an Ingress, an
+//! HTTPRoute, or both) at mint, so that the proxy has long programmed the
+//! route by the time the pod is claimed. The Service selects a label the pod
+//! only gets once the claim is acked.
 
 use std::collections::BTreeMap;
 
@@ -28,7 +29,8 @@ use sha2::{Digest, Sha256};
 
 use crate::Config;
 use crate::context::Context;
-use crate::controllers::ingress::{IngressParams, build_ingress, ingress_path_from_name};
+use crate::controllers::http_route::{HTTPRoute, build_http_route};
+use crate::controllers::ingress::{RouteParams, build_ingress, ingress_path_from_name};
 use crate::controllers::runner_pod::{RunnerPodParams, TokenSource, build_runner_pod};
 use crate::controllers::slot_volume;
 
@@ -88,6 +90,13 @@ const WARM_POD_SHAPE: u32 = 2;
 /// name/token/base-url (random per pod) and `replicas` (a sizing knob, not a
 /// shape).
 pub(crate) fn template_hash(config: &Config, pool: &Pool) -> String {
+    // serde_json maps are sorted, so the serialization is canonical.
+    hex(Sha256::digest(
+        template_fingerprint(config, pool).to_string(),
+    ))
+}
+
+fn template_fingerprint(config: &Config, pool: &Pool) -> serde_json::Value {
     let image = &config.marimo_image;
     let mut fingerprint = serde_json::json!({
         "shape": WARM_POD_SHAPE,
@@ -119,8 +128,15 @@ pub(crate) fn template_hash(config: &Config, pool: &Pool) -> String {
     if let Some(asset_url) = config.runner_asset_url(image) {
         fingerprint["assetUrl"] = asset_url.into();
     }
-    // serde_json maps are sorted, so the serialization is canonical.
-    hex(Sha256::digest(fingerprint.to_string()))
+    // Pods minted with an Ingress must retire once Ingresses are off (and
+    // their settings stop mattering), but the default hash must not move.
+    // The Gateway is deliberately absent: HTTPRoutes are re-applied every
+    // pool pass, so turning one on converges in place instead of re-minting
+    // the fleet (one nginx reload per warm pod).
+    if !config.ingress_enabled {
+        fingerprint["ingress"] = false.into();
+    }
+    fingerprint
 }
 
 pub(crate) fn build_warm_pod(
@@ -206,7 +222,7 @@ pub(crate) fn build_warm_pod(
     }))
 }
 
-/// The name of the Service and Ingress the pod is routed through, or `None`
+/// The name of the Service and routes the pod is routed through, or `None`
 /// for a pod minted before warm pods were routed from birth.
 pub(crate) fn route_name(pod: &Pod) -> Option<&str> {
     pod.metadata
@@ -247,13 +263,9 @@ pub(crate) fn route_service(pod: &Pod) -> kubimo::Result<Service> {
     })
 }
 
-/// The warm pod's own Ingress: the minted base-url, routed the way a cold
-/// runner with default ingress settings is, but to the Service's ClusterIP.
-/// ingress-nginx applies endpoint changes in a config sync, at most one every
-/// ~3.3 s by default, and the claim's replacement warm pod has usually just
-/// taken one with its new Ingress. The ClusterIP is programmed at mint, so the
-/// ack's label only has to reach kube-proxy.
-pub(crate) fn route_ingress(config: &Config, pod: &Pod) -> kubimo::Result<Ingress> {
+/// The warm pod's route: the minted base-url, routed the way a cold runner
+/// with default ingress settings is, to the pod's own Service.
+fn route_params(pod: &Pod) -> kubimo::Result<RouteParams<'_>> {
     let name = require_route_name(pod)?;
     let path = pod
         .metadata
@@ -261,18 +273,24 @@ pub(crate) fn route_ingress(config: &Config, pod: &Pod) -> kubimo::Result<Ingres
         .as_ref()
         .and_then(|annotations| annotations.get(WARM_BASE_URL_ANNOTATION))
         .ok_or(kubimo::Error::ObjectMetaMissing(WARM_BASE_URL_ANNOTATION))?;
-    let mut ingress = build_ingress(
-        config,
-        IngressParams {
-            name,
-            namespace: pod.metadata.namespace.clone(),
-            owner_reference: pod.static_controller_owner_ref()?,
-            path: path.clone(),
-            service_name: name,
-            port: PORT,
-            ingress: None,
-        },
-    );
+    Ok(RouteParams {
+        name,
+        namespace: pod.metadata.namespace.clone(),
+        owner_reference: pod.static_controller_owner_ref()?,
+        path: path.clone(),
+        service_name: name,
+        port: PORT,
+        ingress: None,
+    })
+}
+
+/// The warm pod's own Ingress, proxying to the Service's ClusterIP.
+/// ingress-nginx applies endpoint changes in a config sync, at most one every
+/// ~3.3 s by default, and the claim's replacement warm pod has usually just
+/// taken one with its new Ingress. The ClusterIP is programmed at mint, so the
+/// ack's label only has to reach kube-proxy.
+pub(crate) fn route_ingress(config: &Config, pod: &Pod) -> kubimo::Result<Ingress> {
+    let mut ingress = build_ingress(config, &route_params(pod)?);
     ingress.metadata.annotations.get_or_insert_default().insert(
         "nginx.ingress.kubernetes.io/service-upstream".to_string(),
         "true".to_string(),
@@ -280,9 +298,19 @@ pub(crate) fn route_ingress(config: &Config, pod: &Pod) -> kubimo::Result<Ingres
     Ok(ingress)
 }
 
-/// Create the pod's Service and Ingress where missing. An existing one is
-/// never re-applied: ingress-nginx's validating webhook tests the whole nginx
-/// config on every Ingress write, no-op or not.
+/// The warm pod's own HTTPRoute, attached to the configured Gateway.
+pub(crate) fn route_http_route(config: &Config, pod: &Pod) -> kubimo::Result<Option<HTTPRoute>> {
+    let Some(gateway) = &config.gateway else {
+        return Ok(None);
+    };
+    Ok(Some(build_http_route(config, gateway, &route_params(pod)?)))
+}
+
+/// Create the pod's Service, and its Ingress while Ingresses are on, where
+/// missing. An existing one is never re-applied: ingress-nginx's validating
+/// webhook tests the whole nginx config on every Ingress write, no-op or not.
+/// The HTTPRoute is applied every time instead: no webhook guards it, a no-op
+/// apply writes nothing, and it converges when the Gateway config changes.
 pub(crate) async fn ensure_route(ctx: &Context, pod: &Pod) -> kubimo::Result<()> {
     let namespace = pod.require_namespace()?;
     let name = require_route_name(pod)?;
@@ -291,17 +319,38 @@ pub(crate) async fn ensure_route(ctx: &Context, pod: &Pod) -> kubimo::Result<()>
     if services.get_opt(name).await?.is_none() {
         services.patch(&route_service(pod)?).await?;
     }
-    let ingresses = ctx.api_namespaced::<Ingress>(namespace);
-    if ingresses.get_opt(name).await?.is_none() {
-        ingresses.patch(&route_ingress(&ctx.config, pod)?).await?;
+    if ctx.config.ingress_enabled {
+        let ingresses = ctx.api_namespaced::<Ingress>(namespace);
+        if ingresses.get_opt(name).await?.is_none() {
+            ingresses.patch(&route_ingress(&ctx.config, pod)?).await?;
+        }
     }
+    if let Some(route) = route_http_route(&ctx.config, pod)? {
+        ctx.api_namespaced::<HTTPRoute>(namespace)
+            .patch(&route)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Delete the pod's Ingress once Ingresses are off. Only a pod claimed before
+/// the switch still has one: warm pods minted with one are retired by the
+/// template hash instead.
+pub(crate) async fn prune_route_ingress(ctx: &Context, pod: &Pod) -> kubimo::Result<()> {
+    if ctx.config.ingress_enabled {
+        return Ok(());
+    }
+    ctx.api_namespaced::<Ingress>(pod.require_namespace()?)
+        .delete_opt(require_route_name(pod)?)
+        .await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controllers::ingress::{IngressParams, build_ingress};
+    use crate::config::GatewayRef;
+    use crate::controllers::ingress::{RouteParams, build_ingress};
     use kubimo::{PoolSpec, RunnerCommand};
 
     fn config() -> Config {
@@ -550,7 +599,7 @@ mod tests {
         let ingress = route_ingress(&config, &pod).unwrap();
         let mut expected = build_ingress(
             &config,
-            IngressParams {
+            &RouteParams {
                 name: &identity.name,
                 namespace: Some("default".into()),
                 owner_reference: pod.static_controller_owner_ref().unwrap(),
@@ -593,6 +642,102 @@ mod tests {
             change(&mut changed);
             assert_ne!(hash(&changed), default);
         }
+    }
+
+    fn gateway() -> GatewayRef {
+        GatewayRef {
+            name: "kubimo".into(),
+            namespace: "envoy-gateway-system".into(),
+            section_name: Some("https".into()),
+        }
+    }
+
+    /// The HTTPRoute is the Ingress's twin: the minted base-url on the
+    /// configured hosts to the pod's Service, owned by the pod. None without
+    /// a Gateway.
+    #[test]
+    fn a_warm_pods_http_route_routes_its_base_url_to_its_service() {
+        let (mut pod, identity) = warm_pod(PoolSpec::default());
+        pod.metadata.uid = Some("66666666-7777-8888-9999-000000000000".into());
+        assert_eq!(route_http_route(&config(), &pod).unwrap(), None);
+
+        let mut config = config();
+        config.runner_hosts = vec!["kubimo.org".into()];
+        config.gateway = Some(gateway());
+        let route = route_http_route(&config, &pod).unwrap().unwrap();
+        assert_eq!(route.metadata.name.as_deref(), Some(identity.name.as_str()));
+        let owner = &route.metadata.owner_references.as_ref().unwrap()[0];
+        assert_eq!(
+            (owner.kind.as_str(), owner.name.as_str()),
+            ("Pod", identity.name.as_str())
+        );
+        assert_eq!(route.spec.hostnames, ["kubimo.org"]);
+        let rule = &route.spec.rules[0];
+        assert_eq!(
+            rule.matches[0].path.as_ref().unwrap().value.as_deref(),
+            Some(identity.base_url.as_str())
+        );
+        assert_eq!(rule.backend_refs[0].name, identity.name);
+        assert_eq!(rule.backend_refs[0].port, Some(80));
+    }
+
+    /// With Ingresses on (the default), the fingerprint is exactly what it
+    /// was before Gateway routing existed, so upgrading the controller does
+    /// not retire the fleet.
+    #[test]
+    fn the_default_fingerprint_is_unchanged() {
+        let config = config();
+        let base = pool(PoolSpec::default());
+        assert_eq!(
+            template_fingerprint(&config, &base),
+            serde_json::json!({
+                "shape": WARM_POD_SHAPE,
+                "image": config.marimo_image,
+                "command": base.spec.command,
+                "pythonRuntime": base.spec.python_runtime.unwrap_or_default(),
+                "logLevel": base.spec.log_level,
+                "cpu": base.spec.cpu,
+                "memory": base.spec.memory,
+                "env": base.spec.env,
+                "sidecars": base.spec.sidecars,
+                "s3SecretName": base.spec.s3_secret_name,
+                "storage": base.spec.storage,
+                "origin": config.runner_hosts.first(),
+                "ingress": {
+                    "className": config.ingress_class_name,
+                    "hosts": config.runner_hosts,
+                    "clusterIssuer": config.cluster_issuer,
+                    "proxyTimeoutSecs": config.runner_proxy_timeout_secs,
+                },
+            })
+        );
+    }
+
+    /// Turning Ingresses off retires pods minted with one; a Gateway alone
+    /// (dual mode, or a different one) changes nothing, and with Ingresses
+    /// off their settings stop mattering.
+    #[test]
+    fn the_template_hash_follows_ingress_enabled_and_ignores_the_gateway() {
+        let base = pool(PoolSpec::default());
+        let hash = |config: &Config| template_hash(config, &base);
+        let default = hash(&config());
+
+        let mut dual = config();
+        dual.gateway = Some(gateway());
+        assert_eq!(hash(&dual), default);
+
+        let mut gateway_only = dual.clone();
+        gateway_only.ingress_enabled = false;
+        assert_ne!(hash(&gateway_only), default);
+
+        let mut other_gateway = gateway_only.clone();
+        other_gateway.gateway = Some(GatewayRef {
+            section_name: None,
+            ..gateway()
+        });
+        other_gateway.ingress_class_name = "traefik".into();
+        other_gateway.cluster_issuer = Some("letsencrypt".into());
+        assert_eq!(hash(&other_gateway), hash(&gateway_only));
     }
 
     /// Sidecars read claim-time config from the per-pod Secret volume; the

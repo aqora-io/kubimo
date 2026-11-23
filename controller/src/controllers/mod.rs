@@ -2,6 +2,7 @@ pub mod budget;
 pub mod cache_job;
 pub mod import_job;
 
+pub(crate) mod http_route;
 pub(crate) mod ingress;
 pub(crate) mod lost_node;
 pub mod pool;

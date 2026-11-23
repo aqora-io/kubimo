@@ -4,9 +4,9 @@
 # anonymous, node-template-seeded slot, under a base-url and token minted at
 # each pod's birth. A Runner naming the pool in `spec.pool` adopts one instead
 # of cold-starting — the agent links the slot to the workspace, hydrates it
-# from S3 and acks. Each warm pod gets its own Service and Ingress when it is
-# minted, but the Service only selects the pod once the controller labels it
-# at the ack. Anything that makes the runner ineligible (different command,
+# from S3 and acks. Each warm pod gets its own Service and routes (an Ingress,
+# an HTTPRoute, or both) when it is minted, but the Service only selects the
+# pod once the controller labels it at the ack. Anything that makes the runner ineligible (different command,
 # runtime, resources, env, sidecars, ingress settings, or S3 secret; or the
 # pool being empty) silently falls back to a cold start. Pool names are at
 # most 54 characters: a warm pod's name adds 9, and its Service is named after

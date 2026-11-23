@@ -36,7 +36,19 @@ marimo:
 #   runnerHosts:
 #     - kubimo.org
 #   clusterIssuer: letsencrypt-prod
+#   # ingress-nginx proxy read/send timeout on runner Ingresses only.
 #   runnerProxyTimeoutSecs: 3600
+#   # Route runners and warm pods with Ingresses (the default). Turning it off
+#   # deletes the Ingresses the controller wrote, so it needs `gateway`.
+#   ingressEnabled: true
+#   # Also route them with Gateway API HTTPRoutes attached to this Gateway.
+#   # With ingressEnabled too, every route exists on both (see "Routing:
+#   # Ingress vs Gateway API" in the README).
+#   gateway:
+#     name: kubimo
+#     namespace: envoy-gateway-system
+#     # Optional: the listener to attach to; unset attaches to all.
+#     sectionName: https
 #   runnerStatus:
 #     resolution:
 #       method: ServiceDns

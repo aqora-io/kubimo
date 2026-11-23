@@ -27,7 +27,7 @@ kubimo-controller.marimoImage, so they cannot drift apart.
 {{- else }}
 {{- $hosts = $controller.runnerHosts }}
 {{- end }}
-{{/* Sorted and deduped like apply_ingress.rs's BTreeSet, so the derived TLS
+{{/* Sorted and deduped like ingress.rs's route_hosts, so the derived TLS
      secret name matches the runner Ingresses'. */}}
 {{- $hosts = $hosts | sortAlpha | uniq }}
 {{- end }}
@@ -155,6 +155,7 @@ spec:
   selector:
     {{- include "kubimo-controller.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: static-assets
+{{- if include "kubimo-controller.ingressEnabled" . }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -176,7 +177,7 @@ spec:
         {{- range $hosts }}
         - {{ . | quote }}
         {{- end }}
-      # Same derivation as the runner Ingresses (apply_ingress.rs), so the
+      # Same derivation as the runner Ingresses (ingress.rs), so the
       # certificate Secret is shared rather than issued a second time.
       {{- $tlsName := "" }}
       {{- range $hosts }}
@@ -208,4 +209,38 @@ spec:
                 port:
                   name: http
   {{- end }}
+{{- end }}
+{{- with $controller.gateway }}
+---
+# The runner HTTPRoutes' twin (http_route.rs): same hosts and Gateway. No
+# timeouts: these are short, cacheable requests.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "kubimo-controller.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: static-assets
+spec:
+  parentRefs:
+    - name: {{ .name | quote }}
+      namespace: {{ .namespace | quote }}
+      {{- if .sectionName }}
+      sectionName: {{ .sectionName | quote }}
+      {{- end }}
+  {{- if $hosts }}
+  hostnames:
+    {{- range $hosts }}
+    - {{ . | quote }}
+    {{- end }}
+  {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ $basePath }}
+      backendRefs:
+        - name: {{ $fullname }}
+          port: 80
+{{- end }}
 {{- end }}

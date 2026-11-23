@@ -119,8 +119,10 @@ impl Reconciler for PoolReconciler {
                 Err(kubimo::kube::Error::Api(status)) if status.code == 409 => {}
                 Err(err) => return Err(err.into()),
             }
-            // The same crash before the route would put an Ingress write,
-            // and an nginx reload, back on the claim path.
+            // The same crash before the route would put a route write (for
+            // an Ingress, an nginx reload) back on the claim path. Never a
+            // delete here: a pod minted under the current template hash was
+            // minted without an Ingress if Ingresses are off.
             warm_pod::ensure_route(ctx, pod).await?;
         }
 
@@ -155,7 +157,7 @@ impl Reconciler for PoolReconciler {
 
     // Cleanup is the default no-op on purpose. Warm and retiring pods carry a
     // controller ownerReference to the Pool, so garbage collection removes
-    // them (and their claim Secrets, Services and Ingresses, owned by the
+    // them (and their claim Secrets, Services and routes, owned by the
     // pods). Claimed pods are deliberately left alone: their ownerReference
     // was swapped to the Runner at claim time, so deleting a Pool never takes
     // down a notebook someone is sitting in.

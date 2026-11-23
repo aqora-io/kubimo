@@ -41,6 +41,11 @@ fn default_runner_proxy_timeout_secs() -> u32 {
     3600
 }
 
+#[inline]
+fn default_ingress_enabled() -> bool {
+    true
+}
+
 #[cfg(feature = "metrics")]
 #[inline]
 fn default_metrics_enabled() -> bool {
@@ -117,6 +122,16 @@ where
     Ok(hosts)
 }
 
+/// The Gateway API `Gateway` every runner `HTTPRoute` attaches to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GatewayRef {
+    pub name: String,
+    pub namespace: String,
+    /// The Gateway listener to attach to; unset attaches to all of them.
+    #[serde(default)]
+    pub section_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_manager_name")]
@@ -137,8 +152,20 @@ pub struct Config {
     pub runner_hosts: Vec<String>,
     #[serde(default)]
     pub cluster_issuer: Option<String>,
+    /// The ingress-nginx proxy read/send timeout written onto runner
+    /// Ingresses. HTTPRoutes don't use it: their request timeout is disabled
+    /// and the Gateway's own traffic policies set the idle timeouts.
     #[serde(default = "default_runner_proxy_timeout_secs")]
     pub runner_proxy_timeout_secs: u32,
+    /// Whether runners and warm pods are routed by an Ingress. Turned off,
+    /// the controller deletes the Ingresses it wrote; that takes a `gateway`.
+    #[serde(default = "default_ingress_enabled")]
+    pub ingress_enabled: bool,
+    /// When set, runners and warm pods are also routed by an `HTTPRoute`
+    /// attached to this Gateway. With `ingress_enabled` too, every route
+    /// exists on both, which is what lets a cutover be a DNS flip.
+    #[serde(default)]
+    pub gateway: Option<GatewayRef>,
     /// Base path of the shared static-asset origin (the chart's
     /// `staticAssets`), e.g. `/marimo-assets`. When set, every runner pod gets
     /// `KUBIMO_ASSET_URL={base}/{image tag}` and marimo serves its frontend
@@ -167,7 +194,30 @@ impl Config {
         config::Config::builder()
             .add_source(Self::environment_source())
             .build()?
-            .try_deserialize()
+            .try_deserialize::<Config>()?
+            .validate()
+    }
+
+    fn validate(self) -> Result<Config, config::ConfigError> {
+        match &self.gateway {
+            Some(gateway)
+                if gateway.name.is_empty()
+                    || gateway.namespace.is_empty()
+                    || gateway.section_name.as_deref() == Some("") =>
+            {
+                Err(config::ConfigError::Message(
+                    "gateway name, namespace and section_name must not be empty".into(),
+                ))
+            }
+            // Every reconcile would delete the runner's Ingress and write
+            // nothing in its place.
+            None if !self.ingress_enabled => Err(config::ConfigError::Message(
+                "ingress_enabled=false needs a gateway (KUBIMO__GATEWAY__NAME and \
+                 KUBIMO__GATEWAY__NAMESPACE), or no runner would be routed"
+                    .into(),
+            )),
+            _ => Ok(self),
+        }
     }
 
     /// The shared asset URL for pods of `image`, when
@@ -222,7 +272,8 @@ mod tests {
         config::Config::builder()
             .add_source(source)
             .build()?
-            .try_deserialize()
+            .try_deserialize::<Config>()?
+            .validate()
     }
 
     /// The conda image is gone, but a deployment that still sets its variable
@@ -288,5 +339,60 @@ mod tests {
             Some("/marimo-assets/latest"),
             "a registry port is not a tag"
         );
+    }
+
+    /// Unset, routing is what it always was: Ingress only.
+    #[test]
+    fn routing_defaults_to_ingress_only() {
+        let config = load_from(&[]).unwrap();
+        assert!(config.ingress_enabled);
+        assert_eq!(config.gateway, None);
+    }
+
+    #[test]
+    fn gateway_and_ingress_switch_parse_from_env() {
+        let config = load_from(&[
+            ("KUBIMO__INGRESS_ENABLED", "false"),
+            ("KUBIMO__GATEWAY__NAME", "kubimo"),
+            ("KUBIMO__GATEWAY__NAMESPACE", "envoy-gateway-system"),
+            ("KUBIMO__GATEWAY__SECTION_NAME", "https"),
+        ])
+        .unwrap();
+        assert!(!config.ingress_enabled);
+        assert_eq!(
+            config.gateway,
+            Some(GatewayRef {
+                name: "kubimo".into(),
+                namespace: "envoy-gateway-system".into(),
+                section_name: Some("https".into()),
+            })
+        );
+
+        let config = load_from(&[
+            ("KUBIMO__GATEWAY__NAME", "kubimo"),
+            ("KUBIMO__GATEWAY__NAMESPACE", "envoy-gateway-system"),
+        ])
+        .unwrap();
+        assert!(config.ingress_enabled, "dual mode");
+        assert_eq!(config.gateway.unwrap().section_name, None);
+    }
+
+    /// Ingress off with nothing in its place would unroute every runner.
+    #[test]
+    fn ingress_off_needs_a_gateway() {
+        let err = load_from(&[("KUBIMO__INGRESS_ENABLED", "false")]).unwrap_err();
+        assert!(err.to_string().contains("needs a gateway"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_gateway_reference_is_rejected() {
+        for (name, namespace) in [("", "envoy-gateway-system"), ("kubimo", "")] {
+            let err = load_from(&[
+                ("KUBIMO__GATEWAY__NAME", name),
+                ("KUBIMO__GATEWAY__NAMESPACE", namespace),
+            ])
+            .unwrap_err();
+            assert!(err.to_string().contains("must not be empty"), "{err}");
+        }
     }
 }

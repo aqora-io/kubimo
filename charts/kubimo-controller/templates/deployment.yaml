@@ -1,3 +1,4 @@
+{{- include "kubimo-controller.validateRouting" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -100,6 +101,20 @@ spec:
             {{- if .runnerProxyTimeoutSecs }}
             - name: KUBIMO__RUNNER_PROXY_TIMEOUT_SECS
               value: {{ .runnerProxyTimeoutSecs | quote }}
+            {{- end }}
+            {{- if not (include "kubimo-controller.ingressEnabled" $) }}
+            - name: KUBIMO__INGRESS_ENABLED
+              value: "false"
+            {{- end }}
+            {{- with .gateway }}
+            - name: KUBIMO__GATEWAY__NAME
+              value: {{ .name | quote }}
+            - name: KUBIMO__GATEWAY__NAMESPACE
+              value: {{ .namespace | quote }}
+            {{- if .sectionName }}
+            - name: KUBIMO__GATEWAY__SECTION_NAME
+              value: {{ .sectionName | quote }}
+            {{- end }}
             {{- end }}
             {{- with .runnerStatus }}
             {{- with .resolution }}

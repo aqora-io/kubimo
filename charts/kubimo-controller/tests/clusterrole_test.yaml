@@ -1,0 +1,19 @@
+suite: clusterrole
+templates:
+  - clusterrole.yaml
+
+tests:
+  - it: should let the controller write HTTPRoutes and still delete Ingresses
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["gateway.networking.k8s.io"]
+            resources: ["httproutes"]
+            verbs: ["*"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["networking.k8s.io"]
+            resources: ["ingresses"]
+            verbs: ["*"]
