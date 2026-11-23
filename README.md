@@ -12,7 +12,10 @@ To run the controller first setup your environment. Example .envrc:
 ```bash
 export RUST_LOG=info
 export KUBIMO__RUNNER_STATUS__RESOLUTION__METHOD="Ingress"
-export KUBIMO__RUNNER_STATUS__RESOLUTION__HOST="http://$(minikube ip)"
+export KUBIMO__RUNNER_STATUS__RESOLUTION__HOST="http://$(minikube ip):31439"
+export KUBIMO__INGRESS_ENABLED=false                  # route runners with Gateway API only
+export KUBIMO__GATEWAY__NAME=kubimo                   # the Gateway setup-minikube.sh creates
+export KUBIMO__GATEWAY__NAMESPACE=envoy-gateway-system
 export BUILDX_BAKE_FILE="docker-bake.hcl:docker-bake.dev.hcl"
 export KUBIMO__MARIMO_IMAGE="ghcr.io/aqora-io/kubimo-marimo:dev"
 export KUBIMO__AGENT_IMAGE="ghcr.io/aqora-io/kubimo-agent:dev"
@@ -21,7 +24,7 @@ export KUBIMO__AGENT_IMAGE="ghcr.io/aqora-io/kubimo-agent:dev"
 Then setup minikube
 
 ```bash
-sh scripts/setup-minikube-dev.sh # setup minikube
+scripts/setup-minikube-dev # setup minikube, Envoy Gateway, MinIO and the node agent
 docker buildx bake marimo agent # build marimo and agent images
 minikube image load ghcr.io/aqora-io/kubimo-marimo:dev # load images into minikube
 minikube image load ghcr.io/aqora-io/kubimo-agent:dev
@@ -40,7 +43,7 @@ To create an example runner run
 kubectl apply -f examples/basic.yaml
 ```
 
-You should be able to access it soon with `$(minikube ip)/editor`
+You should be able to access it soon with `$(minikube ip):31439/workspace/edit`
 
 ## Routing: Ingress vs Gateway API
 
@@ -57,7 +60,8 @@ controller routes it with an Ingress, a Gateway API `HTTPRoute`, or both:
 The controller reads them as `KUBIMO__INGRESS_ENABLED` and
 `KUBIMO__GATEWAY__NAME`, `__NAMESPACE` and `__SECTION_NAME` (the listener to
 attach to; unset attaches to all of them). The Gateway, its GatewayClass and
-the Gateway API CRDs are not part of this chart.
+the Gateway API CRDs are not part of this chart; `scripts/setup-minikube.sh`
+installs Envoy Gateway for local development.
 
 An HTTPRoute mirrors the Ingress: same name, owner, hosts (`runnerHosts` plus a
 runner's `spec.ingress.tls.hosts`) and path prefix, to the same Service. Its

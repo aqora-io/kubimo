@@ -29,21 +29,24 @@ From the README — set up the environment (example `.envrc`):
 ```bash
 export RUST_LOG=info
 export KUBIMO__RUNNER_STATUS__RESOLUTION__METHOD="Ingress"
-export KUBIMO__RUNNER_STATUS__RESOLUTION__HOST="http://$(minikube ip)"
+export KUBIMO__RUNNER_STATUS__RESOLUTION__HOST="http://$(minikube ip):31439"
+export KUBIMO__INGRESS_ENABLED=false                  # route runners with Gateway API only
+export KUBIMO__GATEWAY__NAME=kubimo                   # the Gateway setup-minikube.sh creates
+export KUBIMO__GATEWAY__NAMESPACE=envoy-gateway-system
 export BUILDX_BAKE_FILE="docker-bake.hcl:docker-bake.dev.hcl"
 export KUBIMO__MARIMO_IMAGE="ghcr.io/aqora-io/kubimo-marimo:dev"
 export KUBIMO__AGENT_IMAGE="ghcr.io/aqora-io/kubimo-agent:dev"   # ImportJob fetch step
 ```
 
 ```bash
-sh scripts/setup-minikube-dev                              # minikube + ingress addon + MinIO + node agent
+scripts/setup-minikube-dev                                 # minikube + Envoy Gateway + MinIO + node agent
 docker buildx bake marimo agent                            # build marimo + agent images (:dev tag via bake.dev file)
 minikube image load ghcr.io/aqora-io/kubimo-marimo:dev
 minikube image load ghcr.io/aqora-io/kubimo-agent:dev
 cargo run -p kubimo --example apply_crds                   # apply CRDs to the cluster
 cargo run                                                  # run controller
 kubectl apply -f examples/basic.yaml                       # create example Workspace + Runners
-# then visit $(minikube ip)/editor
+# then visit $(minikube ip):31439/workspace/edit
 ```
 
 CRD schema changes require re-running `apply_crds` against the cluster.
