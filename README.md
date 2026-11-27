@@ -70,7 +70,13 @@ traffic policies: give streams at least the idle time `runnerProxyTimeoutSecs`
 gives ingress-nginx, or a kernel websocket that is silent while a cell runs is
 cut. `spec.ingress.className`, `tls.clusterIssuer` and `tls.secretName` only
 shape the Ingress (the Gateway's listeners own TLS); `tls.hosts` adds hostnames
-to both.
+to both. The request timeout needs the Gateway API CRDs at v1.2 or later
+(standard channel): older ones have no `timeouts` field, and the API server
+rejects every HTTPRoute the controller applies.
+
+Unsetting `controller.gateway` stops new HTTPRoutes but does not delete the
+ones already written: they stay attached to the Gateway until their runner or
+warm pod goes. Remove the Gateway too, or delete them.
 
 To move a cluster from ingress-nginx to a Gateway:
 

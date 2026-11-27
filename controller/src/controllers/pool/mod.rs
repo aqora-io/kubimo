@@ -102,6 +102,10 @@ impl Reconciler for PoolReconciler {
             pods.delete_opt(pod.name()?).await?;
         }
 
+        // A route error is kept, not returned, until the pass is done: one
+        // pod's failing HTTPRoute must not stop the pool from refilling.
+        let mut route_error = None;
+
         // A crash between pod- and Secret-create leaves a warm pod whose
         // sidecars wait on a mount that will never appear; recreate it.
         // A bare create, not get-then-apply: a claim may copy sidecar data
@@ -123,7 +127,10 @@ impl Reconciler for PoolReconciler {
             // an Ingress, an nginx reload) back on the claim path. Never a
             // delete here: a pod minted under the current template hash was
             // minted without an Ingress if Ingresses are off.
-            warm_pod::ensure_route(ctx, pod).await?;
+            if let Err(err) = warm_pod::ensure_route(ctx, pod).await {
+                tracing::warn!(pod = pod.name()?, error = %err, "could not route warm pod");
+                route_error.get_or_insert(err);
+            }
         }
 
         let deficit = (pool.spec.replicas as usize).saturating_sub(kept.len());
@@ -137,7 +144,10 @@ impl Reconciler for PoolReconciler {
                 .patch(&warm_pod::build_warm_pod(&ctx.config, pool, &identity)?)
                 .await?;
             secrets.patch(&warm_pod::claim_secret(&created)?).await?;
-            warm_pod::ensure_route(ctx, &created).await?;
+            if let Err(err) = warm_pod::ensure_route(ctx, &created).await {
+                tracing::warn!(pod = created.name()?, error = %err, "could not route warm pod");
+                route_error.get_or_insert(err);
+            }
         }
 
         let mut patched = pool.clone();
@@ -152,6 +162,9 @@ impl Reconciler for PoolReconciler {
             .patch_status(&patched)
             .await?;
 
+        if let Some(err) = route_error {
+            return Err(err);
+        }
         Ok(Action::requeue(REFRESH_INTERVAL))
     }
 
