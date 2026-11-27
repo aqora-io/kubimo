@@ -311,6 +311,7 @@ pub(crate) fn route_http_route(config: &Config, pod: &Pod) -> kubimo::Result<Opt
 /// webhook tests the whole nginx config on every Ingress write, no-op or not.
 /// The HTTPRoute is applied every time instead: no webhook guards it, a no-op
 /// apply writes nothing, and it converges when the Gateway config changes.
+/// Both route kinds are attempted even if the other fails.
 pub(crate) async fn ensure_route(ctx: &Context, pod: &Pod) -> kubimo::Result<()> {
     let namespace = pod.require_namespace()?;
     let name = require_route_name(pod)?;
@@ -319,18 +320,25 @@ pub(crate) async fn ensure_route(ctx: &Context, pod: &Pod) -> kubimo::Result<()>
     if services.get_opt(name).await?.is_none() {
         services.patch(&route_service(pod)?).await?;
     }
-    if ctx.config.ingress_enabled {
-        let ingresses = ctx.api_namespaced::<Ingress>(namespace);
-        if ingresses.get_opt(name).await?.is_none() {
-            ingresses.patch(&route_ingress(&ctx.config, pod)?).await?;
+    let ingress = async {
+        if ctx.config.ingress_enabled {
+            let ingresses = ctx.api_namespaced::<Ingress>(namespace);
+            if ingresses.get_opt(name).await?.is_none() {
+                ingresses.patch(&route_ingress(&ctx.config, pod)?).await?;
+            }
         }
-    }
-    if let Some(route) = route_http_route(&ctx.config, pod)? {
-        ctx.api_namespaced::<HTTPRoute>(namespace)
-            .patch(&route)
-            .await?;
-    }
-    Ok(())
+        Ok(())
+    };
+    let http_route = async {
+        if let Some(route) = route_http_route(&ctx.config, pod)? {
+            ctx.api_namespaced::<HTTPRoute>(namespace)
+                .patch(&route)
+                .await?;
+        }
+        Ok(())
+    };
+    let (ingress, http_route) = futures::join!(ingress, http_route);
+    ingress.and(http_route)
 }
 
 /// Delete the pod's Ingress once Ingresses are off. Only a pod claimed before

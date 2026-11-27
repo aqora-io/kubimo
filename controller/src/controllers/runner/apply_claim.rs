@@ -275,15 +275,21 @@ impl RunnerReconciler {
     /// Route an acked pod through the Service and routes minted with it:
     /// make sure they exist (the claim may have beaten the pool to them) and
     /// that an Ingress from before Ingresses were turned off is gone, then
-    /// give the pod the label its Service selects.
+    /// give the pod the label its Service selects. The label goes on even if
+    /// a route write failed: a route that is already up (in dual mode, the
+    /// Ingress beside a failing HTTPRoute) must not wait on it. The Ingress is
+    /// only pruned once the routes replacing it are in place.
     pub(crate) async fn route_claimed_pod(
         &self,
         ctx: &Context,
         pod: &Pod,
         route: &str,
     ) -> Result<(), kubimo::Error> {
-        crate::controllers::pool::warm_pod::ensure_route(ctx, pod).await?;
-        crate::controllers::pool::warm_pod::prune_route_ingress(ctx, pod).await?;
+        let routed = async {
+            crate::controllers::pool::warm_pod::ensure_route(ctx, pod).await?;
+            crate::controllers::pool::warm_pod::prune_route_ingress(ctx, pod).await
+        }
+        .await;
         let labelled = pod
             .metadata
             .labels
@@ -298,7 +304,7 @@ impl RunnerReconciler {
                 )
                 .await?;
         }
-        Ok(())
+        routed
     }
 
     /// Drop a recorded claim whose pod is gone, returning whether one was

@@ -1,5 +1,7 @@
 #!/usr/bin/env sh
 
+set -e
+
 minikube start --container-runtime=containerd \
   --network=minikube \
   --docker-opt containerd=/var/run/containerd/containerd.sock \

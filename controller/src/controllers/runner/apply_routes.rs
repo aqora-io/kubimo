@@ -9,9 +9,11 @@ use super::RunnerReconciler;
 
 impl RunnerReconciler {
     /// Converge the runner's routes: its Ingress (applied, or deleted once
-    /// Ingresses are off) and, with a Gateway configured, its HTTPRoute. Both
-    /// are attempted even if the other fails, so a cluster missing the Gateway
-    /// API CRDs still keeps its Ingresses up to date.
+    /// Ingresses are off) and, with a Gateway configured, its HTTPRoute. With
+    /// Ingresses on, both are attempted even if the other fails, so a cluster
+    /// missing the Gateway API CRDs still keeps its Ingresses up to date. With
+    /// them off, the Ingress is deleted only once the HTTPRoute replacing it
+    /// is applied, so a failing HTTPRoute leaves the runner its old route.
     pub(crate) async fn apply_routes(
         &self,
         ctx: &Context,
@@ -27,6 +29,10 @@ impl RunnerReconciler {
             port: runner_port(runner),
             ingress: runner.spec.ingress.as_ref(),
         };
+        if !ctx.config.ingress_enabled {
+            apply_http_route(ctx, namespace, &params).await?;
+            return apply_or_delete_ingress(ctx, namespace, &params).await;
+        }
         let (ingress, http_route) = futures::join!(
             apply_or_delete_ingress(ctx, namespace, &params),
             apply_http_route(ctx, namespace, &params),
