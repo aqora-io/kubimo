@@ -28,7 +28,7 @@ FROM pixi-${TARGETARCH} AS pixi-release
 # marimo source, in a stage of its own so a local checkout can replace it:
 # docker buildx bake marimo --allow=fs.read=<dir> --set marimo.contexts.marimo-src=<dir>
 FROM scratch AS marimo-src
-ARG MARIMO_GIT=https://github.com/aqora-io/marimo.git#58dcc1d36ce44e431659805a0fe4127f1744ebba
+ARG MARIMO_GIT=https://github.com/aqora-io/marimo.git#e1a4b9c7d9f9e66dc86fce62e97f9e26489ce91c
 ADD ${MARIMO_GIT} /
 
 # build marimo
